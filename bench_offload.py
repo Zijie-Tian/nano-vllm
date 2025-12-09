@@ -5,7 +5,7 @@ from nanovllm import LLM, SamplingParams
 
 
 def bench_decode(llm, num_seqs, max_input_len, max_output_len):
-    """Benchmark decode performance (original test)"""
+    """Benchmark decode performance"""
     seed(0)
     prompt_token_ids = [[randint(0, 10000) for _ in range(randint(100, max_input_len))] for _ in range(num_seqs)]
     sampling_params = [SamplingParams(temperature=0.6, ignore_eos=True, max_tokens=randint(100, max_output_len)) for _ in range(num_seqs)]
@@ -21,7 +21,6 @@ def bench_decode(llm, num_seqs, max_input_len, max_output_len):
 def bench_prefill(llm, num_seqs, input_len):
     """Benchmark prefill performance"""
     seed(0)
-    # Fixed length input, minimal output to focus on prefill
     prompt_token_ids = [[randint(0, 10000) for _ in range(input_len)] for _ in range(num_seqs)]
     sampling_params = SamplingParams(temperature=0.6, ignore_eos=True, max_tokens=1)
 
@@ -35,25 +34,30 @@ def bench_prefill(llm, num_seqs, input_len):
 
 def main():
     path = os.path.expanduser("~/models/Qwen3-4B-Instruct-2507/")
-    llm = LLM(path, enforce_eager=False, max_model_len=4096)
+    llm = LLM(
+        path,
+        enforce_eager=True,
+        max_model_len=128 * 1024,
+        max_num_batched_tokens=128 * 1024,
+        enable_cpu_offload=True,
+        cpu_memory_gb=32.0,
+    )
 
     # Warmup
     llm.generate(["Benchmark: "], SamplingParams())
 
     print("=" * 60)
-    print("Prefill Benchmark")
+    print("Prefill Benchmark (CPU Offload)")
     print("=" * 60)
-    bench_prefill(llm, num_seqs=1, input_len=1024)
-    # bench_prefill(llm, num_seqs=1, input_len=2048)
-    # bench_prefill(llm, num_seqs=1, input_len=4095)
-    # bench_prefill(llm, num_seqs=16, input_len=1024)
-    # bench_prefill(llm, num_seqs=64, input_len=1024)
+    bench_prefill(llm, num_seqs=1, input_len=64*1024)
+    # bench_prefill(llm, num_seqs=1, input_len=16384)
+    # bench_prefill(llm, num_seqs=1, input_len=32000)
 
     print("=" * 60)
-    print("Decode Benchmark")
+    print("Decode Benchmark (CPU Offload)")
     print("=" * 60)
-    bench_decode(llm, num_seqs=1, max_input_len=1024, max_output_len=1024)
-    # bench_decode(llm, num_seqs=256, max_input_len=1024, max_output_len=1024)
+    bench_decode(llm, num_seqs=1, max_input_len=64*1024, max_output_len=256)
+    # bench_decode(llm, num_seqs=1, max_input_len=16384, max_output_len=256)
 
 
 if __name__ == "__main__":

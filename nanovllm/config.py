@@ -17,6 +17,16 @@ class Config:
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1
 
+    # CPU Offload configuration
+    enable_cpu_offload: bool = False
+    cpu_memory_gb: float = 16.0  # CPU memory limit for KV cache
+    offload_policy: str = "lru"  # "lru", "fifo", or full class path
+    num_transfer_streams: int = 4  # Number of CUDA streams for async transfers
+
+    # Computed fields for offload (set in __post_init__ or by ModelRunner)
+    num_gpu_kvcache_blocks: int = -1
+    num_cpu_kvcache_blocks: int = -1
+
     def __post_init__(self):
         assert os.path.isdir(self.model)
         assert self.kvcache_block_size % 256 == 0
