@@ -1,7 +1,8 @@
 import os
+os.environ["VLLM_USE_V1"] = "1"
 import time
 from random import randint, seed
-from nanovllm import LLM, SamplingParams
+from vllm import LLM, SamplingParams
 
 
 def bench_decode(llm, num_seqs, max_input_len, max_output_len):
@@ -9,6 +10,7 @@ def bench_decode(llm, num_seqs, max_input_len, max_output_len):
     seed(0)
     prompt_token_ids = [[randint(0, 10000) for _ in range(randint(100, max_input_len))] for _ in range(num_seqs)]
     sampling_params = [SamplingParams(temperature=0.6, ignore_eos=True, max_tokens=randint(100, max_output_len)) for _ in range(num_seqs)]
+    prompt_token_ids = [dict(prompt_token_ids=p) for p in prompt_token_ids]
 
     t = time.time()
     llm.generate(prompt_token_ids, sampling_params, use_tqdm=False)
@@ -24,6 +26,7 @@ def bench_prefill(llm, num_seqs, input_len):
     # Fixed length input, minimal output to focus on prefill
     prompt_token_ids = [[randint(0, 10000) for _ in range(input_len)] for _ in range(num_seqs)]
     sampling_params = SamplingParams(temperature=0.6, ignore_eos=True, max_tokens=1)
+    prompt_token_ids = [dict(prompt_token_ids=p) for p in prompt_token_ids]
 
     t = time.time()
     llm.generate(prompt_token_ids, sampling_params, use_tqdm=False)
@@ -35,10 +38,10 @@ def bench_prefill(llm, num_seqs, input_len):
 
 def main():
     path = os.path.expanduser("~/models/Qwen3-4B-Instruct-2507/")
-    llm = LLM(path, enforce_eager=False, max_model_len=4096)
+    llm = LLM(path, enforce_eager=False, max_model_len=4096, max_num_seqs=128, gpu_memory_utilization=0.9)
 
     # Warmup
-    llm.generate(["Benchmark: "], SamplingParams())
+    llm.generate([dict(prompt_token_ids=[0])], SamplingParams())
 
     print("=" * 60)
     print("Prefill Benchmark")
