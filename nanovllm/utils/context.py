@@ -27,8 +27,11 @@ class Context:
     prev_kv_chunks: List[Tuple[torch.Tensor, torch.Tensor]] = field(default_factory=list)
     # Current sequence being processed (for chunked prefill to load KV)
     chunked_seq: Any = None
-    # Position within block for decode (used for reading from Decode区)
+    # Position within block for decode (used for reading from Decode region)
     decode_pos_in_block: int = 0
+    # Starting position within block where decode tokens began (for accumulated token tracking)
+    # Used when batching decode offloads - we need to attend to all accumulated tokens
+    decode_start_pos_in_block: int = 0
 
 
 _CONTEXT = Context()
@@ -53,6 +56,7 @@ def set_context(
     offload_engine=None,
     chunked_seq=None,
     decode_pos_in_block=0,
+    decode_start_pos_in_block=0,
 ):
     global _CONTEXT
     _CONTEXT = Context(
@@ -70,6 +74,7 @@ def set_context(
         offload_engine=offload_engine,
         chunked_seq=chunked_seq,
         decode_pos_in_block=decode_pos_in_block,
+        decode_start_pos_in_block=decode_start_pos_in_block,
     )
 
 

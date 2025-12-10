@@ -66,7 +66,7 @@ Attention mechanisms allow models to focus on relevant parts of the input.
     return "".join(prompt_parts)
 
 
-def test_chunked_prefill(num_gpu_blocks=10, input_len=8192, output_len=64):
+def test_chunked_prefill(num_gpu_blocks=10, input_len=8192, output_len=64, num_prefetch_blocks=2):
     """Test chunked prefill with limited GPU blocks."""
     path = os.path.expanduser("~/models/Qwen3-4B-Instruct-2507/")
 
@@ -75,15 +75,17 @@ def test_chunked_prefill(num_gpu_blocks=10, input_len=8192, output_len=64):
     print(f"=" * 60)
     print(f"  target_input_len: ~{input_len} tokens")
     print(f"  num_gpu_blocks: {num_gpu_blocks}")
+    print(f"  num_prefetch_blocks: {num_prefetch_blocks}")
     print()
 
     llm = LLM(
         path,
         enforce_eager=False,
-        max_model_len=16 * 1024,
-        max_num_batched_tokens=16 * 1024,
+        max_model_len=128 * 1024,
+        max_num_batched_tokens=128 * 1024,
         enable_cpu_offload=True,
         num_gpu_blocks=num_gpu_blocks,
+        num_prefetch_blocks=num_prefetch_blocks,
     )
     print()
 
@@ -104,7 +106,7 @@ def test_chunked_prefill(num_gpu_blocks=10, input_len=8192, output_len=64):
     return outputs
 
 
-def test_chunked_decode(num_gpu_blocks=10, input_len=8192, output_len=128):
+def test_chunked_decode(num_gpu_blocks=10, input_len=8192, output_len=128, num_prefetch_blocks=2):
     """Test chunked decode with limited GPU blocks."""
     path = os.path.expanduser("~/models/Qwen3-4B-Instruct-2507/")
 
@@ -114,15 +116,17 @@ def test_chunked_decode(num_gpu_blocks=10, input_len=8192, output_len=128):
     print(f"  target_input_len: ~{input_len} tokens")
     print(f"  output_len: {output_len} tokens")
     print(f"  num_gpu_blocks: {num_gpu_blocks}")
+    print(f"  num_prefetch_blocks: {num_prefetch_blocks}")
     print()
 
     llm = LLM(
         path,
         enforce_eager=False,
-        max_model_len=16 * 1024,
-        max_num_batched_tokens=16 * 1024,
+        max_model_len=128 * 1024,
+        max_num_batched_tokens=128 * 1024,
         enable_cpu_offload=True,
         num_gpu_blocks=num_gpu_blocks,
+        num_prefetch_blocks=num_prefetch_blocks,
     )
     print()
 
@@ -144,9 +148,10 @@ def test_chunked_decode(num_gpu_blocks=10, input_len=8192, output_len=128):
 
 
 if __name__ == "__main__":
-    # Parse arguments
+    # Parse arguments: num_gpu_blocks input_len output_len [num_prefetch_blocks]
     num_gpu_blocks = int(sys.argv[1]) if len(sys.argv) > 1 else 10
     input_len = int(sys.argv[2]) if len(sys.argv) > 2 else 2048
     output_len = int(sys.argv[3]) if len(sys.argv) > 3 else 64
+    num_prefetch_blocks = int(sys.argv[4]) if len(sys.argv) > 4 else 2
 
-    test_chunked_prefill(num_gpu_blocks, input_len, output_len)
+    test_chunked_prefill(num_gpu_blocks, input_len, output_len, num_prefetch_blocks)

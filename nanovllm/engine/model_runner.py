@@ -123,9 +123,9 @@ class ModelRunner:
             num_gpu_blocks = max_gpu_blocks
 
         if config.enable_cpu_offload:
-            # Ping-Pong设计：CPU是主存储，GPU是工作缓冲区
-            # CPU blocks = 支持max_model_len所需的全部blocks（存储一个最大序列的完整KV）
-            # GPU blocks = Ping-Pong工作缓冲区（用户指定或自动）
+            # Three-region design: CPU is primary storage, GPU is working buffer
+            # CPU blocks = all blocks needed to support max_model_len (stores complete KV for one max sequence)
+            # GPU blocks = three-region working buffer (user-specified or auto)
             num_cpu_blocks = (config.max_model_len + self.block_size - 1) // self.block_size
 
             config.num_gpu_kvcache_blocks = num_gpu_blocks
@@ -412,12 +412,12 @@ class ModelRunner:
 
     def _should_use_pingpong(self, seqs: list[Sequence], is_prefill: bool) -> bool:
         """
-        Check if 三区域 mode should be used.
+        Check if three-region mode should be used.
 
-        Use 三区域 when:
+        Use three-region when:
         - CPU offload is enabled
         - There are blocks on CPU (either allocated there or offloaded)
-        - Sequence exceeds GPU Compute区 capacity
+        - Sequence exceeds GPU Compute region capacity
         """
         if not hasattr(self.kvcache_manager, 'offload_engine'):
             return False
@@ -429,10 +429,10 @@ class ModelRunner:
             # Check if any blocks are on CPU
             cpu_blocks, _ = self.kvcache_manager.get_all_cpu_blocks(seq)
             if cpu_blocks:
-                # Has CPU blocks - use 三区域
+                # Has CPU blocks - use three-region
                 return True
 
-            # Check if sequence needs more blocks than GPU Compute区 can hold
+            # Check if sequence needs more blocks than GPU Compute region can hold
             compute_size = self.kvcache_manager.offload_engine.num_compute_blocks
             if seq.num_blocks > compute_size:
                 # Needs chunked processing
@@ -630,17 +630,17 @@ class ModelRunner:
 
     def run_pingpong_prefill(self, seqs: list[Sequence]) -> list[int]:
         """
-        Run prefill with 三区域 GPU buffer (CPU is primary storage).
+        Run prefill with three-region GPU buffer (CPU is primary storage).
 
         Flow:
         1. All blocks are allocated to CPU (primary storage)
-        2. Process tokens in chunks using Compute区 GPU buffer
-        3. After each chunk, offload from Compute区 to CPU
-        4. Prefetch区 用于加载 previous KV（如果有的话）
+        2. Process tokens in chunks using Compute region GPU buffer
+        3. After each chunk, offload from Compute region to CPU
+        4. Prefetch region is used to load previous KV (if any)
         """
         import sys
 
-        assert len(seqs) == 1, "三区域 prefill only supports single sequence"
+        assert len(seqs) == 1, "Three-region prefill only supports single sequence"
         seq = seqs[0]
 
         offload_engine = self.kvcache_manager.offload_engine
@@ -648,7 +648,7 @@ class ModelRunner:
         tokens_per_chunk = compute_size * self.block_size
 
         total_tokens = len(seq)
-        print(f"[三区域 Prefill] Starting: {total_tokens} tokens, "
+        print(f"[Three-region Prefill] Starting: {total_tokens} tokens, "
               f"compute_size={compute_size} blocks, chunk={tokens_per_chunk} tokens",
               file=sys.stderr)
 
@@ -670,12 +670,12 @@ class ModelRunner:
             end_block_idx = (chunk_end + self.block_size - 1) // self.block_size
             num_blocks = end_block_idx - start_block_idx
 
-            print(f"[三区域 Prefill] Chunk {chunk_num}: tokens {chunk_start}-{chunk_end}, "
+            print(f"[Three-region Prefill] Chunk {chunk_num}: tokens {chunk_start}-{chunk_end}, "
                   f"blocks {start_block_idx}-{end_block_idx-1}, "
                   f"compute_slots={offload_engine.compute_slots[:num_blocks]}",
                   file=sys.stderr)
 
-            # Get GPU slots for this chunk (使用 Compute区)
+            # Get GPU slots for this chunk (using Compute region)
             gpu_slots = offload_engine.compute_slots[:num_blocks]
 
             # Prepare inputs
@@ -695,7 +695,7 @@ class ModelRunner:
                 logical_id = seq.block_table[i]
                 self.kvcache_manager.prefilled_blocks.add(logical_id)
 
-            # Offload this chunk from Compute区 to CPU (async)
+            # Offload this chunk from Compute region to CPU (async)
             chunk_cpu_blocks = cpu_block_ids[start_block_idx:end_block_idx]
             offload_engine.offload_compute_to_cpu(chunk_cpu_blocks)
 
@@ -707,7 +707,7 @@ class ModelRunner:
         # Wait for all offloads to complete
         offload_engine.wait_all_offload_done()
 
-        print(f"[三区域 Prefill] Complete: {chunk_num} chunks", file=sys.stderr)
+        print(f"[Three-region Prefill] Complete: {chunk_num} chunks", file=sys.stderr)
 
         # Sample from last logits
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
@@ -776,14 +776,15 @@ class ModelRunner:
 
     def run_pingpong_decode(self, seqs: list[Sequence]) -> list[int]:
         """
-        Run decode with 三区域 GPU buffer.
+        Run decode with three-region GPU buffer.
 
-        All KV is on CPU. Uses Decode区 to write new KV, Compute/Prefetch区 to load KV chunks.
-        New token's KV is written to Decode区 (slot 0) then offloaded to CPU.
+        All KV is on CPU. Uses Decode region to write new KV, Compute/Prefetch region to load KV chunks.
+        New token's KV is written to Decode region (slot 0) then offloaded to CPU only when block is full.
 
-        关键：Decode区 永远不会被 Compute/Prefetch 覆盖，专门用于写入新KV。
+        Key: Decode region is never overwritten by Compute/Prefetch, dedicated to writing new KV.
+        Optimization: Batch offloads - only offload when block is full, attend to all accumulated tokens.
         """
-        assert len(seqs) == 1, "三区域 decode only supports single sequence"
+        assert len(seqs) == 1, "Three-region decode only supports single sequence"
         seq = seqs[0]
 
         offload_engine = self.kvcache_manager.offload_engine
@@ -792,12 +793,15 @@ class ModelRunner:
         input_ids = torch.tensor([seq.last_token], dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor([len(seq) - 1], dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
 
-        # 使用 Decode区 (slot 0) 写入新 KV
+        # Use Decode region (slot 0) to write new KV
         decode_slot = offload_engine.decode_slot  # = 0
         pos_in_block = (len(seq) - 1) % self.block_size
         slot = decode_slot * self.block_size + pos_in_block
         slot_mapping = torch.tensor([slot], dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         context_len = torch.tensor([len(seq)], dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+
+        # Get decode start position for accumulated token tracking
+        decode_start_pos = self.kvcache_manager.get_decode_start_pos(seq)
 
         # Set up context for chunked decode
         set_context(
@@ -808,17 +812,22 @@ class ModelRunner:
             offload_engine=self.kvcache_manager,
             chunked_seq=seq,
             decode_pos_in_block=pos_in_block,
+            decode_start_pos_in_block=decode_start_pos,
         )
 
         # Run model forward pass
         logits = self.run_model(input_ids, positions, is_prefill=False)
         reset_context()
 
-        # Offload new KV from Decode区 to CPU
-        last_cpu_block = self.kvcache_manager.get_last_cpu_block(seq)
-        if last_cpu_block >= 0:
-            offload_engine.offload_decode_slot(last_cpu_block)
-            offload_engine.wait_all_offload_done()
+        # Only offload when block is full (pos_in_block == block_size - 1)
+        # This avoids unnecessary offloading on every decode step
+        if pos_in_block == self.block_size - 1:
+            last_cpu_block = self.kvcache_manager.get_last_cpu_block(seq)
+            if last_cpu_block >= 0:
+                offload_engine.offload_decode_slot(last_cpu_block)
+                offload_engine.wait_all_offload_done()
+            # Reset decode start position for next block
+            self.kvcache_manager.reset_decode_start_pos(seq)
 
         # Sample
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None

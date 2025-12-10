@@ -95,16 +95,16 @@ class HybridKVCacheManager(KVCacheManager):
             num_cpu_blocks: Number of CPU pool blocks (overflow or primary storage)
             block_size: Tokens per block
             policy: Eviction policy (default: LRU)
-            cpu_primary: If True, use CPU as primary storage with 三区域 GPU buffer.
+            cpu_primary: If True, use CPU as primary storage with three-region GPU buffer.
                         If False, use GPU as primary with CPU as overflow (legacy mode).
-            num_prefetch_blocks: Number of prefetch blocks for 三区域 GPU buffer design
+            num_prefetch_blocks: Number of prefetch blocks for three-region GPU buffer design
         """
         self._block_size = block_size
         self.num_gpu_slots = num_gpu_slots
         self.num_cpu_blocks = num_cpu_blocks
         self.total_blocks = num_gpu_slots + num_cpu_blocks
-        self.cpu_primary = cpu_primary  # 三区域 mode flag
-        self.num_prefetch_blocks = num_prefetch_blocks  # 三区域设计参数
+        self.cpu_primary = cpu_primary  # Three-region mode flag
+        self.num_prefetch_blocks = num_prefetch_blocks  # Three-region design parameter
 
         # Eviction policy
         self.policy = policy or LRUPolicy()
@@ -137,6 +137,10 @@ class HybridKVCacheManager(KVCacheManager):
 
         # Track blocks that have been prefilled (KV written) for chunked prefill
         self.prefilled_blocks: Set[int] = set()  # logical_ids
+
+        # Track decode starting position within block (for batched offload optimization)
+        # Key: sequence id, Value: starting position where decode began in current block
+        self._decode_start_pos: Dict[int, int] = {}
 
     @property
     def block_size(self) -> int:
@@ -337,11 +341,11 @@ class HybridKVCacheManager(KVCacheManager):
         """
         assert not seq.block_table, "Sequence already has blocks"
 
-        # Ping-Pong模式：所有blocks都分配到CPU
+        # Three-region mode: all blocks are allocated to CPU
         if self.cpu_primary:
             return self.allocate_cpu_only(seq)
 
-        # Legacy模式：GPU为主，CPU为overflow
+        # Legacy mode: GPU as primary, CPU as overflow
         h = -1
         cache_miss = False
 
@@ -467,7 +471,7 @@ class HybridKVCacheManager(KVCacheManager):
             block.token_ids = []
 
             if self.cpu_primary:
-                # Ping-Pong模式：新block分配到CPU
+                # Three-region mode: new block allocated to CPU
                 if not self.free_cpu_blocks:
                     raise RuntimeError("No free CPU blocks for decode")
                 cpu_block_id = self.free_cpu_blocks.popleft()
@@ -476,7 +480,7 @@ class HybridKVCacheManager(KVCacheManager):
                 block.gpu_slot = -1
                 self.cpu_block_to_logical[cpu_block_id] = logical_id
             else:
-                # Legacy模式：新block分配到GPU
+                # Legacy mode: new block allocated to GPU
                 gpu_slot = self._allocate_gpu_slot()
                 block.location = BlockLocation.GPU
                 block.gpu_slot = gpu_slot
@@ -1021,22 +1025,22 @@ class HybridKVCacheManager(KVCacheManager):
                 break
         return pos
 
-    # ========== Ping-Pong 双缓冲支持 ==========
+    # ========== Three-region double buffering support ==========
 
     def allocate_cpu_only(self, seq: Sequence) -> None:
         """
-        为序列分配 CPU blocks（用于 Ping-Pong 模式）。
+        Allocate CPU blocks for sequence (for three-region mode).
 
-        与 allocate() 不同，这里所有 blocks 都分配到 CPU，
-        GPU 只用作工作缓冲区。
+        Unlike allocate(), here all blocks are allocated to CPU,
+        GPU is only used as working buffer.
 
         Args:
-            seq: 要分配的序列
+            seq: Sequence to allocate
         """
         assert not seq.block_table, "Sequence already has blocks"
 
         for i in range(seq.num_blocks):
-            # 分配 CPU block
+            # Allocate CPU block
             if not self.free_cpu_blocks:
                 raise RuntimeError(
                     f"No free CPU blocks. Need {seq.num_blocks}, "
@@ -1045,7 +1049,7 @@ class HybridKVCacheManager(KVCacheManager):
 
             cpu_block_id = self.free_cpu_blocks.popleft()
 
-            # 分配逻辑块
+            # Allocate logical block
             logical_id = self.free_logical_ids.popleft()
             block = self.logical_blocks[logical_id]
             block.ref_count = 1
@@ -1058,13 +1062,13 @@ class HybridKVCacheManager(KVCacheManager):
 
     def get_cpu_block_table(self, seq: Sequence) -> List[int]:
         """
-        获取序列的 CPU block ID 列表。
+        Get CPU block ID list for sequence.
 
         Args:
-            seq: 序列
+            seq: Sequence
 
         Returns:
-            CPU block IDs 列表，按序列顺序
+            List of CPU block IDs in sequence order
         """
         cpu_blocks = []
         for logical_id in seq.block_table:
@@ -1072,20 +1076,20 @@ class HybridKVCacheManager(KVCacheManager):
             if block.location == BlockLocation.CPU:
                 cpu_blocks.append(block.cpu_block_id)
             else:
-                # 如果 block 在 GPU 上，它应该有一个对应的 CPU block
-                # 在 Ping-Pong 模式下，所有数据最终都在 CPU 上
+                # If block is on GPU, it should have a corresponding CPU block
+                # In three-region mode, all data ultimately resides on CPU
                 raise RuntimeError(
                     f"Block {logical_id} not on CPU (location={block.location}). "
-                    f"In Ping-Pong mode, all blocks should be on CPU."
+                    f"In three-region mode, all blocks should be on CPU."
                 )
         return cpu_blocks
 
     def get_all_cpu_blocks(self, seq: Sequence) -> Tuple[List[int], List[int]]:
         """
-        获取序列的所有 CPU blocks 及其逻辑 ID。
+        Get all CPU blocks and their logical IDs for sequence.
 
         Args:
-            seq: 序列
+            seq: Sequence
 
         Returns:
             (cpu_block_ids, logical_ids)
@@ -1101,13 +1105,13 @@ class HybridKVCacheManager(KVCacheManager):
 
     def allocate_next_cpu_block(self, seq: Sequence) -> int:
         """
-        为序列分配下一个 CPU block（用于 decode 时新 token）。
+        Allocate next CPU block for sequence (for new token during decode).
 
         Args:
-            seq: 序列
+            seq: Sequence
 
         Returns:
-            新分配的 CPU block ID
+            Newly allocated CPU block ID
         """
         if not self.free_cpu_blocks:
             raise RuntimeError("No free CPU blocks")
@@ -1128,15 +1132,15 @@ class HybridKVCacheManager(KVCacheManager):
 
     def get_last_cpu_block(self, seq: Sequence) -> int:
         """
-        获取序列最后一个 block 的 CPU block ID。
+        Get CPU block ID of the last block in sequence.
 
-        如果最后一个 block 不在 CPU 上，返回 -1。
+        Returns -1 if the last block is not on CPU.
 
         Args:
-            seq: 序列
+            seq: Sequence
 
         Returns:
-            CPU block ID，如果不在 CPU 上则返回 -1
+            CPU block ID, or -1 if not on CPU
         """
         if not seq.block_table:
             return -1
@@ -1150,18 +1154,64 @@ class HybridKVCacheManager(KVCacheManager):
 
     def get_write_slot_for_pingpong(self, seq: Sequence) -> int:
         """
-        获取三区域 decode 时新 KV 写入的 GPU slot。
+        Get GPU slot for writing new KV during three-region decode.
 
-        在三区域设计中，永远使用 Decode区 (slot 0) 写入新 KV。
-        这样可以避免与 Compute/Prefetch区 的加载操作冲突。
+        In three-region design, always use Decode region (slot 0) to write new KV.
+        This avoids conflicts with Compute/Prefetch region loading operations.
 
         Args:
-            seq: 序列
+            seq: Sequence
 
         Returns:
-            GPU slot ID (永远是 decode_slot = 0)
+            GPU slot ID (always decode_slot = 0)
         """
         return self.offload_engine.decode_slot
+
+    def get_decode_start_pos(self, seq: Sequence) -> int:
+        """
+        Get the starting position within block where decode tokens began.
+
+        This is used for batched offload optimization - we need to attend to all
+        accumulated tokens in decode slot, not just the current one.
+
+        Args:
+            seq: Sequence
+
+        Returns:
+            Starting position within block (0 to block_size-1)
+        """
+        seq_id = id(seq)
+        if seq_id not in self._decode_start_pos:
+            # First decode step - compute starting position
+            # After prefill, the last block has some tokens filled
+            # Decode starts at the next position
+            prefill_len = len(seq) - 1  # Current len includes the new decode token
+            self._decode_start_pos[seq_id] = prefill_len % self._block_size
+        return self._decode_start_pos[seq_id]
+
+    def reset_decode_start_pos(self, seq: Sequence) -> None:
+        """
+        Reset decode start position for sequence.
+
+        Called when block is full and offloaded - next decode starts at position 0.
+
+        Args:
+            seq: Sequence
+        """
+        seq_id = id(seq)
+        self._decode_start_pos[seq_id] = 0
+
+    def clear_decode_tracking(self, seq: Sequence) -> None:
+        """
+        Clear decode position tracking for sequence.
+
+        Called when sequence is deallocated.
+
+        Args:
+            seq: Sequence
+        """
+        seq_id = id(seq)
+        self._decode_start_pos.pop(seq_id, None)
 
     def __repr__(self) -> str:
         return (
