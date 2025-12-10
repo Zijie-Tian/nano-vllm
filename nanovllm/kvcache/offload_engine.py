@@ -13,6 +13,9 @@ from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
 
 from nanovllm.kvcache.kernels import gathered_copy_kv
+from nanovllm.utils.logger import get_logger
+
+logger = get_logger("offload_engine")
 
 
 @dataclass
@@ -216,6 +219,8 @@ class OffloadEngine:
         stream = self._get_next_stream()
         event = torch.cuda.Event()
 
+        logger.debug(f"H2D prefetch: layer={layer_id}, CPU[{cpu_block_id}] -> GPU[{gpu_block_id}]")
+
         with torch.cuda.stream(stream):
             # K cache
             self.k_cache_gpu[layer_id, gpu_block_id].copy_(
@@ -270,6 +275,8 @@ class OffloadEngine:
         """
         stream = self._get_next_stream()
         event = torch.cuda.Event()
+
+        logger.debug(f"D2H offload: layer={layer_id}, GPU[{gpu_block_id}] -> CPU[{cpu_block_id}]")
 
         with torch.cuda.stream(stream):
             # Wait for any compute using this block
@@ -329,6 +336,9 @@ class OffloadEngine:
         """
         assert len(cpu_block_ids) == len(gpu_slot_ids)
 
+        if cpu_block_ids:
+            logger.debug(f"H2D chunked load: layer={layer_id}, CPU{cpu_block_ids} -> GPU{gpu_slot_ids}")
+
         stream = self._get_next_stream()
 
         with torch.cuda.stream(stream):
@@ -365,6 +375,9 @@ class OffloadEngine:
         """
         assert len(cpu_block_ids) == len(gpu_slot_ids)
 
+        if cpu_block_ids:
+            logger.debug(f"H2D chunked load async: layer={layer_id}, CPU{cpu_block_ids} -> GPU{gpu_slot_ids}")
+
         stream = self._get_next_stream()
         event = torch.cuda.Event()
 
@@ -397,6 +410,9 @@ class OffloadEngine:
             gpu_slot_ids: List of GPU slot IDs to load into
         """
         assert len(cpu_block_ids) == len(gpu_slot_ids)
+
+        if cpu_block_ids:
+            logger.debug(f"H2D all layers: CPU{cpu_block_ids} -> GPU{gpu_slot_ids}")
 
         stream = self._get_next_stream()
 

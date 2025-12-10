@@ -109,9 +109,15 @@ class ModelRunner:
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
         block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.torch_dtype.itemsize
 
-        # Calculate GPU block count
-        num_gpu_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
-        assert num_gpu_blocks > 0
+        # Calculate max GPU blocks based on available memory
+        max_gpu_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
+        assert max_gpu_blocks > 0
+
+        # Determine final GPU blocks: user-specified or auto (max available)
+        if config.num_gpu_blocks > 0:
+            num_gpu_blocks = min(config.num_gpu_blocks, max_gpu_blocks)
+        else:
+            num_gpu_blocks = max_gpu_blocks
 
         if config.enable_cpu_offload:
             # Calculate CPU blocks based on cpu_memory_gb
@@ -300,7 +306,11 @@ class ModelRunner:
 
     @torch.inference_mode()
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool):
-        if is_prefill or self.enforce_eager or input_ids.size(0) > 512:
+        context = get_context()
+        # Use eager mode for: prefill, enforce_eager, large batch, or chunked attention
+        # Chunked attention requires dynamic KV loading that can't be captured in CUDA Graph
+        use_eager = is_prefill or self.enforce_eager or input_ids.size(0) > 512 or context.is_chunked_prefill
+        if use_eager:
             return self.model.compute_logits(self.model(input_ids, positions))
         else:
             bs = input_ids.size(0)

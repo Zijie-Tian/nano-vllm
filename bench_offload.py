@@ -36,7 +36,7 @@ def main():
     path = os.path.expanduser("~/models/Qwen3-4B-Instruct-2507/")
     llm = LLM(
         path,
-        enforce_eager=True,
+        enforce_eager=False,
         max_model_len=128 * 1024,
         max_num_batched_tokens=128 * 1024,
         enable_cpu_offload=True,

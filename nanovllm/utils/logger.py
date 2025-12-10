@@ -83,9 +83,9 @@ def _setup_logger() -> logging.Logger:
     # Check if terminal supports colors
     use_colors = hasattr(sys.stderr, "isatty") and sys.stderr.isatty()
 
-    # Format: [TIME] [LEVEL] [MODULE] message
+    # Format: [TIME] [LEVEL] [FILE:LINE] message
     formatter = ColoredFormatter(
-        fmt="[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s",
+        fmt="[%(asctime)s] [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s",
         datefmt="%H:%M:%S",
         use_colors=use_colors,
     )
