@@ -499,7 +499,7 @@ class ChunkedPrefillState:
 # Test function
 def _test_chunked_attention():
     """Test chunked attention correctness against full attention."""
-    from flash_attn import flash_attn_func
+    from flash_attn.flash_attn_interface import flash_attn_func
 
     torch.manual_seed(42)
 
