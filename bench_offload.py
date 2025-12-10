@@ -40,7 +40,6 @@ def main():
         max_model_len=128 * 1024,
         max_num_batched_tokens=128 * 1024,
         enable_cpu_offload=True,
-        cpu_memory_gb=32.0,
     )
 
     # Warmup

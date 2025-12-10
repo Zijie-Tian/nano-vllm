@@ -81,20 +81,24 @@ class HybridKVCacheManager(KVCacheManager):
         num_cpu_blocks: int,
         block_size: int,
         policy: Optional[EvictionPolicy] = None,
+        cpu_primary: bool = True,
     ):
         """
         Initialize hybrid manager.
 
         Args:
             num_gpu_slots: Number of GPU buffer slots (working set)
-            num_cpu_blocks: Number of CPU pool blocks (overflow)
+            num_cpu_blocks: Number of CPU pool blocks (overflow or primary storage)
             block_size: Tokens per block
             policy: Eviction policy (default: LRU)
+            cpu_primary: If True, use CPU as primary storage with Ping-Pong GPU buffer.
+                        If False, use GPU as primary with CPU as overflow (legacy mode).
         """
         self._block_size = block_size
         self.num_gpu_slots = num_gpu_slots
         self.num_cpu_blocks = num_cpu_blocks
         self.total_blocks = num_gpu_slots + num_cpu_blocks
+        self.cpu_primary = cpu_primary  # Ping-Pong mode flag
 
         # Eviction policy
         self.policy = policy or LRUPolicy()
@@ -321,12 +325,16 @@ class HybridKVCacheManager(KVCacheManager):
         """
         Allocate logical blocks for prefill.
 
-        New blocks are allocated on GPU when possible. If GPU is full and all
-        GPU blocks belong to this sequence (can't evict), remaining blocks
-        are allocated to CPU for chunked prefill.
+        In cpu_primary mode (Ping-Pong): All blocks are allocated to CPU.
+        In legacy mode: Blocks are allocated to GPU when possible, overflow to CPU.
         """
         assert not seq.block_table, "Sequence already has blocks"
 
+        # Ping-Pong模式：所有blocks都分配到CPU
+        if self.cpu_primary:
+            return self.allocate_cpu_only(seq)
+
+        # Legacy模式：GPU为主，CPU为overflow
         h = -1
         cache_miss = False
 
@@ -451,13 +459,22 @@ class HybridKVCacheManager(KVCacheManager):
             block.hash = -1
             block.token_ids = []
 
-            # New decode blocks go to GPU
-            gpu_slot = self._allocate_gpu_slot()
-            block.location = BlockLocation.GPU
-            block.gpu_slot = gpu_slot
-
-            self.gpu_slot_to_logical[gpu_slot] = logical_id
-            self.policy.on_block_allocated(gpu_slot, self.current_step)
+            if self.cpu_primary:
+                # Ping-Pong模式：新block分配到CPU
+                if not self.free_cpu_blocks:
+                    raise RuntimeError("No free CPU blocks for decode")
+                cpu_block_id = self.free_cpu_blocks.popleft()
+                block.location = BlockLocation.CPU
+                block.cpu_block_id = cpu_block_id
+                block.gpu_slot = -1
+                self.cpu_block_to_logical[cpu_block_id] = logical_id
+            else:
+                # Legacy模式：新block分配到GPU
+                gpu_slot = self._allocate_gpu_slot()
+                block.location = BlockLocation.GPU
+                block.gpu_slot = gpu_slot
+                self.gpu_slot_to_logical[gpu_slot] = logical_id
+                self.policy.on_block_allocated(gpu_slot, self.current_step)
 
             block_table.append(logical_id)
 
@@ -992,6 +1009,158 @@ class HybridKVCacheManager(KVCacheManager):
             else:
                 break
         return pos
+
+    # ========== Ping-Pong 双缓冲支持 ==========
+
+    def allocate_cpu_only(self, seq: Sequence) -> None:
+        """
+        为序列分配 CPU blocks（用于 Ping-Pong 模式）。
+
+        与 allocate() 不同，这里所有 blocks 都分配到 CPU，
+        GPU 只用作工作缓冲区。
+
+        Args:
+            seq: 要分配的序列
+        """
+        assert not seq.block_table, "Sequence already has blocks"
+
+        for i in range(seq.num_blocks):
+            # 分配 CPU block
+            if not self.free_cpu_blocks:
+                raise RuntimeError(
+                    f"No free CPU blocks. Need {seq.num_blocks}, "
+                    f"available: {len(self.free_cpu_blocks)}"
+                )
+
+            cpu_block_id = self.free_cpu_blocks.popleft()
+
+            # 分配逻辑块
+            logical_id = self.free_logical_ids.popleft()
+            block = self.logical_blocks[logical_id]
+            block.ref_count = 1
+            block.location = BlockLocation.CPU
+            block.cpu_block_id = cpu_block_id
+            block.gpu_slot = -1
+
+            self.cpu_block_to_logical[cpu_block_id] = logical_id
+            seq.block_table.append(logical_id)
+
+    def get_cpu_block_table(self, seq: Sequence) -> List[int]:
+        """
+        获取序列的 CPU block ID 列表。
+
+        Args:
+            seq: 序列
+
+        Returns:
+            CPU block IDs 列表，按序列顺序
+        """
+        cpu_blocks = []
+        for logical_id in seq.block_table:
+            block = self.logical_blocks[logical_id]
+            if block.location == BlockLocation.CPU:
+                cpu_blocks.append(block.cpu_block_id)
+            else:
+                # 如果 block 在 GPU 上，它应该有一个对应的 CPU block
+                # 在 Ping-Pong 模式下，所有数据最终都在 CPU 上
+                raise RuntimeError(
+                    f"Block {logical_id} not on CPU (location={block.location}). "
+                    f"In Ping-Pong mode, all blocks should be on CPU."
+                )
+        return cpu_blocks
+
+    def get_all_cpu_blocks(self, seq: Sequence) -> Tuple[List[int], List[int]]:
+        """
+        获取序列的所有 CPU blocks 及其逻辑 ID。
+
+        Args:
+            seq: 序列
+
+        Returns:
+            (cpu_block_ids, logical_ids)
+        """
+        cpu_block_ids = []
+        logical_ids = []
+        for logical_id in seq.block_table:
+            block = self.logical_blocks[logical_id]
+            if block.location == BlockLocation.CPU:
+                cpu_block_ids.append(block.cpu_block_id)
+                logical_ids.append(logical_id)
+        return cpu_block_ids, logical_ids
+
+    def allocate_next_cpu_block(self, seq: Sequence) -> int:
+        """
+        为序列分配下一个 CPU block（用于 decode 时新 token）。
+
+        Args:
+            seq: 序列
+
+        Returns:
+            新分配的 CPU block ID
+        """
+        if not self.free_cpu_blocks:
+            raise RuntimeError("No free CPU blocks")
+
+        cpu_block_id = self.free_cpu_blocks.popleft()
+        logical_id = self.free_logical_ids.popleft()
+
+        block = self.logical_blocks[logical_id]
+        block.ref_count = 1
+        block.location = BlockLocation.CPU
+        block.cpu_block_id = cpu_block_id
+        block.gpu_slot = -1
+
+        self.cpu_block_to_logical[cpu_block_id] = logical_id
+        seq.block_table.append(logical_id)
+
+        return cpu_block_id
+
+    def get_last_cpu_block(self, seq: Sequence) -> int:
+        """
+        获取序列最后一个 block 的 CPU block ID。
+
+        如果最后一个 block 不在 CPU 上，返回 -1。
+
+        Args:
+            seq: 序列
+
+        Returns:
+            CPU block ID，如果不在 CPU 上则返回 -1
+        """
+        if not seq.block_table:
+            return -1
+
+        last_logical_id = seq.block_table[-1]
+        block = self.logical_blocks[last_logical_id]
+
+        if block.location == BlockLocation.CPU:
+            return block.cpu_block_id
+        return -1
+
+    def get_write_slot_for_pingpong(self, seq: Sequence) -> int:
+        """
+        获取 Ping-Pong decode 时新 KV 写入的 GPU slot。
+
+        策略：使用序列所需 chunks 数决定最后用的是 Ping 还是 Pong buffer，
+        然后使用该 buffer 的最后一个 slot。
+
+        Args:
+            seq: 序列
+
+        Returns:
+            GPU slot ID
+        """
+        cpu_blocks, _ = self.get_all_cpu_blocks(seq)
+        ping_size = self.offload_engine.ping_size
+        num_chunks = (len(cpu_blocks) + ping_size - 1) // ping_size if cpu_blocks else 0
+
+        # 最后一个 chunk 用的是哪个 buffer
+        if num_chunks % 2 == 1 or num_chunks == 0:
+            # 奇数个 chunk（或0个），最后用的是 ping
+            return self.offload_engine.ping_slots[-1]
+        else:
+            # 偶数个 chunk，最后用的是 pong
+            return self.offload_engine.pong_slots[-1]
 
     def __repr__(self) -> str:
         return (

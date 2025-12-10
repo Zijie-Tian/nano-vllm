@@ -19,7 +19,6 @@ class Config:
 
     # CPU Offload configuration
     enable_cpu_offload: bool = False
-    cpu_memory_gb: float = 16.0  # CPU memory limit for KV cache
     offload_policy: str = "lru"  # "lru", "fifo", or full class path
     num_transfer_streams: int = 4  # Number of CUDA streams for async transfers
     num_gpu_blocks: int = -1  # User-specified GPU blocks count, -1 = auto (use max available)

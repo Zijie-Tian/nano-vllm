@@ -64,6 +64,14 @@ class OffloadEngine:
         self.kv_dim = num_kv_heads * head_dim
         self.block_numel = block_size * self.kv_dim
 
+        # ========== Ping-Pong 双缓冲配置 ==========
+        assert num_gpu_blocks >= 2, "Ping-Pong需要至少2个GPU blocks"
+        self.ping_size = num_gpu_blocks // 2
+        self.pong_size = num_gpu_blocks - self.ping_size
+        self.ping_slots = list(range(self.ping_size))  # [0, 1, 2, ...]
+        self.pong_slots = list(range(self.ping_size, num_gpu_blocks))  # [ping_size, ping_size+1, ...]
+        self.num_gpu_slots = num_gpu_blocks  # alias
+
         # ========== Fixed-address GPU KV cache ==========
         # Shape: [num_layers, num_gpu_blocks, block_size, kv_heads, head_dim]
         self.k_cache_gpu = torch.empty(
@@ -102,6 +110,17 @@ class OffloadEngine:
         self.transfer_streams = [torch.cuda.Stream() for _ in range(num_streams)]
         self.compute_stream = torch.cuda.current_stream()
         self._stream_idx = 0
+
+        # ========== Ping-Pong 专用 stream 和事件 ==========
+        self.pingpong_stream = torch.cuda.Stream()  # 专用于Ping-Pong传输
+
+        # 同步事件 - 加载完成
+        self.ping_ready = torch.cuda.Event()
+        self.pong_ready = torch.cuda.Event()
+
+        # 同步事件 - offload完成
+        self.ping_offload_done = torch.cuda.Event()
+        self.pong_offload_done = torch.cuda.Event()
 
         # ========== Event tracking for async transfers ==========
         self.pending_events: Dict[Tuple[int, int], torch.cuda.Event] = {}
@@ -516,7 +535,211 @@ class OffloadEngine:
             f"  kv_heads={self.num_kv_heads},\n"
             f"  head_dim={self.head_dim},\n"
             f"  dtype={self.dtype},\n"
+            f"  ping_size={self.ping_size}, pong_size={self.pong_size},\n"
             f"  gpu_memory={self.gpu_memory_bytes() / 1024**2:.1f}MB,\n"
             f"  cpu_memory={self.cpu_memory_bytes() / 1024**2:.1f}MB\n"
             f")"
         )
+
+    # ========== Ping-Pong 双缓冲方法 ==========
+
+    def load_to_ping(self, cpu_block_ids: List[int]) -> None:
+        """
+        异步加载CPU blocks到Ping buffer。
+
+        Args:
+            cpu_block_ids: 要加载的CPU block IDs列表
+        """
+        if not cpu_block_ids:
+            self.ping_ready.record(self.pingpong_stream)
+            return
+
+        num_to_load = min(len(cpu_block_ids), self.ping_size)
+        logger.debug(f"Ping load: CPU{cpu_block_ids[:num_to_load]} -> GPU ping slots {self.ping_slots[:num_to_load]}")
+
+        with torch.cuda.stream(self.pingpong_stream):
+            for i in range(num_to_load):
+                cpu_id = cpu_block_ids[i]
+                gpu_slot = self.ping_slots[i]
+                # 所有层一起复制
+                self.k_cache_gpu[:, gpu_slot].copy_(
+                    self.k_cache_cpu[:, cpu_id], non_blocking=True
+                )
+                self.v_cache_gpu[:, gpu_slot].copy_(
+                    self.v_cache_cpu[:, cpu_id], non_blocking=True
+                )
+            self.ping_ready.record(self.pingpong_stream)
+
+    def load_to_pong(self, cpu_block_ids: List[int]) -> None:
+        """
+        异步加载CPU blocks到Pong buffer。
+
+        Args:
+            cpu_block_ids: 要加载的CPU block IDs列表
+        """
+        if not cpu_block_ids:
+            self.pong_ready.record(self.pingpong_stream)
+            return
+
+        num_to_load = min(len(cpu_block_ids), self.pong_size)
+        logger.debug(f"Pong load: CPU{cpu_block_ids[:num_to_load]} -> GPU pong slots {self.pong_slots[:num_to_load]}")
+
+        with torch.cuda.stream(self.pingpong_stream):
+            for i in range(num_to_load):
+                cpu_id = cpu_block_ids[i]
+                gpu_slot = self.pong_slots[i]
+                self.k_cache_gpu[:, gpu_slot].copy_(
+                    self.k_cache_cpu[:, cpu_id], non_blocking=True
+                )
+                self.v_cache_gpu[:, gpu_slot].copy_(
+                    self.v_cache_cpu[:, cpu_id], non_blocking=True
+                )
+            self.pong_ready.record(self.pingpong_stream)
+
+    def wait_ping(self) -> None:
+        """等待Ping buffer加载完成。"""
+        self.compute_stream.wait_event(self.ping_ready)
+
+    def wait_pong(self) -> None:
+        """等待Pong buffer加载完成。"""
+        self.compute_stream.wait_event(self.pong_ready)
+
+    def offload_buffer_to_cpu(
+        self,
+        buffer: str,
+        cpu_block_ids: List[int],
+    ) -> None:
+        """
+        异步将buffer中的KV offload到CPU。
+
+        Args:
+            buffer: "ping" 或 "pong"
+            cpu_block_ids: 目标CPU block IDs列表
+        """
+        slots = self.ping_slots if buffer == "ping" else self.pong_slots
+        event = self.ping_offload_done if buffer == "ping" else self.pong_offload_done
+
+        if not cpu_block_ids:
+            event.record(self.pingpong_stream)
+            return
+
+        num_to_offload = min(len(cpu_block_ids), len(slots))
+        logger.debug(f"{buffer.capitalize()} offload: GPU {slots[:num_to_offload]} -> CPU{cpu_block_ids[:num_to_offload]}")
+
+        with torch.cuda.stream(self.pingpong_stream):
+            # 等待计算完成
+            self.pingpong_stream.wait_stream(self.compute_stream)
+
+            for i in range(num_to_offload):
+                gpu_slot = slots[i]
+                cpu_id = cpu_block_ids[i]
+                self.k_cache_cpu[:, cpu_id].copy_(
+                    self.k_cache_gpu[:, gpu_slot], non_blocking=True
+                )
+                self.v_cache_cpu[:, cpu_id].copy_(
+                    self.v_cache_gpu[:, gpu_slot], non_blocking=True
+                )
+            event.record(self.pingpong_stream)
+
+    def offload_slot_to_cpu(
+        self,
+        gpu_slot: int,
+        cpu_block_id: int,
+    ) -> None:
+        """
+        异步将单个GPU slot的KV offload到CPU。
+
+        Args:
+            gpu_slot: GPU slot ID
+            cpu_block_id: 目标CPU block ID
+        """
+        logger.debug(f"Slot offload: GPU[{gpu_slot}] -> CPU[{cpu_block_id}]")
+
+        with torch.cuda.stream(self.pingpong_stream):
+            self.pingpong_stream.wait_stream(self.compute_stream)
+            self.k_cache_cpu[:, cpu_block_id].copy_(
+                self.k_cache_gpu[:, gpu_slot], non_blocking=True
+            )
+            self.v_cache_cpu[:, cpu_block_id].copy_(
+                self.v_cache_gpu[:, gpu_slot], non_blocking=True
+            )
+
+    def wait_ping_offload_done(self) -> None:
+        """等待Ping buffer offload完成。"""
+        self.compute_stream.wait_event(self.ping_offload_done)
+
+    def wait_pong_offload_done(self) -> None:
+        """等待Pong buffer offload完成。"""
+        self.compute_stream.wait_event(self.pong_offload_done)
+
+    def wait_all_offload_done(self) -> None:
+        """等待所有offload完成。"""
+        self.pingpong_stream.synchronize()
+
+    def get_kv_for_ping_slots(
+        self,
+        layer_id: int,
+        num_slots: int,
+    ) -> Tuple[Tensor, Tensor]:
+        """
+        获取Ping buffer中指定数量slots的KV。
+
+        Args:
+            layer_id: 层ID
+            num_slots: 需要的slot数量
+
+        Returns:
+            (k_cache, v_cache)，shape: [1, num_slots * block_size, kv_heads, head_dim]
+        """
+        slots = self.ping_slots[:num_slots]
+        k = self.k_cache_gpu[layer_id, slots]  # [num_slots, block_size, heads, dim]
+        v = self.v_cache_gpu[layer_id, slots]
+        # Reshape: [num_slots, block_size, heads, dim] -> [1, num_slots*block_size, heads, dim]
+        k = k.reshape(1, -1, self.num_kv_heads, self.head_dim)
+        v = v.reshape(1, -1, self.num_kv_heads, self.head_dim)
+        return k, v
+
+    def get_kv_for_pong_slots(
+        self,
+        layer_id: int,
+        num_slots: int,
+    ) -> Tuple[Tensor, Tensor]:
+        """
+        获取Pong buffer中指定数量slots的KV。
+
+        Args:
+            layer_id: 层ID
+            num_slots: 需要的slot数量
+
+        Returns:
+            (k_cache, v_cache)，shape: [1, num_slots * block_size, kv_heads, head_dim]
+        """
+        slots = self.pong_slots[:num_slots]
+        k = self.k_cache_gpu[layer_id, slots]
+        v = self.v_cache_gpu[layer_id, slots]
+        k = k.reshape(1, -1, self.num_kv_heads, self.head_dim)
+        v = v.reshape(1, -1, self.num_kv_heads, self.head_dim)
+        return k, v
+
+    def get_kv_for_slots(
+        self,
+        layer_id: int,
+        gpu_slots: List[int],
+    ) -> Tuple[Tensor, Tensor]:
+        """
+        获取指定GPU slots的KV。
+
+        Args:
+            layer_id: 层ID
+            gpu_slots: GPU slot IDs列表
+
+        Returns:
+            (k_cache, v_cache)，shape: [1, len(slots) * block_size, kv_heads, head_dim]
+        """
+        if not gpu_slots:
+            return None, None
+        k = self.k_cache_gpu[layer_id, gpu_slots]
+        v = self.v_cache_gpu[layer_id, gpu_slots]
+        k = k.reshape(1, -1, self.num_kv_heads, self.head_dim)
+        v = v.reshape(1, -1, self.num_kv_heads, self.head_dim)
+        return k, v
