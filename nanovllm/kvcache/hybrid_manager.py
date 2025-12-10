@@ -9,12 +9,15 @@ Key design for CUDA Graph compatibility:
 5. Graph replay only needs index updates (tiny overhead)
 """
 
+import logging
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import List, Tuple, Dict, Set, Optional
 import torch
 from torch import Tensor
+
+logger = logging.getLogger(__name__)
 
 from nanovllm.engine.sequence import Sequence
 from nanovllm.kvcache.base_manager import KVCacheManager
@@ -82,6 +85,7 @@ class HybridKVCacheManager(KVCacheManager):
         block_size: int,
         policy: Optional[EvictionPolicy] = None,
         cpu_primary: bool = True,
+        num_prefetch_blocks: int = 2,
     ):
         """
         Initialize hybrid manager.
@@ -91,14 +95,16 @@ class HybridKVCacheManager(KVCacheManager):
             num_cpu_blocks: Number of CPU pool blocks (overflow or primary storage)
             block_size: Tokens per block
             policy: Eviction policy (default: LRU)
-            cpu_primary: If True, use CPU as primary storage with Ping-Pong GPU buffer.
+            cpu_primary: If True, use CPU as primary storage with 三区域 GPU buffer.
                         If False, use GPU as primary with CPU as overflow (legacy mode).
+            num_prefetch_blocks: Number of prefetch blocks for 三区域 GPU buffer design
         """
         self._block_size = block_size
         self.num_gpu_slots = num_gpu_slots
         self.num_cpu_blocks = num_cpu_blocks
         self.total_blocks = num_gpu_slots + num_cpu_blocks
-        self.cpu_primary = cpu_primary  # Ping-Pong mode flag
+        self.cpu_primary = cpu_primary  # 三区域 mode flag
+        self.num_prefetch_blocks = num_prefetch_blocks  # 三区域设计参数
 
         # Eviction policy
         self.policy = policy or LRUPolicy()
@@ -156,6 +162,7 @@ class HybridKVCacheManager(KVCacheManager):
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
             dtype=dtype,
+            num_prefetch_blocks=self.num_prefetch_blocks,
         )
 
     def get_layer_cache(self, layer_id: int) -> Tuple[Tensor, Tensor]:
@@ -948,6 +955,10 @@ class HybridKVCacheManager(KVCacheManager):
                 block = self.logical_blocks[logical_id]
                 if block.location == BlockLocation.CPU:
                     cpu_blocks.append(block.cpu_block_id)
+        logger.debug(
+            f"get_prefilled_cpu_blocks: prefilled_blocks={list(self.prefilled_blocks)}, "
+            f"returned cpu_blocks={cpu_blocks}"
+        )
         return cpu_blocks
 
     def load_prev_kv_for_layer(
@@ -1139,28 +1150,18 @@ class HybridKVCacheManager(KVCacheManager):
 
     def get_write_slot_for_pingpong(self, seq: Sequence) -> int:
         """
-        获取 Ping-Pong decode 时新 KV 写入的 GPU slot。
+        获取三区域 decode 时新 KV 写入的 GPU slot。
 
-        策略：使用序列所需 chunks 数决定最后用的是 Ping 还是 Pong buffer，
-        然后使用该 buffer 的最后一个 slot。
+        在三区域设计中，永远使用 Decode区 (slot 0) 写入新 KV。
+        这样可以避免与 Compute/Prefetch区 的加载操作冲突。
 
         Args:
             seq: 序列
 
         Returns:
-            GPU slot ID
+            GPU slot ID (永远是 decode_slot = 0)
         """
-        cpu_blocks, _ = self.get_all_cpu_blocks(seq)
-        ping_size = self.offload_engine.ping_size
-        num_chunks = (len(cpu_blocks) + ping_size - 1) // ping_size if cpu_blocks else 0
-
-        # 最后一个 chunk 用的是哪个 buffer
-        if num_chunks % 2 == 1 or num_chunks == 0:
-            # 奇数个 chunk（或0个），最后用的是 ping
-            return self.offload_engine.ping_slots[-1]
-        else:
-            # 偶数个 chunk，最后用的是 pong
-            return self.offload_engine.pong_slots[-1]
+        return self.offload_engine.decode_slot
 
     def __repr__(self) -> str:
         return (

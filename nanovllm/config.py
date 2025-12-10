@@ -22,6 +22,7 @@ class Config:
     offload_policy: str = "lru"  # "lru", "fifo", or full class path
     num_transfer_streams: int = 4  # Number of CUDA streams for async transfers
     num_gpu_blocks: int = -1  # User-specified GPU blocks count, -1 = auto (use max available)
+    num_prefetch_blocks: int = 2  # Prefetch区的block数量，用于三区域GPU Buffer设计
 
     # Computed fields for offload (set in __post_init__ or by ModelRunner)
     num_gpu_kvcache_blocks: int = -1
