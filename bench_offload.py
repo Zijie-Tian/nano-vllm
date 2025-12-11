@@ -4,10 +4,10 @@ from random import randint, seed
 from nanovllm import LLM, SamplingParams
 
 
-def bench_decode(llm, num_seqs, max_input_len, max_output_len):
+def bench_decode(llm, num_seqs, input_len, max_output_len):
     """Benchmark decode performance (original test)"""
     seed(0)
-    prompt_token_ids = [[randint(0, 10000) for _ in range(randint(100, max_input_len))] for _ in range(num_seqs)]
+    prompt_token_ids = [[randint(0, 10000) for _ in range(randint(100, input_len))] for _ in range(num_seqs)]
     sampling_params = [SamplingParams(temperature=0.6, ignore_eos=True, max_tokens=randint(100, max_output_len)) for _ in range(num_seqs)]
 
     t = time.time()
@@ -54,13 +54,13 @@ def main():
     # bench_prefill(llm, num_seqs=1, input_len=1024)
     # bench_prefill(llm, num_seqs=1, input_len=2048)
     # bench_prefill(llm, num_seqs=1, input_len=4096)
-    bench_prefill(llm, num_seqs=1, input_len=8192)
+    bench_prefill(llm, num_seqs=1, input_len=64 * 1024)
 
     print("=" * 60)
     print("Decode Benchmark (CPU Offload)")
     print("=" * 60)
-    bench_decode(llm, num_seqs=1, max_input_len=1024, max_output_len=128)
-    # bench_decode(llm, num_seqs=1, max_input_len=2048, max_output_len=128)
+    bench_decode(llm, num_seqs=1, input_len=64 * 1024, max_output_len=128)
+    # bench_decode(llm, num_seqs=1, input_len=2048, max_output_len=128)
 
 
 if __name__ == "__main__":

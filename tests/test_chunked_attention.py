@@ -61,7 +61,7 @@ Attention mechanisms allow models to focus on relevant parts of the input.
             fact_idx += 1
 
     # Add the question at the end
-    prompt_parts.append("\n\nQuestion: Based on the information above, what is the capital of France and when was the Eiffel Tower built? Please answer briefly.\n\nAnswer:")
+    prompt_parts.append("\n\nQuestion: Based on the information above, what is the speed of light?\n\nAnswer:")
 
     return "".join(prompt_parts)
 
