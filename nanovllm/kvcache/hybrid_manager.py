@@ -1039,6 +1039,8 @@ class HybridKVCacheManager(KVCacheManager):
         """
         assert not seq.block_table, "Sequence already has blocks"
 
+        h = -1  # Running hash for prefix cache
+
         for i in range(seq.num_blocks):
             # Allocate CPU block
             if not self.free_cpu_blocks:
@@ -1049,16 +1051,29 @@ class HybridKVCacheManager(KVCacheManager):
 
             cpu_block_id = self.free_cpu_blocks.popleft()
 
+            # Get token IDs for this block and compute hash
+            token_ids = seq.block(i)
+            if len(token_ids) == self._block_size:
+                h = self.compute_hash(token_ids, h)
+            else:
+                h = -1  # Incomplete block
+
             # Allocate logical block
             logical_id = self.free_logical_ids.popleft()
             block = self.logical_blocks[logical_id]
             block.ref_count = 1
+            block.hash = h
+            block.token_ids = token_ids.copy() if len(token_ids) == self._block_size else []
             block.location = BlockLocation.CPU
             block.cpu_block_id = cpu_block_id
             block.gpu_slot = -1
 
             self.cpu_block_to_logical[cpu_block_id] = logical_id
             seq.block_table.append(logical_id)
+
+            # Update prefix cache
+            if h != -1:
+                self.hash_to_logical_id[h] = logical_id
 
     def get_cpu_block_table(self, seq: Sequence) -> List[int]:
         """

@@ -5,7 +5,7 @@ from nanovllm import LLM, SamplingParams
 
 
 def bench_decode(llm, num_seqs, max_input_len, max_output_len):
-    """Benchmark decode performance"""
+    """Benchmark decode performance (original test)"""
     seed(0)
     prompt_token_ids = [[randint(0, 10000) for _ in range(randint(100, max_input_len))] for _ in range(num_seqs)]
     sampling_params = [SamplingParams(temperature=0.6, ignore_eos=True, max_tokens=randint(100, max_output_len)) for _ in range(num_seqs)]
@@ -21,6 +21,7 @@ def bench_decode(llm, num_seqs, max_input_len, max_output_len):
 def bench_prefill(llm, num_seqs, input_len):
     """Benchmark prefill performance"""
     seed(0)
+    # Fixed length input, minimal output to focus on prefill
     prompt_token_ids = [[randint(0, 10000) for _ in range(input_len)] for _ in range(num_seqs)]
     sampling_params = SamplingParams(temperature=0.6, ignore_eos=True, max_tokens=1)
 
@@ -40,6 +41,8 @@ def main():
         max_model_len=128 * 1024,
         max_num_batched_tokens=128 * 1024,
         enable_cpu_offload=True,
+        num_gpu_blocks=6,
+        num_prefetch_blocks=2,
     )
 
     # Warmup
@@ -48,15 +51,16 @@ def main():
     print("=" * 60)
     print("Prefill Benchmark (CPU Offload)")
     print("=" * 60)
-    bench_prefill(llm, num_seqs=1, input_len=64*1024)
-    # bench_prefill(llm, num_seqs=1, input_len=16384)
-    # bench_prefill(llm, num_seqs=1, input_len=32000)
+    # bench_prefill(llm, num_seqs=1, input_len=1024)
+    # bench_prefill(llm, num_seqs=1, input_len=2048)
+    # bench_prefill(llm, num_seqs=1, input_len=4096)
+    bench_prefill(llm, num_seqs=1, input_len=8192)
 
     print("=" * 60)
     print("Decode Benchmark (CPU Offload)")
     print("=" * 60)
-    bench_decode(llm, num_seqs=1, max_input_len=64*1024, max_output_len=256)
-    # bench_decode(llm, num_seqs=1, max_input_len=16384, max_output_len=256)
+    bench_decode(llm, num_seqs=1, max_input_len=1024, max_output_len=128)
+    # bench_decode(llm, num_seqs=1, max_input_len=2048, max_output_len=128)
 
 
 if __name__ == "__main__":
