@@ -33,6 +33,14 @@ class Context:
     # Used when batching decode offloads - we need to attend to all accumulated tokens
     decode_start_pos_in_block: int = 0
 
+    # ========== Per-layer chunked attention state ==========
+    # Whether chunked decode/prefill is currently active (for hooks to check)
+    chunked_decode_active: bool = False
+    # CPU block IDs for the current chunk being processed
+    chunked_decode_chunk_ids: List[int] = field(default_factory=list)
+    # Current chunk index being processed
+    chunked_decode_current_chunk: int = 0
+
 
 _CONTEXT = Context()
 
