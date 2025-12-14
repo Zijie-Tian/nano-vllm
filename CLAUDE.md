@@ -44,74 +44,101 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 
 When `enable_cpu_offload=True`, KV cache is stored on CPU with a small GPU buffer for computation. This enables long-context inference with limited GPU memory.
 
-### Three-Region GPU Buffer Design
+### Unified Ring Buffer Design
 
 ```
-GPU Slots: [0]     [1, 2, 3]        [4, 5]
-           ↑           ↑               ↑
-        decode     compute         prefetch
-        (1 slot)   (N slots)       (M slots)
+GPU Slots: [0]  [1]  [2]  [3]  [4]  ...
+           ←────────────────────────────→
+              All slots as ring buffer
 
-- Decode slot: New token's KV written here during decode
-- Compute region: Load CPU blocks for current chunk computation
-- Prefetch region: Async load next chunk while computing current
+Prefill: ALL slots cycle as ring buffer [slot = chunk_idx % N]
+Decode:  slot[0] = decode_slot, slots[1:] = load slots for previous chunks
 ```
 
 **File**: `nanovllm/kvcache/offload_engine.py`
 
 Key attributes:
+- `num_ring_slots`: Total GPU slots (= num_gpu_blocks)
+- `ring_slots`: List of all GPU slot indices [0, 1, 2, ...]
 - `decode_slot = 0`: Fixed slot for decode KV writes
-- `compute_slots`: List of GPU slots for compute region
-- `prefetch_slots`: List of GPU slots for prefetch region
+- `decode_load_slots`: Slots[1:] for loading previous chunks during decode
 - `k_cache_gpu/v_cache_gpu`: Shape `[num_layers, num_gpu_blocks, block_size, kv_heads, head_dim]`
 - `k_cache_cpu/v_cache_cpu`: Shape `[num_layers, num_cpu_blocks, block_size, kv_heads, head_dim]` (pinned memory)
 
-### Per-Layer Loading (Critical Design)
-
-**Problem solved**: Original design had layer 0 load ALL layers' KV at once. When layer 0 processed chunk 1, it overwrote chunk 0's data before layer 1+ could read it.
-
-**Solution**: Each layer independently loads only its own KV data:
+Key methods:
 ```python
-# Per-layer methods in OffloadEngine
-load_to_compute_layer(layer_id, cpu_block_ids)  # Load single layer to compute region
-wait_compute_layer(layer_id)                     # Wait for layer's transfer
-load_to_prefetch_layer(layer_id, cpu_block_ids) # Load single layer to prefetch region
-wait_prefetch_layer(layer_id)                    # Wait for layer's prefetch
+# Prefill: get write slot and load slots
+get_write_slot_for_prefill(chunk_idx)        # Returns chunk_idx % num_ring_slots
+get_load_slots_for_prefill(write_slot_idx)   # Returns all slots except write_slot
+
+# Decode: get load slots (excludes decode_slot)
+get_load_slots_for_decode()                   # Returns slots[1:]
+
+# Per-slot per-layer operations
+load_to_slot_layer(slot_idx, layer_id, cpu_block_id)  # Async load single block
+wait_slot_layer(slot_idx, layer_id)                   # Wait for layer's transfer
+offload_slot_to_cpu(slot_idx, cpu_block_id)           # Async offload to CPU
 ```
 
-### Chunked Prefill Flow
+### Per-Slot Per-Layer Events (Critical Design)
+
+Each slot has per-layer CUDA events for fine-grained synchronization:
+- `ring_slot_ready[slot_idx][layer_id]`: H2D transfer completion
+- `ring_slot_offload_done[slot_idx][layer_id]`: D2H transfer completion
+
+This enables:
+1. Overlapped H2D transfer with attention computation
+2. Each layer independently waits for its own data
+3. Pipeline depth = N-1 for prefill (N slots, 1 for writing)
+
+### Chunked Prefill Flow (Ring Buffer Pipeline)
 
 **File**: `nanovllm/layers/attention.py` - `_chunked_prefill_attention()`
 
 ```
-For each prefill chunk:
-1. Current chunk's KV is written to GPU (compute region slots)
-2. Load previous chunks' KV from CPU to prefetch region
+For prefill chunk K:
+1. Current chunk's KV written to ring_slot[K % N]
+2. Load previous chunks from CPU using N-1 available slots (pipeline)
 3. Compute attention against previous KV (no causal mask)
 4. Compute attention against current KV (causal mask)
 5. Merge results using online softmax (LSE)
-6. Offload current chunk's KV to CPU
+6. Offload current slot to CPU
+
+Pipeline Timeline (with 4 slots, processing chunk 3):
+write_slot = 3, load_slots = [0, 1, 2]
+
+┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
+│Load B0→S0   │ │Load B1→S1   │ │Load B2→S2   │ │   (wait)    │
+└─────────────┘ └─────────────┘ └─────────────┘ └─────────────┘
+              ↘               ↘               ↘
+               ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
+               │ Attn(B0)    │ │ Attn(B1)    │ │ Attn(B2)    │
+               └─────────────┘ └─────────────┘ └─────────────┘
 ```
 
-**Important**: Prefill uses ONLY prefetch region to avoid conflict with current chunk's KV being written to compute region.
+**Key**: Write slot cycles through ALL slots, load slots = all except write slot.
 
 ### Chunked Decode Flow (Double Buffering)
 
 **File**: `nanovllm/layers/attention.py` - `_chunked_decode_attention()`
 
+Decode uses legacy double-buffering with `decode_load_slots`:
+- First half of decode_load_slots: 'compute' buffer
+- Second half: 'prefetch' buffer
+
 ```
-Timeline (async double buffering):
+Timeline:
         ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
-Load:   │C0 → Compute │ │C1 → Prefetch│ │C2 → Compute │
+Load:   │C0 → buf0    │ │C1 → buf1    │ │C2 → buf0    │
         └─────────────┘ └─────────────┘ └─────────────┘
                       ↘               ↘               ↘
 Compute:               [C0]           [C1]           [C2]
 
-1. Pre-load first chunk to compute region
-2. Wait for current buffer, trigger async prefetch of next chunk to OTHER buffer
+1. Pre-load first chunk to compute buffer
+2. Wait for current buffer, trigger async prefetch to OTHER buffer
 3. Compute attention, merge results
 4. Swap buffers, repeat
-5. Finally attend to decode slot (new token's KV)
+5. Finally attend to decode_slot (new token's KV)
 ```
 
 ### HybridKVCacheManager
@@ -120,7 +147,7 @@ Compute:               [C0]           [C1]           [C2]
 
 Manages both GPU and CPU blocks:
 - `allocate()`: Allocate GPU block first, fallback to CPU
-- `allocate_cpu_only()`: Force CPU allocation (for chunked offload mode)
+- `allocate_cpu_only()`: Force CPU allocation (for ring buffer mode)
 - `get_all_cpu_blocks(seq)`: Get all CPU block IDs for a sequence
 - `get_prefilled_cpu_blocks(seq)`: Get CPU blocks from previous chunks
 - `get_write_slot_for_chunked_offload(seq)`: Get GPU slot for writing new KV (returns decode_slot)
@@ -136,9 +163,7 @@ def merge_attention_outputs(o1, lse1, o2, lse2):
     # Uses LSE to correctly weight and combine partial attention outputs
 ```
 
-### Ring Buffer Design (Future Optimization)
+### Pipeline Depth
 
-Current double-buffering limits pipeline depth. Planned improvement:
-- Unified ring buffer using all GPU slots (except decode)
-- Per-slot per-layer CUDA events for fine-grained sync
-- Deeper pipeline: prefetch N-1 blocks ahead (vs 1 chunk)
+- **Prefill**: Pipeline depth = N-1 (where N = num_gpu_blocks)
+- **Decode**: Pipeline depth = (N-1)/2 (double buffering within decode_load_slots)

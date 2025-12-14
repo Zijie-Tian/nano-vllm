@@ -14,7 +14,7 @@ class Config:
     enforce_eager: bool = False
     hf_config: AutoConfig | None = None
     eos: int = -1
-    kvcache_block_size: int = 256
+    kvcache_block_size: int = 4096
     num_kvcache_blocks: int = -1
 
     # CPU Offload configuration

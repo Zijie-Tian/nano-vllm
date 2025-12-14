@@ -95,16 +95,16 @@ class HybridKVCacheManager(KVCacheManager):
             num_cpu_blocks: Number of CPU pool blocks (overflow or primary storage)
             block_size: Tokens per block
             policy: Eviction policy (default: LRU)
-            cpu_primary: If True, use CPU as primary storage with three-region GPU buffer.
+            cpu_primary: If True, use CPU as primary storage with ring buffer GPU design.
                         If False, use GPU as primary with CPU as overflow (legacy mode).
-            num_prefetch_blocks: Number of prefetch blocks for three-region GPU buffer design
+            num_prefetch_blocks: Number of blocks for ring buffer pipeline (deprecated, ring_slots = num_gpu_slots)
         """
         self._block_size = block_size
         self.num_gpu_slots = num_gpu_slots
         self.num_cpu_blocks = num_cpu_blocks
         self.total_blocks = num_gpu_slots + num_cpu_blocks
-        self.cpu_primary = cpu_primary  # Three-region mode flag
-        self.num_prefetch_blocks = num_prefetch_blocks  # Three-region design parameter
+        self.cpu_primary = cpu_primary  # Ring buffer mode flag
+        self.num_prefetch_blocks = num_prefetch_blocks  # Ring buffer design parameter (deprecated)
 
         # Eviction policy
         self.policy = policy or LRUPolicy()
@@ -341,7 +341,7 @@ class HybridKVCacheManager(KVCacheManager):
         """
         assert not seq.block_table, "Sequence already has blocks"
 
-        # Three-region mode: all blocks are allocated to CPU
+        # Ring buffer mode: all blocks are allocated to CPU
         if self.cpu_primary:
             return self.allocate_cpu_only(seq)
 
@@ -471,7 +471,7 @@ class HybridKVCacheManager(KVCacheManager):
             block.token_ids = []
 
             if self.cpu_primary:
-                # Three-region mode: new block allocated to CPU
+                # Ring buffer mode: new block allocated to CPU
                 if not self.free_cpu_blocks:
                     raise RuntimeError("No free CPU blocks for decode")
                 cpu_block_id = self.free_cpu_blocks.popleft()
@@ -1025,14 +1025,14 @@ class HybridKVCacheManager(KVCacheManager):
                 break
         return pos
 
-    # ========== Three-region double buffering support ==========
+    # ========== Ring Buffer CPU-primary support ==========
 
     def allocate_cpu_only(self, seq: Sequence) -> None:
         """
-        Allocate CPU blocks for sequence (for three-region mode).
+        Allocate CPU blocks for sequence (for ring buffer mode).
 
         Unlike allocate(), here all blocks are allocated to CPU,
-        GPU is only used as working buffer.
+        GPU is only used as ring buffer for computation.
 
         Args:
             seq: Sequence to allocate
@@ -1092,10 +1092,10 @@ class HybridKVCacheManager(KVCacheManager):
                 cpu_blocks.append(block.cpu_block_id)
             else:
                 # If block is on GPU, it should have a corresponding CPU block
-                # In three-region mode, all data ultimately resides on CPU
+                # In ring buffer mode, all data ultimately resides on CPU
                 raise RuntimeError(
                     f"Block {logical_id} not on CPU (location={block.location}). "
-                    f"In three-region mode, all blocks should be on CPU."
+                    f"In ring buffer mode, all blocks should be on CPU."
                 )
         return cpu_blocks
 
@@ -1171,8 +1171,8 @@ class HybridKVCacheManager(KVCacheManager):
         """
         Get GPU slot for writing new KV during chunked offload decode.
 
-        In three-region design, always use Decode region (slot 0) to write new KV.
-        This avoids conflicts with Compute/Prefetch region loading operations.
+        In ring buffer design, always use decode_slot (slot[0]) to write new KV.
+        This avoids conflicts with loading operations which use slots[1:].
 
         Args:
             seq: Sequence
