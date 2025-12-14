@@ -6,24 +6,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline LLM inference. Currently supports Qwen3 models.
 
-## Commands
-
-```bash
-# Install
-pip install -e .
-
-# Run example
-python example.py
-
-# Run benchmarks
-python bench.py                    # Standard benchmark
-python bench_offload.py            # CPU offload benchmark
-
-# Test chunked attention
-CUDA_VISIBLE_DEVICES=4,5 python tests/test_chunked_attention.py 6 2048 64 2
-# Args: num_gpu_blocks input_len output_len num_prefetch_blocks
-```
-
 ## Architecture
 
 ### Core Components
@@ -157,23 +139,3 @@ Current double-buffering limits pipeline depth. Planned improvement:
 - Unified ring buffer using all GPU slots (except decode)
 - Per-slot per-layer CUDA events for fine-grained sync
 - Deeper pipeline: prefetch N-1 blocks ahead (vs 1 chunk)
-
-## Config Defaults
-
-- `max_num_batched_tokens`: 16384
-- `max_num_seqs`: 512
-- `kvcache_block_size`: 256
-- `gpu_memory_utilization`: 0.9
-- `enforce_eager`: False (enables CUDA graphs)
-
-## Testing CPU Offload
-
-```bash
-# Basic test with limited GPU blocks to trigger offload
-CUDA_VISIBLE_DEVICES=4,5 python tests/test_chunked_attention.py 6 2048 64 2
-
-# Verify consistency (run multiple times, output should be identical)
-for i in 1 2 3; do
-  CUDA_VISIBLE_DEVICES=4,5 python tests/test_chunked_attention.py 6 2048 32 2 2>&1 | tail -3
-done
-```
