@@ -38,8 +38,8 @@ def main():
     llm = LLM(
         path,
         enforce_eager=False,
-        max_model_len=128 * 1024,
-        max_num_batched_tokens=128 * 1024,
+        max_model_len=256 * 1024,
+        max_num_batched_tokens=256 * 1024,
         enable_cpu_offload=True,
         num_gpu_blocks=120,
         num_prefetch_blocks=4,
@@ -54,12 +54,12 @@ def main():
     # bench_prefill(llm, num_seqs=1, input_len=1024)
     # bench_prefill(llm, num_seqs=1, input_len=2048)
     # bench_prefill(llm, num_seqs=1, input_len=4096)
-    bench_prefill(llm, num_seqs=1, input_len=16 * 1024)
+    bench_prefill(llm, num_seqs=1, input_len=128 * 1024)
 
     print("=" * 60)
     print("Decode Benchmark (CPU Offload)")
     print("=" * 60)
-    bench_decode(llm, num_seqs=1, input_len=16 * 1024, max_output_len=128)
+    bench_decode(llm, num_seqs=1, input_len=128 * 1024, max_output_len=128)
     # bench_decode(llm, num_seqs=1, input_len=2048, max_output_len=128)
 
 
