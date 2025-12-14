@@ -336,7 +336,7 @@ class HybridKVCacheManager(KVCacheManager):
         """
         Allocate logical blocks for prefill.
 
-        In cpu_primary mode (Ping-Pong): All blocks are allocated to CPU.
+        In cpu_primary mode (Chunked Offload): All blocks are allocated to CPU.
         In legacy mode: Blocks are allocated to GPU when possible, overflow to CPU.
         """
         assert not seq.block_table, "Sequence already has blocks"
@@ -1167,9 +1167,9 @@ class HybridKVCacheManager(KVCacheManager):
             return block.cpu_block_id
         return -1
 
-    def get_write_slot_for_pingpong(self, seq: Sequence) -> int:
+    def get_write_slot_for_chunked_offload(self, seq: Sequence) -> int:
         """
-        Get GPU slot for writing new KV during three-region decode.
+        Get GPU slot for writing new KV during chunked offload decode.
 
         In three-region design, always use Decode region (slot 0) to write new KV.
         This avoids conflicts with Compute/Prefetch region loading operations.

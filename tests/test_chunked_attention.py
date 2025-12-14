@@ -71,7 +71,7 @@ def test_chunked_prefill(num_gpu_blocks=10, input_len=8192, output_len=64, num_p
     path = os.path.expanduser("~/models/Qwen3-4B-Instruct-2507/")
 
     print(f"=" * 60)
-    print(f"Chunked Prefill Test (Ping-Pong)")
+    print(f"Chunked Prefill Test (Chunked Offload)")
     print(f"=" * 60)
     print(f"  target_input_len: ~{input_len} tokens")
     print(f"  num_gpu_blocks: {num_gpu_blocks}")
@@ -111,7 +111,7 @@ def test_chunked_decode(num_gpu_blocks=10, input_len=8192, output_len=128, num_p
     path = os.path.expanduser("~/models/Qwen3-4B-Instruct-2507/")
 
     print(f"=" * 60)
-    print(f"Chunked Decode Test (Ping-Pong)")
+    print(f"Chunked Decode Test (Chunked Offload)")
     print(f"=" * 60)
     print(f"  target_input_len: ~{input_len} tokens")
     print(f"  output_len: {output_len} tokens")

@@ -17,6 +17,7 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 **ModelRunner** (`nanovllm/engine/model_runner.py`):
 - Loads model weights, allocates KV cache, captures CUDA graphs
 - Rank 0 is main process; ranks 1+ run via `loop()` with shared memory events
+- Chunked offload methods: `run_chunked_offload_prefill()`, `run_chunked_offload_decode()`
 
 **Scheduler** (`nanovllm/engine/scheduler.py`):
 - Two-phase scheduling: prefill (waiting queue) then decode (running queue)
@@ -34,7 +35,8 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 
 **Global Context** (`nanovllm/utils/context.py`):
 - Stores attention metadata via `get_context()`/`set_context()`
-- Key fields: `cu_seqlens`, `slot_mapping`, `block_tables`, `chunked_seq`
+- Key fields: `cu_seqlens`, `slot_mapping`, `block_tables`, `chunked_seq`, `kvcache_manager`
+- `kvcache_manager`: Reference to HybridKVCacheManager for chunked attention (set when `is_chunked_prefill=True`)
 
 ## CPU Offload System
 
@@ -118,9 +120,10 @@ Compute:               [C0]           [C1]           [C2]
 
 Manages both GPU and CPU blocks:
 - `allocate()`: Allocate GPU block first, fallback to CPU
-- `allocate_cpu_only()`: Force CPU allocation (for chunked prefill)
+- `allocate_cpu_only()`: Force CPU allocation (for chunked offload mode)
 - `get_all_cpu_blocks(seq)`: Get all CPU block IDs for a sequence
 - `get_prefilled_cpu_blocks(seq)`: Get CPU blocks from previous chunks
+- `get_write_slot_for_chunked_offload(seq)`: Get GPU slot for writing new KV (returns decode_slot)
 - `may_offload()`: Offload GPU blocks to CPU when decode slot fills
 
 ### Online Softmax Merge
