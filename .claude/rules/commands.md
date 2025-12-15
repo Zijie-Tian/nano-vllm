@@ -21,6 +21,6 @@ python bench_offload.py            # CPU offload benchmark
 
 - `max_num_batched_tokens`: 16384
 - `max_num_seqs`: 512
-- `kvcache_block_size`: 256
+- `kvcache_block_size`: 4096
 - `gpu_memory_utilization`: 0.9
 - `enforce_eager`: False (enables CUDA graphs)

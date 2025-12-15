@@ -24,7 +24,7 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 
 **BlockManager** (`nanovllm/engine/block_manager.py`):
 - Paged attention block allocation with prefix caching via xxhash
-- Blocks are 256 tokens by default
+- Blocks are 4096 tokens by default (configurable via `kvcache_block_size`)
 
 ### Model & Attention
 
@@ -85,11 +85,39 @@ offload_slot_to_cpu(slot_idx, cpu_block_id)           # Async offload to CPU
 Each slot has per-layer CUDA events for fine-grained synchronization:
 - `ring_slot_ready[slot_idx][layer_id]`: H2D transfer completion
 - `ring_slot_offload_done[slot_idx][layer_id]`: D2H transfer completion
+- `ring_slot_compute_done[slot_idx][layer_id]`: Attention compute completion (for safe buffer reuse)
 
 This enables:
 1. Overlapped H2D transfer with attention computation
 2. Each layer independently waits for its own data
 3. Pipeline depth = N-1 for prefill (N slots, 1 for writing)
+
+### Async Pipeline with Double Buffering
+
+**File**: `nanovllm/layers/attention.py` - `_ring_buffer_pipeline_load()`
+
+The async pipeline uses double buffering with `compute_done` events to prevent data races:
+
+```python
+# Synchronization flow for safe async pipeline:
+1. load_to_slot_layer() waits for compute_done[slot] before overwriting
+2. wait_slot_layer() waits for slot_ready[slot] before reading
+3. After flash_attn, record_slot_compute_done(slot) allows next load
+
+Timeline with 2 slots (A, B):
+┌──────────────┐
+│ Load B0→A    │
+└──────────────┘
+               ┌──────────────┐ ┌──────────────┐
+               │ Load B1→B    │ │ Load B2→A    │ ...
+               └──────────────┘ └──────────────┘
+                              ↘               ↘
+                ┌──────────────┐ ┌──────────────┐
+                │ Compute(A)   │ │ Compute(B)   │ ...
+                └──────────────┘ └──────────────┘
+```
+
+**Key**: `load_to_slot_layer` internally waits for `compute_done` before starting transfer, preventing data race where new data overwrites unread data.
 
 ### Chunked Prefill Flow (Ring Buffer Pipeline)
 
@@ -163,7 +191,47 @@ def merge_attention_outputs(o1, lse1, o2, lse2):
     # Uses LSE to correctly weight and combine partial attention outputs
 ```
 
+### Flash Attention with LSE
+
+**File**: `nanovllm/kvcache/chunked_attention.py` - `flash_attn_with_lse()`
+
+Uses native `flash_attn_func` with `return_attn_probs=True` to get LSE output. This:
+- Natively supports GQA (no memory overhead for head replication)
+- Avoids `repeat_interleave` which would copy K/V heads (40MB+ per call)
+- Returns `(output, lse)` for online softmax merging
+
 ### Pipeline Depth
 
 - **Prefill**: Pipeline depth = N-1 (where N = num_gpu_blocks)
 - **Decode**: Pipeline depth = (N-1)/2 (double buffering within decode_load_slots)
+
+## Performance Optimizations
+
+### Warmup Model Optimization
+
+**File**: `nanovllm/engine/model_runner.py` - `warmup_model()`
+
+Warmup uses a reasonable sequence length (`block_size * 2`) instead of `max_model_len`:
+- Avoids huge intermediate activation memory allocation
+- 8192 tokens is sufficient to trigger CUDA kernel JIT compilation
+- Prevents OOM during initialization for long-context configs (256K+)
+
+### Memory Considerations
+
+**GQA Head Replication**: The chunked attention uses native `flash_attn_func` which handles GQA internally without memory overhead. Previous implementation used `repeat_interleave` which copied K/V heads, adding ~40MB per attention call.
+
+**Block Size Trade-off**:
+- Larger block_size (4096) = fewer H2D transfers, better throughput
+- Smaller block_size (256) = finer granularity, less wasted memory
+- Current default: 4096 tokens per block
+
+## Configuration Defaults
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `kvcache_block_size` | 4096 | Tokens per KV cache block |
+| `max_num_batched_tokens` | 16384 | Max tokens per batch |
+| `max_num_seqs` | 512 | Max concurrent sequences |
+| `gpu_memory_utilization` | 0.9 | GPU memory fraction for KV cache |
+| `enforce_eager` | False | Disable CUDA graphs if True |
+| `num_prefetch_blocks` | 2 | Ring buffer pipeline depth (deprecated, uses num_gpu_blocks) |
