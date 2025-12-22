@@ -3,7 +3,7 @@ KV Cache management module.
 
 This module provides pluggable KV cache management strategies:
 - GPUOnlyManager: Pure GPU (default, current nano-vllm behavior)
-- HybridKVCacheManager: CPU offload with CUDA Graph support
+- HybridKVCacheManager: CPU-primary storage with GPU ring buffer for computation
 
 Usage:
     from nanovllm.kvcache import create_kvcache_manager

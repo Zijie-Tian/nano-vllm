@@ -173,13 +173,16 @@ Compute:               [C0]           [C1]           [C2]
 
 **File**: `nanovllm/kvcache/hybrid_manager.py`
 
-Manages both GPU and CPU blocks:
-- `allocate()`: Allocate GPU block first, fallback to CPU
-- `allocate_cpu_only()`: Force CPU allocation (for ring buffer mode)
+CPU-primary KV cache manager with GPU ring buffer design:
+- All KV cache is stored on CPU as primary storage
+- GPU is used as a ring buffer for computation only
+- Ring buffer enables pipelined H2D transfers overlapped with computation
+
+Key methods:
+- `allocate()` / `allocate_cpu_only()`: Allocate all blocks to CPU
 - `get_all_cpu_blocks(seq)`: Get all CPU block IDs for a sequence
 - `get_prefilled_cpu_blocks(seq)`: Get CPU blocks from previous chunks
 - `get_write_slot_for_chunked_offload(seq)`: Get GPU slot for writing new KV (returns decode_slot)
-- `may_offload()`: Offload GPU blocks to CPU when decode slot fills
 
 ### Online Softmax Merge
 
