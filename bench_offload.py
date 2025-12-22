@@ -9,18 +9,18 @@ from nanovllm.kvcache.sparse.hybrid import HybridPolicy
 from nanovllm.kvcache.sparse.full_policy import FullAttentionPolicy
 
 
-def bench_decode(llm, num_seqs, input_len, max_output_len):
+def bench_decode(llm, num_seqs, input_len, output_len):
     """Benchmark decode performance (original test)"""
     seed(0)
     prompt_token_ids = [[randint(0, 10000) for _ in range(input_len)] for _ in range(num_seqs)]
-    sampling_params = [SamplingParams(temperature=0.6, ignore_eos=True, max_tokens=max_output_len) for _ in range(num_seqs)]
+    sampling_params = SamplingParams(temperature=0.6, ignore_eos=True, max_tokens=output_len)
 
     t = time.time()
     llm.generate(prompt_token_ids, sampling_params, use_tqdm=False)
     t = time.time() - t
-    total_output_tokens = sum(sp.max_tokens for sp in sampling_params)
+    total_output_tokens = num_seqs * output_len
     throughput = total_output_tokens / t
-    print(f"[Decode] Output: {total_output_tokens}tok, Time: {t:.2f}s, Throughput: {throughput:.2f}tok/s")
+    print(f"[Decode] Input: {num_seqs}x{input_len}tok, Output: {total_output_tokens}tok, Time: {t:.2f}s, Throughput: {throughput:.2f}tok/s")
 
 
 def bench_prefill(llm, num_seqs, input_len):
@@ -95,18 +95,20 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--no-sparse", action="store_true", help="Disable sparse attention (baseline)")
     parser.add_argument("--topk", type=int, default=8, help="Top-K blocks for Quest")
-    parser.add_argument("--input-len", type=int, default=128 * 1024, help="Input length in tokens")
+    parser.add_argument("--input-len", type=int, default=None, help="Input length in tokens (default: max_len - 1 for prefill, max_len - output_len for decode)")
     parser.add_argument("--output-len", type=int, default=128, help="Output length in tokens")
     args = parser.parse_args()
 
-    path = os.path.expanduser("~/models/Qwen3-4B-Instruct-2507/")
+    path = os.path.expanduser("~/models/Qwen3-0.6B/")
+    # Note: Qwen3-0.6B max_position_embeddings = 40960, cannot exceed this
+    max_len = 40960
     llm = LLM(
         path,
         enforce_eager=False,
-        max_model_len=256 * 1024,
-        max_num_batched_tokens=256 * 1024,
+        max_model_len=max_len,
+        max_num_batched_tokens=max_len,
         enable_cpu_offload=True,
-        num_gpu_blocks=120,
+        num_gpu_blocks=8,  # Small GPU buffer for offload testing
         num_prefetch_blocks=4,
     )
 
@@ -120,15 +122,19 @@ def main():
     # Warmup
     llm.generate(["Benchmark: "], SamplingParams())
 
+    # Default input lengths based on max_len
+    prefill_input_len = args.input_len if args.input_len else max_len - 1
+    decode_input_len = args.input_len if args.input_len else max_len - args.output_len
+
     print("=" * 60)
     print("Prefill Benchmark (CPU Offload)")
     print("=" * 60)
-    bench_prefill(llm, num_seqs=1, input_len=args.input_len)
+    bench_prefill(llm, num_seqs=1, input_len=prefill_input_len)
 
     print("=" * 60)
     print("Decode Benchmark (CPU Offload)")
     print("=" * 60)
-    bench_decode(llm, num_seqs=1, input_len=args.input_len, max_output_len=args.output_len)
+    bench_decode(llm, num_seqs=1, input_len=decode_input_len, output_len=args.output_len)
 
 
 if __name__ == "__main__":

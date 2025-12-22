@@ -235,3 +235,62 @@ Warmup uses a reasonable sequence length (`block_size * 2`) instead of `max_mode
 | `gpu_memory_utilization` | 0.9 | GPU memory fraction for KV cache |
 | `enforce_eager` | False | Disable CUDA graphs if True |
 | `num_prefetch_blocks` | 2 | Ring buffer pipeline depth (deprecated, uses num_gpu_blocks) |
+
+## Benchmarking
+
+### Benchmark Files
+
+| File | Purpose | Key Parameters |
+|------|---------|----------------|
+| `bench.py` | Standard GPU benchmark | Pure GPU inference |
+| `bench_offload.py` | CPU offload benchmark | `enable_cpu_offload=True`, `num_gpu_blocks=8` |
+| `bench_vllm.py` | vLLM comparison | Uses vLLM API for baseline comparison |
+
+### Current Test Configuration
+
+All benchmark files are aligned to use:
+- **Model**: `~/models/Qwen3-0.6B/`
+- **max_model_len**: 40960 (limited by model's `max_position_embeddings`)
+- **Prefill test**: input_len = max_len - 1 (40959 tokens)
+- **Decode test**: input_len = max_len - 128, output_len = 128
+
+### Common Issues and Solutions
+
+**1. `max_num_batched_tokens` assertion error**
+```
+AssertionError: assert self.max_num_batched_tokens >= self.max_model_len
+```
+**Solution**: Set `max_num_batched_tokens=max_model_len` when using large context lengths.
+
+**2. CUDA graph block_tables dimension mismatch**
+```
+RuntimeError: The expanded size of the tensor (1) must match the existing size (2)
+```
+**Cause**: `input_len + output_len > max_model_len` causes more blocks than pre-allocated in CUDA graph.
+**Solution**: Ensure `input_len + output_len <= max_model_len`.
+
+**3. RoPE position embedding out of bounds**
+```
+Assertion `index out of bounds: 0 <= ... < 40960` failed
+```
+**Cause**: Sequence length exceeds model's `max_position_embeddings`.
+**Solution**: Check model's `config.json` for `max_position_embeddings` and limit `max_model_len` accordingly.
+
+### Model Context Length Limits
+
+| Model | max_position_embeddings | Notes |
+|-------|------------------------|-------|
+| Qwen3-0.6B | 40960 | ~40K context |
+| Qwen3-4B | 40960 | ~40K context |
+| Qwen2.5-7B-Instruct-1M | 1048576 | 1M context |
+
+**Important**: Always check `max_position_embeddings` in `config.json` before setting `max_model_len`.
+
+### Performance Reference (Qwen3-0.6B, 40K context)
+
+| Mode | Prefill (tok/s) | Decode (tok/s) |
+|------|-----------------|----------------|
+| GPU (bench.py) | ~18,000 | ~100 |
+| CPU Offload (bench_offload.py) | ~7,200 | ~3.5 |
+
+CPU offload trades performance for memory efficiency, enabling long-context inference on limited GPU memory.
