@@ -1,196 +1,119 @@
-"""Tests for CPU-GPU offload engine."""
+"""
+Test script for OffloadEngine - CPU-GPU KV cache transfer engine.
 
-import pytest
+Demonstrates: ring buffer, H2D/D2H transfers, CUDA events, KV access.
+"""
+
 import torch
-
 from nanovllm.kvcache.offload_engine import OffloadEngine
 
+# ============================================================
+# Utility Functions
+# ============================================================
 
-class TestOffloadEngine:
-    """Tests for OffloadEngine."""
+def verify(tensor: torch.Tensor, expected: float, name: str) -> None:
+    """Verify tensor contains expected value."""
+    actual = tensor.mean().item()
+    assert abs(actual - expected) < 0.01, f"{name}: {actual} != {expected}"
 
-    @pytest.fixture
-    def engine(self):
-        """Create a small engine for testing."""
-        return OffloadEngine(
-            num_layers=2,
-            num_gpu_blocks=4,
-            num_cpu_blocks=8,
-            block_size=256,
-            num_kv_heads=4,
-            head_dim=64,
-            dtype=torch.float16,
-            num_streams=2,
-        )
+# ============================================================
+# Configuration
+# ============================================================
 
-    def test_initialization(self, engine):
-        """Test engine initialization."""
-        # Check GPU cache shape
-        assert engine.k_cache_gpu.shape == (2, 4, 256, 4, 64)
-        assert engine.v_cache_gpu.shape == (2, 4, 256, 4, 64)
+NUM_LAYERS = 4
+NUM_GPU_BLOCKS = 8
+NUM_CPU_BLOCKS = 16
+BLOCK_SIZE = 64
+NUM_KV_HEADS = 4
+HEAD_DIM = 32
 
-        # Check CPU cache shape
-        assert engine.k_cache_cpu.shape == (2, 8, 256, 4, 64)
-        assert engine.v_cache_cpu.shape == (2, 8, 256, 4, 64)
+# ============================================================
+# Main Test Script
+# ============================================================
 
-        # Check pinned memory
-        assert engine.k_cache_cpu.is_pinned()
-        assert engine.v_cache_cpu.is_pinned()
+# 1. Initialize
+engine = OffloadEngine(
+    num_layers=NUM_LAYERS,
+    num_gpu_blocks=NUM_GPU_BLOCKS,
+    num_cpu_blocks=NUM_CPU_BLOCKS,
+    block_size=BLOCK_SIZE,
+    num_kv_heads=NUM_KV_HEADS,
+    head_dim=HEAD_DIM,
+    dtype=torch.float16,
+)
 
-        # Check gather indices
-        assert engine.gather_indices_cpu.shape == (2, 4)
-        assert engine.gather_indices_gpu.shape == (2, 4)
+# 2. Ring buffer slot management
+for chunk_idx in range(12):
+    write_slot = engine.get_write_slot_for_prefill(chunk_idx)
+    load_slots = engine.get_load_slots_for_prefill(write_slot)
+    
+    print("chunk idx", chunk_idx, "write slots:", write_slot, "load slots:", load_slots)
+    
+    assert write_slot == chunk_idx % engine.num_ring_slots
+    assert write_slot not in load_slots
 
-    def test_get_layer_cache(self, engine):
-        """Test getting layer cache."""
-        k, v = engine.get_layer_cache(0)
-        assert k.shape == (4, 256, 4, 64)
-        assert v.shape == (4, 256, 4, 64)
-        assert k.device.type == "cuda"
-        assert v.device.type == "cuda"
+assert engine.decode_slot == 0
+assert engine.get_load_slots_for_decode() == list(range(1, NUM_GPU_BLOCKS))
 
-    def test_prefetch_and_offload(self, engine):
-        """Test async prefetch and offload."""
-        # Write some data to CPU block 0
-        engine.k_cache_cpu[0, 0].fill_(1.0)
-        engine.v_cache_cpu[0, 0].fill_(2.0)
+# 3. Per-slot per-layer H2D transfer
+engine.k_cache_cpu[0, 0].fill_(42.0)
+engine.v_cache_cpu[0, 0].fill_(42.5)
 
-        # Prefetch to GPU block 2
-        event = engine.prefetch_block_async(
-            layer_id=0,
-            cpu_block_id=0,
-            gpu_block_id=2,
-        )
-        event.synchronize()
+engine.load_to_slot_layer(slot_idx=1, layer_id=0, cpu_block_id=0)
+engine.wait_slot_layer(slot_idx=1, layer_id=0)
 
-        # Verify data was copied (move GPU to CPU for comparison)
-        assert torch.allclose(engine.k_cache_gpu[0, 2].cpu(), engine.k_cache_cpu[0, 0])
-        assert torch.allclose(engine.v_cache_gpu[0, 2].cpu(), engine.v_cache_cpu[0, 0])
+verify(engine.k_cache_gpu[0, 1], 42.0, "H2D K")
+verify(engine.v_cache_gpu[0, 1], 42.5, "H2D V")
 
-        # Modify GPU data
-        engine.k_cache_gpu[0, 2].fill_(3.0)
-        engine.v_cache_gpu[0, 2].fill_(4.0)
+# 4. Compute-done event (pipeline safety)
+engine.record_slot_compute_done(slot_idx=1, layer_id=0)
 
-        # Offload to CPU block 5
-        event = engine.offload_block_async(
-            layer_id=0,
-            gpu_block_id=2,
-            cpu_block_id=5,
-        )
-        event.synchronize()
+engine.k_cache_cpu[0, 1].fill_(100.0)
+engine.v_cache_cpu[0, 1].fill_(100.5)
+engine.load_to_slot_layer(slot_idx=1, layer_id=0, cpu_block_id=1)
+engine.wait_slot_layer(slot_idx=1, layer_id=0)
 
-        # Verify data was copied
-        assert torch.allclose(engine.k_cache_cpu[0, 5], engine.k_cache_gpu[0, 2].cpu())
-        assert torch.allclose(engine.v_cache_cpu[0, 5], engine.v_cache_gpu[0, 2].cpu())
+verify(engine.k_cache_gpu[0, 1], 100.0, "Reuse K")
+verify(engine.v_cache_gpu[0, 1], 100.5, "Reuse V")
 
-    def test_update_gather_indices(self, engine):
-        """Test updating gather indices."""
-        # Manually set CPU data
-        for i in range(8):
-            engine.k_cache_cpu[0, i].fill_(float(i))
-            engine.v_cache_cpu[0, i].fill_(float(i + 100))
+# 5. D2H offload
+engine.k_cache_gpu[1, 2].fill_(77.0)
+engine.v_cache_gpu[1, 2].fill_(77.5)
 
-        # Update indices for layer 0: (cpu_block_id, gpu_slot)
-        mappings = [(2, 0), (5, 1), (1, 2), (7, 3)]
-        engine.update_gather_indices(layer_id=0, mappings=mappings)
-        torch.cuda.synchronize()
+engine.offload_slot_to_cpu(slot_idx=2, cpu_block_id=5)
+engine.wait_slot_offload(slot_idx=2)
 
-        # Verify indices were set
-        expected = torch.tensor([2, 5, 1, 7], dtype=torch.int64)
-        assert torch.equal(engine.gather_indices_cpu[0], expected)
+verify(engine.k_cache_cpu[1, 5], 77.0, "D2H K")
+verify(engine.v_cache_cpu[1, 5], 77.5, "D2H V")
 
-    def test_gathered_h2d_layer(self, engine):
-        """Test gathered H2D copy for a layer."""
-        # Set up CPU data with known values
-        for i in range(8):
-            engine.k_cache_cpu[0, i].fill_(float(i))
-            engine.v_cache_cpu[0, i].fill_(float(i + 100))
+# 6. KV access methods
+k, v = engine.get_kv_for_slot(slot_idx=1, layer_id=0)
+assert k.shape == (1, BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM)
 
-        # Set gather indices: (cpu_block_id, gpu_slot)
-        # GPU slot 0 gets CPU block 3, GPU slot 1 gets CPU block 0, etc.
-        mappings = [(3, 0), (0, 1), (7, 2), (2, 3)]
-        engine.update_gather_indices(layer_id=0, mappings=mappings)
-        torch.cuda.synchronize()
+k, v = engine.get_kv_for_slots(layer_id=0, slot_indices=[0, 1, 2])
+assert k.shape == (1, 3 * BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM)
 
-        # Execute gathered H2D
-        engine.gathered_h2d_layer(layer_id=0)
-        torch.cuda.synchronize()
+engine.k_cache_gpu[0, engine.decode_slot].fill_(33.0)
+k, v = engine.get_kv_for_decode_slot_accumulated(layer_id=0, num_tokens=10)
+assert k.shape == (1, 10, NUM_KV_HEADS, HEAD_DIM)
+verify(k, 33.0, "Decode slot K")
 
-        # Verify: GPU slot 0 should have CPU block 3's data
-        assert torch.allclose(engine.k_cache_gpu[0, 0],
-                              torch.full_like(engine.k_cache_gpu[0, 0], 3.0))
-        # GPU slot 1 should have CPU block 0's data
-        assert torch.allclose(engine.k_cache_gpu[0, 1],
-                              torch.full_like(engine.k_cache_gpu[0, 1], 0.0))
-        # GPU slot 2 should have CPU block 7's data
-        assert torch.allclose(engine.k_cache_gpu[0, 2],
-                              torch.full_like(engine.k_cache_gpu[0, 2], 7.0))
-        # GPU slot 3 should have CPU block 2's data
-        assert torch.allclose(engine.k_cache_gpu[0, 3],
-                              torch.full_like(engine.k_cache_gpu[0, 3], 2.0))
+# 7. Batch transfer
+cpu_blocks = [2, 3, 4]
+gpu_slots = [3, 4, 5]
+for cpu_id in cpu_blocks:
+    engine.k_cache_cpu[0, cpu_id].fill_(50.0 + cpu_id)
 
-    def test_multi_layer_independence(self, engine):
-        """Test that layers are independent."""
-        # Set different data for each layer
-        engine.k_cache_cpu[0, 0].fill_(1.0)
-        engine.k_cache_cpu[1, 0].fill_(2.0)
+engine.load_cpu_blocks_to_gpu_slots(layer_id=0, cpu_block_ids=cpu_blocks, gpu_slot_ids=gpu_slots)
 
-        # Prefetch layer 0
-        event = engine.prefetch_block_async(0, 0, 0)
-        event.synchronize()
+for cpu_id, gpu_slot in zip(cpu_blocks, gpu_slots):
+    verify(engine.k_cache_gpu[0, gpu_slot], 50.0 + cpu_id, f"Batch slot {gpu_slot}")
 
-        # Verify only layer 0 was affected
-        assert torch.allclose(engine.k_cache_gpu[0, 0],
-                              torch.full_like(engine.k_cache_gpu[0, 0], 1.0))
-        # Layer 1 should be zeros (initial state)
-        assert not torch.allclose(engine.k_cache_gpu[1, 0],
-                                  torch.full_like(engine.k_cache_gpu[1, 0], 2.0))
+# 8. Gather indices (CUDA graph compatible)
+engine.update_gather_indices(layer_id=0, mappings=[(0, 0), (1, 1), (2, 2)])
+assert engine.gather_indices_gpu[0, :3].tolist() == [0, 1, 2]
 
+engine.clear_gather_indices(layer_id=0)
+assert engine.gather_indices_gpu[0, 0].item() == -1
 
-class TestOffloadEngineFixedAddresses:
-    """Tests verifying fixed address property for CUDA Graph compatibility."""
-
-    @pytest.fixture
-    def engine(self):
-        """Create engine for address tests."""
-        return OffloadEngine(
-            num_layers=2,
-            num_gpu_blocks=4,
-            num_cpu_blocks=8,
-            block_size=256,
-            num_kv_heads=4,
-            head_dim=64,
-            dtype=torch.float16,
-            num_streams=2,
-        )
-
-    def test_gpu_cache_address_fixed(self, engine):
-        """Verify GPU cache addresses don't change."""
-        k_ptr_before = engine.k_cache_gpu.data_ptr()
-        v_ptr_before = engine.v_cache_gpu.data_ptr()
-
-        # Perform some operations - mappings is List[(cpu_block_id, gpu_slot)]
-        mappings = [(0, 0), (1, 1), (2, 2), (3, 3)]
-        engine.update_gather_indices(0, mappings)
-        engine.gathered_h2d_layer(0)
-        torch.cuda.synchronize()
-
-        # Addresses should be the same
-        assert engine.k_cache_gpu.data_ptr() == k_ptr_before
-        assert engine.v_cache_gpu.data_ptr() == v_ptr_before
-
-    def test_gather_indices_gpu_address_fixed(self, engine):
-        """Verify gather indices GPU tensor address doesn't change."""
-        ptr_before = engine.gather_indices_gpu.data_ptr()
-
-        # Update indices multiple times - mappings is List[(cpu_block_id, gpu_slot)]
-        mappings = [(0, 0), (1, 1), (2, 2), (3, 3)]
-        for _ in range(10):
-            engine.update_gather_indices(0, mappings)
-        torch.cuda.synchronize()
-
-        assert engine.gather_indices_gpu.data_ptr() == ptr_before
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+print("test_offload_engine: PASSED")

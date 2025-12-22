@@ -125,6 +125,11 @@ class OffloadEngine:
             dtype=torch.int64, device="cuda"
         )
 
+        # Log memory allocation
+        gpu_mem_mb = self.gpu_memory_bytes() / (1024 * 1024)
+        cpu_mem_mb = self.cpu_memory_bytes() / (1024 * 1024)
+        logger.info(f"  GPU memory: {gpu_mem_mb:.1f} MB, CPU memory: {cpu_mem_mb:.1f} MB")
+
         # ========== Transfer streams for async operations ==========
         self.transfer_streams = [torch.cuda.Stream() for _ in range(num_streams)]
         self.compute_stream = torch.cuda.current_stream()
