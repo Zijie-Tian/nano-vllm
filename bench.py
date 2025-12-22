@@ -43,17 +43,17 @@ def main():
     print("=" * 60)
     print("Prefill Benchmark")
     print("=" * 60)
-    bench_prefill(llm, num_seqs=1, input_len=1024)
+    # bench_prefill(llm, num_seqs=1, input_len=1024)
     # bench_prefill(llm, num_seqs=1, input_len=2048)
-    # bench_prefill(llm, num_seqs=1, input_len=4095)
+    bench_prefill(llm, num_seqs=1, input_len=4095)
     # bench_prefill(llm, num_seqs=16, input_len=1024)
     # bench_prefill(llm, num_seqs=64, input_len=1024)
 
     print("=" * 60)
     print("Decode Benchmark")
     print("=" * 60)
-    bench_decode(llm, num_seqs=1, max_input_len=1024, max_output_len=1024)
-    # bench_decode(llm, num_seqs=256, max_input_len=1024, max_output_len=1024)
+    # bench_decode(llm, num_seqs=1, max_input_len=1024, max_output_len=1024)
+    bench_decode(llm, num_seqs=1, max_input_len=4072, max_output_len=16)
 
 
 if __name__ == "__main__":

@@ -700,6 +700,20 @@ class ModelRunner:
             # Offload this chunk's ring buffer slot to CPU (async)
             if block_idx < len(cpu_block_ids):
                 cpu_block_id = cpu_block_ids[block_idx]
+
+                # Call sparse policy hook before offload (to capture metadata)
+                sparse_policy = self.kvcache_manager.sparse_policy
+                if sparse_policy is not None:
+                    num_tokens = chunk_end - chunk_start
+                    for layer_id in range(offload_engine.num_layers):
+                        k_cache = offload_engine.k_cache_gpu[layer_id, write_slot, :num_tokens]
+                        sparse_policy.on_block_offloaded(
+                            cpu_block_id=cpu_block_id,
+                            layer_id=layer_id,
+                            k_cache=k_cache,
+                            num_valid_tokens=num_tokens,
+                        )
+
                 offload_engine.offload_slot_to_cpu(write_slot, cpu_block_id)
 
             # Wait for offload to complete before next chunk

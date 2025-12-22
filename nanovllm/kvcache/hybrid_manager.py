@@ -25,6 +25,11 @@ from nanovllm.kvcache.offload_engine import OffloadEngine
 from nanovllm.kvcache.policies.base_policy import EvictionPolicy
 from nanovllm.kvcache.policies.lru_policy import LRUPolicy
 
+# Type checking import for sparse policy
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from nanovllm.kvcache.sparse.policy import SparsePolicy
+
 
 class BlockLocation(Enum):
     """Where a logical block's data currently resides."""
@@ -142,6 +147,9 @@ class HybridKVCacheManager(KVCacheManager):
         # Key: sequence id, Value: starting position where decode began in current block
         self._decode_start_pos: Dict[int, int] = {}
 
+        # Sparse attention policy (optional)
+        self.sparse_policy: Optional["SparsePolicy"] = None
+
     @property
     def block_size(self) -> int:
         return self._block_size
@@ -173,6 +181,24 @@ class HybridKVCacheManager(KVCacheManager):
         """Get GPU K/V cache tensors for a layer."""
         assert self.offload_engine is not None
         return self.offload_engine.get_layer_cache(layer_id)
+
+    def set_sparse_policy(self, policy: "SparsePolicy") -> None:
+        """
+        Set sparse attention policy for block selection.
+
+        The sparse policy determines which KV blocks to load from CPU
+        for each query chunk during chunked attention computation.
+
+        Args:
+            policy: SparsePolicy instance (e.g., VerticalSlashPolicy, QuestPolicy)
+
+        Example:
+            from nanovllm.kvcache.sparse import VerticalSlashPolicy, VerticalSlashConfig
+            policy = VerticalSlashPolicy(VerticalSlashConfig(num_sink_blocks=2))
+            manager.set_sparse_policy(policy)
+        """
+        self.sparse_policy = policy
+        logger.info(f"Sparse attention policy set: {policy}")
 
     def _allocate_gpu_slot(self, protected_logical_ids: Optional[Set[int]] = None) -> int:
         """

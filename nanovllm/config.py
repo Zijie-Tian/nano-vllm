@@ -28,6 +28,13 @@ class Config:
     num_gpu_kvcache_blocks: int = -1
     num_cpu_kvcache_blocks: int = -1
 
+    # Sparse attention configuration
+    sparse_policy: str | None = None  # "vertical_slash", "quest", "streaming_llm", or None
+    sparse_num_sink_blocks: int = 1  # Number of sink blocks for sparse patterns
+    sparse_local_window_blocks: int = 2  # Local window size for VerticalSlash
+    sparse_topk_blocks: int = 8  # Top-K blocks for Quest
+    sparse_threshold_blocks: int = 4  # Apply sparse only when blocks > threshold
+
     def __post_init__(self):
         assert os.path.isdir(self.model)
         assert self.kvcache_block_size % 256 == 0
