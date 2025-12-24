@@ -296,3 +296,70 @@ Assertion `index out of bounds: 0 <= ... < 40960` failed
 | CPU Offload (bench_offload.py) | ~7,200 | ~3.5 |
 
 CPU offload trades performance for memory efficiency, enabling long-context inference on limited GPU memory.
+
+## TODO: Performance Optimizations
+
+### 1. Fix Non-Contiguous CPU Cache Layout (High Priority)
+
+**Problem**: Device-to-Pageable transfers causing 16x slowdown in CPU offload.
+
+**Root Cause**:
+Current CPU cache layout `[num_layers, num_cpu_blocks, ...]` causes non-contiguous memory access when slicing `k_cache_cpu[:, cpu_block_id]`. Although the tensor is pinned, CUDA runtime falls back to slow pageable transfer path because the slice is non-contiguous.
+
+**Evidence from Profiling** (`tests/test_pinned_transfer.py` + nsys):
+```
+Non-contiguous slice (current):
+- Transfer type: Device -> Pageable
+- Avg duration: 5.825 ms
+- Bandwidth: 1.44 GB/s
+
+Contiguous layout (optimized):
+- Transfer type: Device -> Pinned
+- Avg duration: 0.364 ms
+- Bandwidth: 23.11 GB/s
+
+Performance gain: 16x faster!
+```
+
+**Technical Details**:
+- Pinned memory requires both `pin_memory=True` AND contiguous layout for fast DMA
+- Non-contiguous slice forces CUDA to:
+  1. Allocate temporary pageable buffer on CPU
+  2. Copy non-contiguous data to buffer (CPU overhead)
+  3. Transfer from pageable buffer to GPU (slow path)
+- PCIe DMA engine requires contiguous memory blocks for optimal throughput
+
+**Solution**:
+Change CPU cache tensor layout from:
+```python
+# Current (non-contiguous when accessing per-block):
+k_cache_cpu = torch.zeros(
+    num_layers, num_cpu_blocks, block_size, num_kv_heads, head_dim,
+    dtype=dtype, device="cpu", pin_memory=True
+)
+# Access: k_cache_cpu[:, cpu_block_id]  -> non-contiguous!
+
+# Optimized (contiguous per-block access):
+k_cache_cpu = torch.zeros(
+    num_cpu_blocks, num_layers, block_size, num_kv_heads, head_dim,
+    dtype=dtype, device="cpu", pin_memory=True
+)
+# Access: k_cache_cpu[cpu_block_id]  -> contiguous!
+```
+
+**Files to modify**:
+- `nanovllm/kvcache/offload_engine.py`:
+  - Lines 104-111: Change tensor allocation layout
+  - All methods accessing CPU cache: update indexing
+  - `load_to_slot_layer()`, `offload_slot_to_cpu()`, `offload_slot_layer_to_cpu()`
+- Update any other code that accesses `k_cache_cpu`/`v_cache_cpu`
+
+**Expected Impact**:
+- 16x faster D2H transfers in CPU offload mode
+- Overall prefill throughput improvement: ~2-3x (D2H is currently the bottleneck)
+- No change to API or functionality, pure performance optimization
+
+**Reference**:
+- Test: `tests/test_pinned_transfer.py`
+- Profiling: `results/nsys/pinned_transfer_20251224_213158.nsys-rep`
+- Analysis: See traces showing Device->Pageable vs Device->Pinned
