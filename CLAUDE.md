@@ -237,7 +237,6 @@ Warmup uses a reasonable sequence length (`block_size * 2`) instead of `max_mode
 | `max_num_seqs` | 512 | Max concurrent sequences |
 | `gpu_memory_utilization` | 0.9 | GPU memory fraction for KV cache |
 | `enforce_eager` | False | Disable CUDA graphs if True |
-| `num_prefetch_blocks` | 2 | Ring buffer pipeline depth (deprecated, uses num_gpu_blocks) |
 
 ## Benchmarking
 

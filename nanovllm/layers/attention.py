@@ -378,9 +378,9 @@ class Attention(nn.Module):
 
         offload_engine = kvcache_manager.offload_engine
 
-        # Use prefetch_size as chunk size for double buffering
-        # This ensures both Compute and Prefetch regions can hold a full chunk
-        chunk_size = offload_engine.num_prefetch_blocks
+        # Chunk size = capacity of each double buffer region (compute/prefetch)
+        # Each region uses half of decode_load_slots
+        chunk_size = max(1, len(offload_engine.decode_load_slots) // 2)
         num_chunks = (len(cpu_block_table) + chunk_size - 1) // chunk_size
 
         o_acc = None

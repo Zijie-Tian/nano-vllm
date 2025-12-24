@@ -5,17 +5,20 @@ Demonstrates: LLM initialization, prefill execution with CPU offload enabled.
 """
 
 import os
+os.environ["NANOVLLM_LOG_LEVEL"] = "DEBUG"
+
 from random import randint, seed
 from nanovllm import LLM, SamplingParams
+
 
 # ============================================================
 # Configuration
 # ============================================================
 
 MODEL_PATH = os.path.expanduser("~/models/Qwen3-0.6B/")
-MAX_MODEL_LEN = 8192
-NUM_GPU_BLOCKS = 4
-INPUT_LEN = 4096
+MAX_MODEL_LEN = 32 * 1024
+NUM_GPU_BLOCKS = 2
+INPUT_LEN = 16 * 1024
 
 # ============================================================
 # Main Test Script
@@ -28,6 +31,7 @@ llm = LLM(
     max_model_len=MAX_MODEL_LEN,
     max_num_batched_tokens=MAX_MODEL_LEN,
     enable_cpu_offload=True,
+    kvcache_block_size=1024,
     num_gpu_blocks=NUM_GPU_BLOCKS,
 )
 

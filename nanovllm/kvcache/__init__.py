@@ -58,14 +58,12 @@ def create_kvcache_manager(config: "Config") -> KVCacheManager:
     from nanovllm.kvcache.policies import get_policy
 
     policy = get_policy(getattr(config, 'offload_policy', 'lru'))
-    num_prefetch_blocks = getattr(config, 'num_prefetch_blocks', 2)
 
     return HybridKVCacheManager(
         num_gpu_slots=num_gpu_blocks,
         num_cpu_blocks=num_cpu_blocks,
         block_size=config.kvcache_block_size,
         policy=policy,
-        num_prefetch_blocks=num_prefetch_blocks,
     )
 
 

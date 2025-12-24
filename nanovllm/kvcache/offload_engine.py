@@ -53,7 +53,6 @@ class OffloadEngine:
         head_dim: int,
         dtype: torch.dtype = torch.float16,
         num_streams: int = 4,
-        num_prefetch_blocks: int = 2,
     ):
         self.num_layers = num_layers
         self.num_gpu_blocks = num_gpu_blocks
@@ -82,8 +81,6 @@ class OffloadEngine:
         self.decode_load_slots = list(range(1, num_gpu_blocks))
         self.num_decode_load_slots = len(self.decode_load_slots)
 
-        # Keep num_prefetch_blocks for compatibility (used as chunk size for loading)
-        self.num_prefetch_blocks = num_prefetch_blocks
         self.num_gpu_slots = num_gpu_blocks  # alias
 
         logger.info(f"Unified Ring Buffer: {self.num_ring_slots} slots total")

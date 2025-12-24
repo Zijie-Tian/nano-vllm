@@ -86,7 +86,6 @@ class HybridKVCacheManager(KVCacheManager):
         num_cpu_blocks: int,
         block_size: int,
         policy: Optional[EvictionPolicy] = None,
-        num_prefetch_blocks: int = 2,
     ):
         """
         Initialize hybrid manager with CPU-primary ring buffer design.
@@ -99,13 +98,11 @@ class HybridKVCacheManager(KVCacheManager):
             num_cpu_blocks: Number of CPU pool blocks (primary storage)
             block_size: Tokens per block
             policy: Eviction policy (default: LRU, used for prefix cache management)
-            num_prefetch_blocks: Number of blocks for ring buffer pipeline (deprecated, ring_slots = num_gpu_slots)
         """
         self._block_size = block_size
         self.num_gpu_slots = num_gpu_slots
         self.num_cpu_blocks = num_cpu_blocks
         self.total_blocks = num_gpu_slots + num_cpu_blocks
-        self.num_prefetch_blocks = num_prefetch_blocks  # Ring buffer design parameter (deprecated)
 
         # Eviction policy
         self.policy = policy or LRUPolicy()
@@ -170,7 +167,6 @@ class HybridKVCacheManager(KVCacheManager):
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
             dtype=dtype,
-            num_prefetch_blocks=self.num_prefetch_blocks,
         )
 
     def get_layer_cache(self, layer_id: int) -> Tuple[Tensor, Tensor]:

@@ -109,7 +109,6 @@ def main():
         max_num_batched_tokens=max_len,
         enable_cpu_offload=True,
         num_gpu_blocks=8,  # Small GPU buffer for offload testing
-        num_prefetch_blocks=4,
     )
 
     if not args.no_sparse:
