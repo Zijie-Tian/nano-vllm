@@ -99,16 +99,16 @@ def main():
     parser.add_argument("--output-len", type=int, default=128, help="Output length in tokens")
     args = parser.parse_args()
 
-    path = os.path.expanduser("~/models/Qwen3-0.6B/")
-    # Note: Qwen3-0.6B max_position_embeddings = 40960, cannot exceed this
-    max_len = 40960
+    path = os.path.expanduser("~/models/Qwen3-4B-Instruct-2507/")
+    # Note: Qwen3-4B-Instruct-2507 max_position_embeddings = 262144
+    max_len = 131072  # 128K tokens
     llm = LLM(
         path,
         enforce_eager=False,
         max_model_len=max_len,
         max_num_batched_tokens=max_len,
         enable_cpu_offload=True,
-        num_gpu_blocks=8,  # Small GPU buffer for offload testing
+        num_gpu_blocks=6,  # Small GPU buffer for offload testing
     )
 
     if not args.no_sparse:
@@ -130,10 +130,10 @@ def main():
     print("=" * 60)
     bench_prefill(llm, num_seqs=1, input_len=prefill_input_len)
 
-    print("=" * 60)
-    print("Decode Benchmark (CPU Offload)")
-    print("=" * 60)
-    bench_decode(llm, num_seqs=1, input_len=decode_input_len, output_len=args.output_len)
+    # print("=" * 60)
+    # print("Decode Benchmark (CPU Offload)")
+    # print("=" * 60)
+    # bench_decode(llm, num_seqs=1, input_len=decode_input_len, output_len=args.output_len)
 
 
 if __name__ == "__main__":

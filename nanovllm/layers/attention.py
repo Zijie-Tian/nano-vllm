@@ -287,46 +287,56 @@ class Attention(nn.Module):
                     o_acc, lse_acc = merge_attention_outputs(o_acc, lse_acc, prev_o, prev_lse)
             return o_acc, lse_acc
 
-        # Double buffering with 2 slots
-        slot_A = load_slots[0]
-        slot_B = load_slots[1]
+        # N-way pipeline: use ALL available slots for maximum overlap
+        # Pipeline depth = num_slots - 1 (num_slots blocks in flight)
+        num_slots = len(load_slots)
 
-        # Pre-load first block to slot_A (async)
-        offload_engine.load_to_slot_layer(slot_A, self.layer_id, cpu_block_table[0])
+        # Phase 1: Pre-load up to num_slots blocks to fill the pipeline
+        # This starts all transfers in parallel, utilizing full PCIe bandwidth
+        num_preload = min(num_slots, num_blocks)
+        for i in range(num_preload):
+            offload_engine.load_to_slot_layer(load_slots[i], self.layer_id, cpu_block_table[i])
+
+        # Phase 2: Main loop - compute and immediately reuse slot for next transfer
+        # Use dedicated compute_stream (not default stream) to enable overlap with transfers
+        compute_stream = offload_engine.compute_stream
 
         for block_idx in range(num_blocks):
             torch.cuda.nvtx.range_push(f"PipelineBlock: L{self.layer_id} B{block_idx}")
 
-            # Alternate between slot_A and slot_B
-            current_slot = slot_A if block_idx % 2 == 0 else slot_B
-            next_slot = slot_B if block_idx % 2 == 0 else slot_A
+            # Cycle through slots: slot[block_idx % num_slots]
+            current_slot = load_slots[block_idx % num_slots]
 
-            # Wait for current slot's transfer to complete
+            # Wait for current slot's transfer to complete (on compute_stream)
             offload_engine.wait_slot_layer(current_slot, self.layer_id)
 
-            # Start async load of next block to the OTHER slot
-            # load_to_slot_layer internally waits for next_slot's compute_done
-            if block_idx + 1 < num_blocks:
-                offload_engine.load_to_slot_layer(next_slot, self.layer_id, cpu_block_table[block_idx + 1])
-
             # Compute attention on current slot's data
-            torch.cuda.nvtx.range_push(f"FlashAttn: L{self.layer_id} PrevBlock{block_idx}")
-            prev_k, prev_v = offload_engine.get_kv_for_slot(current_slot, self.layer_id)
-            prev_o, prev_lse = flash_attn_with_lse(
-                q_batched, prev_k, prev_v,
-                softmax_scale=self.scale,
-                causal=False,
-            )
-            torch.cuda.nvtx.range_pop()
+            # IMPORTANT: Use dedicated compute_stream to avoid implicit sync with default stream
+            with torch.cuda.stream(compute_stream):
+                torch.cuda.nvtx.range_push(f"FlashAttn: L{self.layer_id} PrevBlock{block_idx}")
+                prev_k, prev_v = offload_engine.get_kv_for_slot(current_slot, self.layer_id)
+                prev_o, prev_lse = flash_attn_with_lse(
+                    q_batched, prev_k, prev_v,
+                    softmax_scale=self.scale,
+                    causal=False,
+                )
+                torch.cuda.nvtx.range_pop()
 
-            # Record compute done - this allows the next round to safely load into this slot
-            offload_engine.record_slot_compute_done(current_slot, self.layer_id)
+                # Record compute done - this allows the next transfer to safely overwrite this slot
+                offload_engine.record_slot_compute_done(current_slot, self.layer_id)
 
-            # Merge with accumulated
-            if o_acc is None:
-                o_acc, lse_acc = prev_o, prev_lse
-            else:
-                o_acc, lse_acc = merge_attention_outputs(o_acc, lse_acc, prev_o, prev_lse)
+            # Immediately start loading the NEXT block into this slot (if more blocks remain)
+            # Key insight: reuse current_slot immediately after compute is done!
+            next_block_idx = block_idx + num_slots
+            if next_block_idx < num_blocks:
+                offload_engine.load_to_slot_layer(current_slot, self.layer_id, cpu_block_table[next_block_idx])
+
+            # Merge with accumulated (also on compute_stream for consistency)
+            with torch.cuda.stream(compute_stream):
+                if o_acc is None:
+                    o_acc, lse_acc = prev_o, prev_lse
+                else:
+                    o_acc, lse_acc = merge_attention_outputs(o_acc, lse_acc, prev_o, prev_lse)
 
             torch.cuda.nvtx.range_pop()  # PipelineBlock
 

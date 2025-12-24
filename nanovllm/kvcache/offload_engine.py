@@ -141,11 +141,20 @@ class OffloadEngine:
 
         # ========== Transfer streams for async operations ==========
         self.transfer_streams = [torch.cuda.Stream() for _ in range(num_streams)]
-        self.compute_stream = torch.cuda.current_stream()
+        # IMPORTANT: Create a dedicated compute stream (not default stream!)
+        # Default stream has implicit synchronization with other streams,
+        # which prevents overlap between transfer and compute.
+        self.compute_stream = torch.cuda.Stream()
         self._stream_idx = 0
 
+        # ========== Per-slot transfer streams for parallel H2D ==========
+        # Each slot has its own stream to enable parallel transfers
+        # This allows multiple slots to load simultaneously
+        self.slot_transfer_streams = [torch.cuda.Stream() for _ in range(self.num_ring_slots)]
+        logger.info(f"  Created {self.num_ring_slots} per-slot transfer streams")
+
         # ========== Ring Buffer dedicated stream and events ==========
-        self.transfer_stream_main = torch.cuda.Stream()  # Main transfer stream
+        self.transfer_stream_main = torch.cuda.Stream()  # Main transfer stream (for legacy/batch ops)
 
         # Decode offload event
         self.decode_offload_done = torch.cuda.Event()
@@ -173,6 +182,13 @@ class OffloadEngine:
             [torch.cuda.Event() for _ in range(num_layers)]
             for _ in range(self.num_ring_slots)
         ]
+
+        # Initialize all compute_done events (record them once)
+        # This prevents undefined behavior on first load_to_slot_layer call
+        for slot_idx in range(self.num_ring_slots):
+            for layer_id in range(num_layers):
+                self.ring_slot_compute_done[slot_idx][layer_id].record()
+        torch.cuda.synchronize()  # Ensure all events are recorded
 
         # ========== Event tracking for async transfers ==========
         self.pending_events: Dict[Tuple[int, int], torch.cuda.Event] = {}
@@ -676,11 +692,14 @@ class OffloadEngine:
         """
         logger.debug(f"Ring load: layer={layer_id}, CPU[{cpu_block_id}] -> GPU slot[{slot_idx}]")
 
+        # Use per-slot stream for parallel transfers across different slots
+        stream = self.slot_transfer_streams[slot_idx]
+
         torch.cuda.nvtx.range_push(f"H2D: L{layer_id} CPU[{cpu_block_id}]->Slot[{slot_idx}]")
-        with torch.cuda.stream(self.transfer_stream_main):
+        with torch.cuda.stream(stream):
             # Wait for previous compute on this slot to complete before overwriting
             # This prevents data race: transfer must not start until attention finishes reading
-            self.transfer_stream_main.wait_event(self.ring_slot_compute_done[slot_idx][layer_id])
+            stream.wait_event(self.ring_slot_compute_done[slot_idx][layer_id])
 
             self.k_cache_gpu[layer_id, slot_idx].copy_(
                 self.k_cache_cpu[layer_id, cpu_block_id], non_blocking=True
@@ -688,7 +707,7 @@ class OffloadEngine:
             self.v_cache_gpu[layer_id, slot_idx].copy_(
                 self.v_cache_cpu[layer_id, cpu_block_id], non_blocking=True
             )
-            self.ring_slot_ready[slot_idx][layer_id].record(self.transfer_stream_main)
+            self.ring_slot_ready[slot_idx][layer_id].record(stream)
         torch.cuda.nvtx.range_pop()
 
     def wait_slot_layer(self, slot_idx: int, layer_id: int) -> None:

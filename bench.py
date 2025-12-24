@@ -34,28 +34,33 @@ def bench_prefill(llm, num_seqs, input_len):
 
 
 def main():
-    path = os.path.expanduser("~/models/Qwen3-0.6B/")
-    # Note: Qwen3-0.6B max_position_embeddings = 40960, cannot exceed this
-    max_len = 40960
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input-len", type=int, default=None, help="Input length in tokens")
+    parser.add_argument("--output-len", type=int, default=128, help="Output length in tokens")
+    args = parser.parse_args()
+
+    path = os.path.expanduser("~/models/Qwen3-4B-Instruct-2507/")
+    # Note: Qwen3-4B-Instruct-2507 max_position_embeddings = 262144
+    max_len = 131072  # 128K tokens
     llm = LLM(path, enforce_eager=False, max_model_len=max_len, max_num_batched_tokens=max_len)
 
     # Warmup
     llm.generate(["Benchmark: "], SamplingParams())
 
-    print("=" * 60)
-    print("Prefill Benchmark")
-    print("=" * 60)
-    # bench_prefill(llm, num_seqs=1, input_len=1024)
-    # bench_prefill(llm, num_seqs=1, input_len=2048)
-    bench_prefill(llm, num_seqs=1, input_len=max_len - 1)
-    # bench_prefill(llm, num_seqs=16, input_len=1024)
-    # bench_prefill(llm, num_seqs=64, input_len=1024)
+    # Default input lengths based on max_len
+    prefill_input_len = args.input_len if args.input_len else max_len - 1
+    decode_input_len = args.input_len if args.input_len else max_len - args.output_len
 
     print("=" * 60)
-    print("Decode Benchmark")
+    print("Prefill Benchmark (GPU)")
     print("=" * 60)
-    # bench_decode(llm, num_seqs=1, input_len=1024, output_len=1024)
-    bench_decode(llm, num_seqs=1, input_len=max_len - 128, output_len=128)  # input + output <= max_len
+    bench_prefill(llm, num_seqs=1, input_len=prefill_input_len)
+
+    # print("=" * 60)
+    # print("Decode Benchmark (GPU)")
+    # print("=" * 60)
+    # bench_decode(llm, num_seqs=1, input_len=decode_input_len, output_len=args.output_len)
 
 
 if __name__ == "__main__":
