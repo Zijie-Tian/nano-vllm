@@ -1,9 +1,5 @@
 from setuptools import setup, find_packages
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
-import os
-
-# Get the absolute path to the project root
-project_root = os.path.dirname(os.path.abspath(__file__))
 
 setup(
     name='nano-vllm',
@@ -15,15 +11,15 @@ setup(
         CUDAExtension(
             name='nanovllm.comm._sgdma_cuda',
             sources=[
-                os.path.join(project_root, 'csrc', 'sgdma.cpp'),
-                os.path.join(project_root, 'csrc', 'sgdma_kernel.cu'),
+                'csrc/sgdma.cpp',
+                'csrc/sgdma_kernel.cu',
             ],
             extra_compile_args={
                 'cxx': ['-O3', '-std=c++17'],
                 'nvcc': ['-O3', '--use_fast_math', '-std=c++17']
             },
             include_dirs=[
-                os.path.join(project_root, 'csrc'),
+                'csrc',
             ],
         )
     ],
