@@ -31,6 +31,8 @@ class LLMEngine:
         self.model_runner = ModelRunner(config, 0, self.events)
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
         config.eos = self.tokenizer.eos_token_id
+        # Set Sequence.block_size to match the KV cache block size
+        Sequence.block_size = config.kvcache_block_size
         self.scheduler = Scheduler(config, self.model_runner.kvcache_manager)
         atexit.register(self.exit)
 

@@ -521,6 +521,7 @@ class ModelRunner:
         print(f"[Ring Buffer Prefill] Complete: {chunk_idx} chunks", file=sys.stderr)
 
         # Sample from last logits
+        # For chunked prefill, ParallelLMHead automatically selects last position's logits
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
         if logits is not None:
             token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None

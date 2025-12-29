@@ -337,10 +337,10 @@ class HybridKVCacheManager(KVCacheManager):
                 block = self.logical_blocks[logical_id]
                 if block.location == BlockLocation.CPU:
                     cpu_blocks.append(block.cpu_block_id)
-        logger.debug(
-            f"get_prefilled_cpu_blocks: prefilled_blocks={list(self.prefilled_blocks)}, "
-            f"returned cpu_blocks={cpu_blocks}"
-        )
+        # logger.debug(
+        #     f"get_prefilled_cpu_blocks: prefilled_blocks={list(self.prefilled_blocks)}, "
+        #     f"returned cpu_blocks={cpu_blocks}"
+        # )
         return cpu_blocks
 
     # ========== Ring Buffer CPU-primary support ==========
