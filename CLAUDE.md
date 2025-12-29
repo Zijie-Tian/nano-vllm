@@ -6,6 +6,10 @@ This file provides guidance to Claude Code when working with this repository.
 
 Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline LLM inference. Supports Qwen3 models with CPU offload for long-context inference.
 
+## Sparse Attention
+
+For sparse attention related content (block sparse attention, MInference, FlexPrefill, XAttention, AvgPool, etc.), refer to [`docs/sparse_attention_guide.md`](docs/sparse_attention_guide.md).
+
 ## Architecture
 
 ### Core Components
