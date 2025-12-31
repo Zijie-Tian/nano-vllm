@@ -69,15 +69,19 @@ class HybridKVCacheManager(KVCacheManager):
 
     Architecture (CPU-primary mode):
     - CPU pool: Primary storage for all KV cache (num_cpu_blocks)
-    - GPU buffer: Ring buffer for computation (num_gpu_slots)
-    - Logical blocks: What sequences reference (num_gpu_slots + num_cpu_blocks)
+    - GPU buffer: Ring buffer for computation only (num_gpu_slots)
+    - Logical blocks: What sequences reference (num_cpu_blocks)
 
     Design:
     - All KV cache is stored on CPU as primary storage
-    - GPU is used as a ring buffer for computation only
+    - GPU is used as a ring buffer for computation only (no persistent data)
     - During prefill: KV is written to GPU ring slot, then offloaded to CPU
     - During decode: Previous KV is loaded from CPU to GPU for attention
     - Ring buffer enables pipelined H2D transfers overlapped with computation
+
+    Note:
+    - Logical blocks map 1:1 with CPU blocks (total_blocks = num_cpu_blocks)
+    - GPU slots are transient compute buffers, not tracked in logical blocks
     """
 
     def __init__(
@@ -102,20 +106,22 @@ class HybridKVCacheManager(KVCacheManager):
         self._block_size = block_size
         self.num_gpu_slots = num_gpu_slots
         self.num_cpu_blocks = num_cpu_blocks
-        self.total_blocks = num_gpu_slots + num_cpu_blocks
+        # In CPU-primary mode, logical blocks map 1:1 with CPU blocks
+        # GPU slots are transient compute buffers, not tracked as logical blocks
+        self.total_blocks = num_cpu_blocks
 
         # Eviction policy
         self.policy = policy or LRUPolicy()
 
-        # Logical blocks (what sequences reference)
+        # Logical blocks (what sequences reference) - one per CPU block
         self.logical_blocks: List[LogicalBlock] = [
             LogicalBlock(i) for i in range(self.total_blocks)
         ]
         self.free_logical_ids: deque[int] = deque(range(self.total_blocks))
 
-        # GPU slot management (slots are fixed, mapping is variable)
+        # GPU slot management (kept for potential future use, but not used in CPU-primary mode)
         self.free_gpu_slots: deque[int] = deque(range(num_gpu_slots))
-        self.gpu_slot_to_logical: Dict[int, int] = {}  # gpu_slot -> logical_id
+        self.gpu_slot_to_logical: Dict[int, int] = {}  # gpu_slot -> logical_id (unused in CPU-primary mode)
 
         # CPU block management
         self.free_cpu_blocks: deque[int] = deque(range(num_cpu_blocks))
@@ -212,7 +218,9 @@ class HybridKVCacheManager(KVCacheManager):
             block.ref_count -= 1
 
             if block.ref_count == 0:
-                # Free physical block
+                # Free physical block based on location
+                # Note: In CPU-primary mode, blocks are always on CPU.
+                # GPU branch kept for potential future hybrid mode support.
                 if block.location == BlockLocation.GPU:
                     self.free_gpu_slots.append(block.gpu_slot)
                     del self.gpu_slot_to_logical[block.gpu_slot]
