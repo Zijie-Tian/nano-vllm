@@ -1093,4 +1093,7 @@ class OffloadEngine:
             try:
                 hook(slot_idx, layer_id, cpu_block_id, k, v)
             except Exception as e:
+                # Allow pdb quit to propagate
+                if e.__class__.__name__ == 'BdbQuit':
+                    raise
                 logger.warning(f"Debug hook error: {e}")
