@@ -6,6 +6,7 @@ Injects distinctive K/V values, verifies loaded tensors match expected patterns.
 import os
 os.environ["NANOVLLM_LOG_LEVEL"] = "WARNING"
 
+import inspect
 from random import randint, seed
 from typing import Dict, List
 import torch
@@ -29,6 +30,27 @@ def debug_load_hook(slot_idx: int, layer_id: int, cpu_block_id: int, k: Tensor, 
     """Record loaded tensor values for layer 0."""
     if layer_id != 0:
         return
+
+    # Go up the stack to find kvcache_manager and print k_cache_gpu[*][0,0,0] for all slots
+    frame = inspect.currentframe()
+    try:
+        caller_frame = frame.f_back
+        if caller_frame is not None:
+            local_vars = caller_frame.f_locals
+            if 'self' in local_vars:
+                self_obj = local_vars['self']
+                if hasattr(self_obj, 'k_cache_gpu'):
+                    num_slots = self_obj.k_cache_gpu.shape[0]
+                    vals = []
+                    for i in range(num_slots):
+                        v = self_obj.k_cache_gpu[i][0,0,0].item()
+                        if i == slot_idx:
+                            vals.append(f"[{v}]")
+                        else:
+                            vals.append(str(v))
+                    print(f"[DEBUG] k_cache_gpu[0..{num_slots-1}][0,0,0] = [{', '.join(vals)}]")
+    finally:
+        del frame
 
     load_log.append({
         "chunk_idx": current_chunk[0],

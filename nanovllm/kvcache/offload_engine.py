@@ -1007,9 +1007,8 @@ class OffloadEngine:
         if not self._debug_mode or not self._debug_hooks:
             return
 
-        # GPU cache has no layer dimension
-        k = self.k_cache_gpu[slot_idx]
-        v = self.v_cache_gpu[slot_idx]
+        # Use get_kv_for_slot for consistency with attention.py
+        k, v = self.get_kv_for_slot(slot_idx)
 
         for hook in self._debug_hooks:
             try:
