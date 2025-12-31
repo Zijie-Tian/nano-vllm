@@ -20,7 +20,6 @@ import torch
 from random import randint, seed
 from nanovllm import LLM, SamplingParams
 from nanovllm.utils.context import get_context
-from nanovllm.kvcache.debug_utils import dump_block_state
 
 
 # ============================================================
@@ -97,9 +96,9 @@ def make_verified_load_to_slot_layer(original_func, offload_engine):
         # cpu_block_id == chunk_idx in our sequential test
         expected_k, expected_v = get_expected_pattern(cpu_block_id)
 
-        # Read GPU slot data
-        gpu_k = offload_engine.k_cache_gpu[layer_id, slot_idx]
-        gpu_v = offload_engine.v_cache_gpu[layer_id, slot_idx]
+        # Read GPU slot data (GPU cache has no layer dimension)
+        gpu_k = offload_engine.k_cache_gpu[slot_idx]
+        gpu_v = offload_engine.v_cache_gpu[slot_idx]
 
         actual_k = gpu_k.float().mean().item()
         actual_v = gpu_v.float().mean().item()
@@ -306,9 +305,9 @@ def make_gpu_write_verification_post_hook(layer_id: int):
         # Get expected pattern for current chunk
         expected_k, expected_v = get_expected_pattern(chunk_idx)
 
-        # Verify write_slot contains current chunk's data
-        gpu_k = oe.k_cache_gpu[layer_id, write_slot]
-        gpu_v = oe.v_cache_gpu[layer_id, write_slot]
+        # Verify write_slot contains current chunk's data (GPU cache has no layer dimension)
+        gpu_k = oe.k_cache_gpu[write_slot]
+        gpu_v = oe.v_cache_gpu[write_slot]
 
         actual_k_mean = gpu_k.float().mean().item()
         actual_v_mean = gpu_v.float().mean().item()
@@ -419,9 +418,9 @@ def make_post_chunk_verification_hook(layer_id: int):
 
         expected_k, expected_v = get_expected_pattern(chunk_idx)
 
-        # Check GPU ring buffer
-        gpu_k = oe.k_cache_gpu[layer_id, ring_slot]
-        gpu_v = oe.v_cache_gpu[layer_id, ring_slot]
+        # Check GPU ring buffer (GPU cache has no layer dimension)
+        gpu_k = oe.k_cache_gpu[ring_slot]
+        gpu_v = oe.v_cache_gpu[ring_slot]
 
         k_ok, k_err = check_pattern(gpu_k, expected_k, f"GPU K slot {ring_slot}")
         v_ok, v_err = check_pattern(gpu_v, expected_v, f"GPU V slot {ring_slot}")

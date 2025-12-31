@@ -29,10 +29,7 @@ def debug_load_hook(slot_idx: int, layer_id: int, cpu_block_id: int, k: Tensor, 
     """Record loaded tensor values for layer 0."""
     if layer_id != 0:
         return
-    
-    if layer_id == 0:
-        __import__('pdb').set_trace()
-    
+
     load_log.append({
         "chunk_idx": current_chunk[0],
         "cpu_block_id": cpu_block_id,
