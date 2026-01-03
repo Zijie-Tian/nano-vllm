@@ -8,7 +8,7 @@ sequences longer than ~200 tokens. Use --no-offload for correctness testing.
 """
 
 import os
-os.environ["NANOVLLM_LOG_LEVEL"] = "DEBUG"
+os.environ["NANOVLLM_LOG_LEVEL"] = "INFO"
 
 import argparse
 from nanovllm import LLM, SamplingParams
