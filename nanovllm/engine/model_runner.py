@@ -480,7 +480,7 @@ class ModelRunner:
             if input_ids.numel() == 0:
                 break
 
-            # Run model forward
+            #> Run model forward
             logits = self.run_model(input_ids, positions, is_prefill=True)
             reset_context()
 

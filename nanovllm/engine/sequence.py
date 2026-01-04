@@ -34,6 +34,14 @@ class Sequence:
     def __getitem__(self, key):
         return self.token_ids[key]
 
+    def __repr__(self):
+        ids = self.token_ids
+        if len(ids) > 20:
+            ids_str = "[" + ", ".join(map(str, ids[:10])) + ", ..., " + ", ".join(map(str, ids[-5:])) + "]"
+        else:
+            ids_str = str(ids)
+        return f"Seq(id={self.seq_id}, status={self.status.name}, tokens={self.num_tokens}, ids={ids_str})"
+
     @property
     def is_finished(self):
         return self.status == SequenceStatus.FINISHED
