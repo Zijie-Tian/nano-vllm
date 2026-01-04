@@ -35,7 +35,10 @@ class ModelRunner:
         self.model = Qwen3ForCausalLM(hf_config)
         load_model(self.model, config.model)
         self.sampler = GreedySampler()
-        self.warmup_model()
+        
+        #> Disable warmup for debugging
+        # self.warmup_model()
+        
         self.allocate_kv_cache()
         if not self.enforce_eager:
             self.capture_cudagraph()
@@ -194,7 +197,7 @@ class ModelRunner:
                 f"block_size={self.block_size}"
             )
 
-        # Bind layer caches to attention modules and set layer_id
+        #> Bind layer caches to attention modules and set layer_id
         layer_id = 0
         for module in self.model.modules():
             if hasattr(module, "k_cache") and hasattr(module, "v_cache"):

@@ -24,6 +24,7 @@ def run_needle_test(
     max_model_len: int,
     input_len: int,
     num_gpu_blocks: int = 4,
+    block_size: int = 1024,
     needle_position: float = 0.5,
     needle_value: str = "7492",
     max_new_tokens: int = 32,
@@ -38,6 +39,7 @@ def run_needle_test(
         max_model_len: Maximum model context length
         input_len: Target input sequence length
         num_gpu_blocks: Number of GPU blocks for offload
+        block_size: KV cache block size
         needle_position: Where to place needle (0.0-1.0)
         needle_value: The secret value to find
         max_new_tokens: Maximum tokens to generate
@@ -54,6 +56,7 @@ def run_needle_test(
         print(f"Model: {model_path}")
         print(f"Max model len: {max_model_len}")
         print(f"Input length: {input_len}")
+        print(f"Block size: {block_size}")
         print(f"Needle position: {needle_position:.0%}")
         print(f"Needle value: {needle_value}")
         print(f"CPU offload: {enable_cpu_offload}")
@@ -65,6 +68,7 @@ def run_needle_test(
         "max_model_len": max_model_len,
         "max_num_batched_tokens": max_model_len,
         "enable_cpu_offload": enable_cpu_offload,
+        "kvcache_block_size": block_size,
     }
     if enable_cpu_offload:
         llm_kwargs["num_gpu_blocks"] = num_gpu_blocks
@@ -119,7 +123,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--max-model-len",
         type=int,
-        default=32 * 1024,
+        default=36 * 1024,
         help="Maximum model context length"
     )
     parser.add_argument(
@@ -133,6 +137,12 @@ if __name__ == "__main__":
         type=int,
         default=2,
         help="Number of GPU blocks for CPU offload"
+    )
+    parser.add_argument(
+        "--block-size",
+        type=int,
+        default=1024,
+        help="KV cache block size"
     )
     parser.add_argument(
         "--needle-position",
@@ -164,6 +174,7 @@ if __name__ == "__main__":
         max_model_len=args.max_model_len,
         input_len=args.input_len,
         num_gpu_blocks=args.num_gpu_blocks,
+        block_size=args.block_size,
         needle_position=args.needle_position,
         needle_value=args.needle_value,
         max_new_tokens=args.max_new_tokens,
