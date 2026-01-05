@@ -75,18 +75,12 @@ for hook in hooks:
     hook.remove()
 ```
 
-### Alignment Testing
-
-Use `tests/test_align.py` to compare nanovllm with reference torch implementation:
-
-```bash
-python tests/test_align.py
-```
+### Reference Implementation
 
 Key files:
 - `tests/modeling_qwen3.py`: Reference Qwen3 implementation (torch + transformers only)
-- `tests/test_align.py`: Compares attention outputs between nanovllm and reference
 - `tests/test_needle_ref.py`: Reference needle test using custom Qwen3
+- `tests/test_needle.py`: Needle-in-haystack test for nanovllm
 
 ### Common Pitfalls
 
@@ -179,7 +173,6 @@ memcpy_2d_async(gpu_buf, cpu_cache[:, block_id], dpitch, spitch, width, height, 
 **Files**:
 - `csrc/sgdma_kernel.cu`, `csrc/sgdma.cpp`: CUDA extension
 - `nanovllm/comm/sgdma.py`: Python API
-- `tests/test_sgdma.py`: Standalone benchmark
 - `kvcache/offload_engine.py`: Integration (4 methods updated)
 
 ### Integration Details
@@ -284,25 +277,53 @@ def _merge_output_kernel(...):
 - Total GPU time: ~1,343 ms
 - **Overall speedup with Triton**: 1.67x
 
-### Correctness Verification
-
-**Test**: `tests/test_chunked_attention.py`
-- 12 test cases (6 configs × 2 dtypes)
-- All tests PASS with max error < 0.01
-- float16: max_diff=0.000488, mean_diff~0.00001
-- bfloat16: max_diff=0.003906, mean_diff~0.0001
-
 ### Key Files
 
 - `nanovllm/kvcache/chunked_attention.py`: Triton kernels + merge function
-- `tests/test_chunked_attention.py`: Correctness tests
-- `tests/test_attention_offload.py`: Performance profiling
+
+## Known Issues and Fixes
+
+### Partial Last Block Bug (FIXED ✓)
+
+**Problem**: When prefill token count is not an exact multiple of `block_size`, decode outputs garbage.
+
+**Root Cause**: `_chunked_decode_attention` calculated `last_block_valid_tokens` using `len(seq) - 1`, which increases during decode. But CPU blocks are fixed after prefill!
+
+```python
+# BUG: len(seq) increases each decode step
+total_prefill_tokens = len(seq) - 1  # Wrong!
+last_block_valid_tokens = total_prefill_tokens % block_size  # Reads garbage from CPU
+```
+
+**Fix**: Cache original prefill length in `HybridKVCacheManager.get_prefill_len()`:
+
+```python
+# CORRECT: Use cached prefill length
+total_prefill_tokens = kvcache_manager.get_prefill_len(seq)  # Fixed value
+```
+
+**Files Modified**:
+- `nanovllm/kvcache/hybrid_manager.py`: Added `_prefill_len` dict and `get_prefill_len()` method
+- `nanovllm/layers/attention.py`: Use `get_prefill_len()` instead of `len(seq) - 1`
+
+### Block Size 4096 Race Condition (PENDING)
+
+**Problem**: `block_size=4096` with multiple chunks produces garbled output. `block_size=1024` works correctly.
+
+**Symptoms**:
+- `CUDA_LAUNCH_BLOCKING=1` makes tests pass (confirms race condition)
+- `torch.cuda.synchronize()` before `store_kvcache` fixes it (heavy-handed)
+- Issue specific to larger block sizes with multiple chunks
+
+**Current Workaround**: Default `block_size` changed from 4096 to 1024.
+
+**Root Cause**: Suspected race between `compute_stream`, `transfer_stream_main`, and per-slot streams during layer-by-layer offload. Investigation ongoing.
 
 ## Configuration
 
 | Parameter | Default | Notes |
 |-----------|---------|-------|
-| `kvcache_block_size` | 1024 | Tokens per block |
+| `kvcache_block_size` | 1024 | Tokens per block (changed from 4096 due to race condition) |
 | `max_num_batched_tokens` | 16384 | Set = max_model_len for long context |
 | `gpu_memory_utilization` | 0.9 | GPU memory fraction |
 | `enable_cpu_offload` | False | Enable for long context |
