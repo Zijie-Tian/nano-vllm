@@ -487,11 +487,12 @@ class Attention(nn.Module):
         if not cpu_block_table:
             raise RuntimeError("Chunked decode attention failed: no prefilled CPU blocks available")
 
-        # Calculate valid tokens in the last block
-        # The last prefill chunk might be partial (less than block_size tokens)
+        # Calculate valid tokens in the last CPU block
+        # CRITICAL: Use original prefill length, not current seq length!
+        # CPU blocks are fixed after prefill, their content doesn't change during decode.
         block_size = kvcache_manager.block_size
         num_prefill_blocks = len(cpu_block_table)
-        total_prefill_tokens = len(seq) - 1  # Exclude the current decode token
+        total_prefill_tokens = kvcache_manager.get_prefill_len(seq)  # Original prefill length
         last_block_valid_tokens = total_prefill_tokens % block_size
         if last_block_valid_tokens == 0 and total_prefill_tokens > 0:
             last_block_valid_tokens = block_size  # Last block was exactly full
