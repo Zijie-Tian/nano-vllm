@@ -302,7 +302,7 @@ def _merge_output_kernel(...):
 
 | Parameter | Default | Notes |
 |-----------|---------|-------|
-| `kvcache_block_size` | 4096 | Tokens per block |
+| `kvcache_block_size` | 1024 | Tokens per block |
 | `max_num_batched_tokens` | 16384 | Set = max_model_len for long context |
 | `gpu_memory_utilization` | 0.9 | GPU memory fraction |
 | `enable_cpu_offload` | False | Enable for long context |

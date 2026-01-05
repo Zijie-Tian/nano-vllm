@@ -15,7 +15,7 @@ class Config:
     enforce_eager: bool = False
     hf_config: AutoConfig | None = None
     eos: int = -1
-    kvcache_block_size: int = 4096
+    kvcache_block_size: int = 1024
     num_kvcache_blocks: int = -1
     dtype: str | None = None  # "float16", "bfloat16", or None (use model default)
 

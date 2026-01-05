@@ -84,6 +84,10 @@ class Attention(nn.Module):
             context.kvcache_manager is not None and
             hasattr(context.kvcache_manager, 'offload_engine')
         )
+        
+        #! Ensure synchronization before accessing k_cache/v_cache
+        torch.cuda.synchronize()
+        #! =======================================================
 
         if is_chunked_offload:
             # Chunked offload mode: use compute_stream for store_kvcache

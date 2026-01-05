@@ -39,7 +39,7 @@ class PolicyContext:
     is_prefill: bool
     """True if in prefill phase, False if in decode phase."""
 
-    block_size: int = 4096
+    block_size: int = 1024
     """Number of tokens per block."""
 
     total_kv_len: int = 0
