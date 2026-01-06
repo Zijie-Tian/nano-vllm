@@ -29,8 +29,9 @@ class Config:
     num_gpu_kvcache_blocks: int = -1
     num_cpu_kvcache_blocks: int = -1
 
-    # Sparse attention configuration
-    sparse_policy: str | None = None  # "vertical_slash", "quest", "streaming_llm", or None
+    # Sparse attention configuration (dual policy architecture)
+    prefill_policy: str = "full"  # "full", "quest", "vertical_slash", "streaming_llm"
+    decode_policy: str = "full"   # "full", "quest", "vertical_slash", "streaming_llm"
     sparse_num_sink_blocks: int = 1  # Number of sink blocks for sparse patterns
     sparse_local_window_blocks: int = 2  # Local window size for VerticalSlash
     sparse_topk_blocks: int = 8  # Top-K blocks for Quest

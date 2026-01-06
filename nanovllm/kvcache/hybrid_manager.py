@@ -90,6 +90,8 @@ class HybridKVCacheManager(KVCacheManager):
         num_cpu_blocks: int,
         block_size: int,
         policy: Optional[EvictionPolicy] = None,
+        prefill_policy: "SparsePolicy" = None,
+        decode_policy: "SparsePolicy" = None,
     ):
         """
         Initialize hybrid manager with CPU-primary ring buffer design.
@@ -102,6 +104,8 @@ class HybridKVCacheManager(KVCacheManager):
             num_cpu_blocks: Number of CPU pool blocks (primary storage)
             block_size: Tokens per block
             policy: Eviction policy (default: LRU, used for prefix cache management)
+            prefill_policy: Sparse attention policy for prefill phase
+            decode_policy: Sparse attention policy for decode phase
         """
         self._block_size = block_size
         self.num_gpu_slots = num_gpu_slots
@@ -112,6 +116,10 @@ class HybridKVCacheManager(KVCacheManager):
 
         # Eviction policy
         self.policy = policy or LRUPolicy()
+
+        # Sparse attention policies (set at construction time, immutable)
+        self.prefill_policy = prefill_policy
+        self.decode_policy = decode_policy
 
         # Logical blocks (what sequences reference) - one per CPU block
         self.logical_blocks: List[LogicalBlock] = [
@@ -153,9 +161,6 @@ class HybridKVCacheManager(KVCacheManager):
         # Key: sequence id, Value: number of tokens from prefill (before decode started)
         self._prefill_len: Dict[int, int] = {}
 
-        # Sparse attention policy (optional)
-        self.sparse_policy: Optional["SparsePolicy"] = None
-
     @property
     def block_size(self) -> int:
         return self._block_size
@@ -180,6 +185,8 @@ class HybridKVCacheManager(KVCacheManager):
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
             dtype=dtype,
+            prefill_policy=self.prefill_policy,
+            decode_policy=self.decode_policy,
         )
 
     def get_layer_cache(self, layer_id: int) -> Tuple[Tensor, Tensor]:
@@ -187,23 +194,17 @@ class HybridKVCacheManager(KVCacheManager):
         assert self.offload_engine is not None
         return self.offload_engine.get_layer_cache(layer_id)
 
-    def set_sparse_policy(self, policy: "SparsePolicy") -> None:
+    def get_policy_for_phase(self, is_prefill: bool) -> Optional["SparsePolicy"]:
         """
-        Set sparse attention policy for block selection.
-
-        The sparse policy determines which KV blocks to load from CPU
-        for each query chunk during chunked attention computation.
+        Get sparse policy for the specified phase.
 
         Args:
-            policy: SparsePolicy instance (e.g., VerticalSlashPolicy, QuestPolicy)
+            is_prefill: True for prefill phase, False for decode phase
 
-        Example:
-            from nanovllm.kvcache.sparse import VerticalSlashPolicy, VerticalSlashConfig
-            policy = VerticalSlashPolicy(VerticalSlashConfig(num_sink_blocks=2))
-            manager.set_sparse_policy(policy)
+        Returns:
+            SparsePolicy for the phase, or None if not set
         """
-        self.sparse_policy = policy
-        logger.info(f"Sparse attention policy set: {policy}")
+        return self.prefill_policy if is_prefill else self.decode_policy
 
     def can_allocate(self, seq: Sequence) -> bool:
         """Check if we can allocate blocks for a new sequence."""

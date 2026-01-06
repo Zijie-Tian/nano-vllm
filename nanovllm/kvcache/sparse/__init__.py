@@ -22,7 +22,6 @@ Usage:
 from nanovllm.kvcache.sparse.policy import SparsePolicy, PolicyContext, SparsePolicyType
 from nanovllm.kvcache.sparse.full_policy import FullAttentionPolicy
 from nanovllm.kvcache.sparse.quest import QuestPolicy, QuestConfig, BlockMetadataManager
-from nanovllm.kvcache.sparse.hybrid import HybridPolicy
 
 
 def create_sparse_policy(policy_type: SparsePolicyType, **kwargs) -> SparsePolicy:
@@ -67,6 +66,5 @@ __all__ = [
     "QuestPolicy",
     "QuestConfig",
     "BlockMetadataManager",
-    "HybridPolicy",
     "create_sparse_policy",
 ]

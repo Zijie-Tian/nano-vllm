@@ -289,14 +289,25 @@ class QuestPolicy(SparsePolicy):
 
         return result
 
-    def on_block_offloaded(
+    def on_prefill_offload(
         self,
         cpu_block_id: int,
         layer_id: int,
         k_cache: torch.Tensor,
         num_valid_tokens: int,
     ) -> None:
-        """Update min/max key metadata when block is offloaded."""
+        """Update min/max key metadata during prefill offload."""
+        if self.metadata is not None:
+            self.metadata.update_metadata(cpu_block_id, layer_id, k_cache, num_valid_tokens)
+
+    def on_decode_offload(
+        self,
+        cpu_block_id: int,
+        layer_id: int,
+        k_cache: torch.Tensor,
+        num_valid_tokens: int,
+    ) -> None:
+        """Update min/max key metadata during decode offload (for new blocks)."""
         if self.metadata is not None:
             self.metadata.update_metadata(cpu_block_id, layer_id, k_cache, num_valid_tokens)
 

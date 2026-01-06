@@ -3,11 +3,6 @@ import time
 from random import randint, seed
 from nanovllm import LLM, SamplingParams
 
-# Import sparse policy classes
-from nanovllm.kvcache.sparse.quest import QuestPolicy, QuestConfig, BlockMetadataManager
-from nanovllm.kvcache.sparse.hybrid import HybridPolicy
-from nanovllm.kvcache.sparse.full_policy import FullAttentionPolicy
-
 
 def bench_decode(llm, num_seqs, input_len, output_len):
     """Benchmark decode performance (original test)"""
@@ -38,58 +33,6 @@ def bench_prefill(llm, num_seqs, input_len):
     print(f"[Prefill] Input: {total_input_tokens}tok ({num_seqs}x{input_len}), Time: {t:.2f}s, Throughput: {throughput:.2f}tok/s")
 
 
-def setup_quest_policy(llm, topk_blocks=8, threshold_blocks=4):
-    """
-    Setup Quest sparse policy for decode phase.
-
-    Uses HybridPolicy: Full attention for prefill, Quest Top-K for decode.
-    """
-    import torch
-
-    kvcache_manager = llm.model_runner.kvcache_manager
-    offload_engine = kvcache_manager.offload_engine
-
-    # Get model parameters from offload engine
-    num_layers = offload_engine.num_layers
-    num_kv_heads = offload_engine.num_kv_heads
-    head_dim = offload_engine.head_dim
-    num_cpu_blocks = kvcache_manager.num_cpu_blocks
-    dtype = offload_engine.k_cache_cpu.dtype
-
-    print(f"Setting up Quest policy:")
-    print(f"  num_layers={num_layers}, num_kv_heads={num_kv_heads}, head_dim={head_dim}")
-    print(f"  num_cpu_blocks={num_cpu_blocks}, dtype={dtype}")
-    print(f"  topk_blocks={topk_blocks}, threshold_blocks={threshold_blocks}")
-
-    # Create BlockMetadataManager for storing min/max keys
-    metadata = BlockMetadataManager(
-        num_blocks=num_cpu_blocks,
-        num_layers=num_layers,
-        num_kv_heads=num_kv_heads,
-        head_dim=head_dim,
-        dtype=dtype,
-    )
-
-    # Create Quest policy for decode
-    quest_config = QuestConfig(
-        topk_blocks=topk_blocks,
-        threshold_blocks=threshold_blocks,
-    )
-    quest_policy = QuestPolicy(quest_config, metadata)
-
-    # Create Hybrid policy: Full for prefill, Quest for decode
-    hybrid_policy = HybridPolicy(
-        prefill_policy=FullAttentionPolicy(),
-        decode_policy=quest_policy,
-    )
-
-    # Set the policy
-    kvcache_manager.set_sparse_policy(hybrid_policy)
-    print(f"  Policy set: HybridPolicy(prefill=Full, decode=Quest)")
-
-    return hybrid_policy
-
-
 def main():
     import argparse
     parser = argparse.ArgumentParser()
@@ -101,7 +44,18 @@ def main():
 
     path = os.path.expanduser("~/models/Qwen3-4B-Instruct-2507/")
     # Note: Qwen3-4B-Instruct-2507 max_position_embeddings = 262144
-    max_len = 131072  # 128K tokens
+    max_len = 32 * 1024  # 128K tokens
+
+    # Setup policy configuration
+    if not args.no_sparse:
+        prefill_policy = "full"   # Full attention for prefill
+        decode_policy = "quest"   # Quest Top-K for decode
+        print(f"\n[Quest Sparse Attention] prefill={prefill_policy}, decode={decode_policy}, topk={args.topk}")
+    else:
+        prefill_policy = "full"   # Full attention for both phases
+        decode_policy = "full"
+        print("\n[Full Attention] No sparse policy (baseline)")
+
     llm = LLM(
         path,
         enforce_eager=False,
@@ -109,14 +63,11 @@ def main():
         max_num_batched_tokens=max_len,
         enable_cpu_offload=True,
         num_gpu_blocks=6,  # Small GPU buffer for offload testing
+        prefill_policy=prefill_policy,
+        decode_policy=decode_policy,
+        sparse_topk_blocks=args.topk,
+        sparse_threshold_blocks=4,
     )
-
-    if not args.no_sparse:
-        # Setup Quest policy for decode (Top-K blocks, apply when > 4 blocks)
-        setup_quest_policy(llm, topk_blocks=args.topk, threshold_blocks=4)
-        print(f"\n[Quest Sparse Attention] topk={args.topk}")
-    else:
-        print("\n[Full Attention] No sparse policy (baseline)")
 
     # Warmup
     llm.generate(["Benchmark: "], SamplingParams())

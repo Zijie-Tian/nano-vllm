@@ -56,14 +56,36 @@ def create_kvcache_manager(config: "Config") -> KVCacheManager:
     # Need CPU offload: use hybrid manager
     from nanovllm.kvcache.hybrid_manager import HybridKVCacheManager
     from nanovllm.kvcache.policies import get_policy
+    from nanovllm.kvcache.sparse import create_sparse_policy, SparsePolicyType
 
-    policy = get_policy(getattr(config, 'offload_policy', 'lru'))
+    eviction_policy = get_policy(getattr(config, 'offload_policy', 'lru'))
+
+    # Create sparse policies from config
+    prefill_policy_type = getattr(config, 'prefill_policy', 'full')
+    decode_policy_type = getattr(config, 'decode_policy', 'full')
+
+    def create_policy(policy_type_str):
+        """Create a sparse policy from config string."""
+        if policy_type_str.lower() == 'full':
+            return create_sparse_policy(SparsePolicyType.FULL)
+        policy_type = SparsePolicyType[policy_type_str.upper()]
+        return create_sparse_policy(
+            policy_type,
+            topk_blocks=getattr(config, 'sparse_topk_blocks', 8),
+            threshold_blocks=getattr(config, 'sparse_threshold_blocks', 4),
+            include_sink_blocks=getattr(config, 'sparse_num_sink_blocks', 1),
+        )
+
+    prefill_policy = create_policy(prefill_policy_type)
+    decode_policy = create_policy(decode_policy_type)
 
     return HybridKVCacheManager(
         num_gpu_slots=num_gpu_blocks,
         num_cpu_blocks=num_cpu_blocks,
         block_size=config.kvcache_block_size,
-        policy=policy,
+        policy=eviction_policy,
+        prefill_policy=prefill_policy,
+        decode_policy=decode_policy,
     )
 
 
