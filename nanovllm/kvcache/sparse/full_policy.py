@@ -22,6 +22,10 @@ class FullAttentionPolicy(SparsePolicy):
     - For short sequences where sparsity isn't beneficial
     """
 
+    # Full attention supports both prefill and decode
+    supports_prefill = True
+    supports_decode = True
+
     def select_blocks(
         self,
         available_blocks: List[int],
