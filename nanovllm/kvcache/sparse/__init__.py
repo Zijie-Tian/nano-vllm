@@ -19,7 +19,8 @@ Usage:
             return available_blocks[:5]  # Just first 5 blocks
 """
 
-from nanovllm.kvcache.sparse.policy import SparsePolicy, PolicyContext, SparsePolicyType
+from nanovllm.config import SparsePolicyType
+from nanovllm.kvcache.sparse.policy import SparsePolicy, PolicyContext
 from nanovllm.kvcache.sparse.full_policy import FullAttentionPolicy
 from nanovllm.kvcache.sparse.quest import QuestPolicy, QuestConfig, BlockMetadataManager
 

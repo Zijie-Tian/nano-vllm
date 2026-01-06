@@ -7,15 +7,11 @@ from CPU for each query chunk during chunked attention computation.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from enum import Enum, auto
 from typing import List, Optional, Any
 import torch
 
-
-class SparsePolicyType(Enum):
-    """Built-in sparse attention policy types."""
-    FULL = auto()   # prefill + decode
-    QUEST = auto()  # decode only
+# Import SparsePolicyType from config to avoid circular imports
+from nanovllm.config import SparsePolicyType
 
 
 @dataclass
