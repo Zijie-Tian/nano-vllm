@@ -35,7 +35,29 @@ class Scheduler:
             if Observer.ttft_start == 0:
                 Observer.ttft_start = perf_counter_ns()
             seq = self.waiting[0]
-            if num_batched_tokens + len(seq) > self.max_num_batched_tokens or not self.kvcache_manager.can_allocate(seq):
+
+            # Check if sequence is too large
+            if not self.running and num_seqs == 0:
+                # First sequence, give clear error if it can't be scheduled
+                if len(seq) > self.max_num_batched_tokens:
+                    raise RuntimeError(
+                        f"Sequence too long: {len(seq)} tokens exceeds "
+                        f"max_num_batched_tokens={self.max_num_batched_tokens}. "
+                        f"Increase max_num_batched_tokens (set equal to max_model_len for long sequences)."
+                    )
+                if not self.kvcache_manager.can_allocate(seq):
+                    blocks_needed = seq.num_blocks
+                    blocks_available = self.kvcache_manager.num_free_blocks
+                    raise RuntimeError(
+                        f"Cannot allocate KV cache for sequence: "
+                        f"need {blocks_needed} blocks ({len(seq)} tokens), "
+                        f"but only {blocks_available} blocks available. "
+                        f"Increase max_model_len to allocate more blocks."
+                    )
+
+            if num_batched_tokens + len(seq) > self.max_num_batched_tokens:
+                break
+            if not self.kvcache_manager.can_allocate(seq):
                 break
             num_seqs += 1
             self.kvcache_manager.allocate(seq)
@@ -60,7 +82,7 @@ class Scheduler:
                 num_seqs += 1
                 self.kvcache_manager.may_append(seq)
                 scheduled_seqs.append(seq)
-        assert scheduled_seqs
+        assert scheduled_seqs, "No sequences scheduled - this should not happen"
         self.running.extendleft(reversed(scheduled_seqs))
         return scheduled_seqs, False
 

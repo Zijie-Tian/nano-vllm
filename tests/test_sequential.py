@@ -148,7 +148,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model", "-m",
         type=str,
-        default=os.path.expanduser("~/models/Qwen3-4B-Instruct-2507/"),
+        default=os.path.expanduser("~/models/Qwen3-0.6B/"),
         help="Path to model"
     )
     parser.add_argument(

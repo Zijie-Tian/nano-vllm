@@ -201,7 +201,7 @@ class OffloadEngine:
         # This prevents undefined behavior on first load_to_slot_layer call
         for slot_idx in range(self.num_ring_slots):
             self.ring_slot_compute_done[slot_idx].record()
-        torch.cuda.synchronize()  # Ensure all events are recorded
+        # torch.cuda.synchronize()  # Ensure all events are recorded
 
         # ========== Event tracking for async transfers ==========
         self.pending_events: Dict[Tuple[int, int], torch.cuda.Event] = {}

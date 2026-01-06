@@ -123,7 +123,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--max-model-len",
         type=int,
-        default=36 * 1024,
+        default=128 * 1024,
         help="Maximum model context length"
     )
     parser.add_argument(

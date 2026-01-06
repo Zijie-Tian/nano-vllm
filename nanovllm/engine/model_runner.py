@@ -37,7 +37,7 @@ class ModelRunner:
         self.sampler = GreedySampler()
         
         #> Disable warmup for debugging
-        # self.warmup_model()
+        self.warmup_model()
         
         self.allocate_kv_cache()
         if not self.enforce_eager:
@@ -62,7 +62,7 @@ class ModelRunner:
                 self.shm.unlink()
         if not self.enforce_eager:
             del self.graphs, self.graph_pool
-        torch.cuda.synchronize()
+        # torch.cuda.synchronize()
         dist.destroy_process_group()
 
     def loop(self):
