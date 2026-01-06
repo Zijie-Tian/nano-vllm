@@ -142,6 +142,40 @@ class OffloadEngine:
         decode_buf_mb = 2 * num_layers * block_size * num_kv_heads * head_dim * dtype.itemsize / (1024 * 1024)
         logger.info(f"  Per-layer decode buffer: {decode_buf_mb:.1f} MB")
 
+        # ========== Cross-layer pipeline buffers for decode ==========
+        # Double-buffered layer cache for pipelined decode:
+        # - Buffer A: Current layer's prefilled KV being computed
+        # - Buffer B: Next layer's prefilled KV being loaded
+        # Shape: [max_prefill_blocks, block_size, kv_heads, head_dim]
+        # Memory: 2 * max_prefill_blocks * block_size * kv_heads * head_dim * dtype_size
+        max_prefill_blocks = num_cpu_blocks  # Can hold all prefill blocks
+        self.layer_k_buffer_a = torch.zeros(
+            max_prefill_blocks, block_size, num_kv_heads, head_dim,
+            dtype=dtype, device="cuda"
+        )
+        self.layer_v_buffer_a = torch.zeros(
+            max_prefill_blocks, block_size, num_kv_heads, head_dim,
+            dtype=dtype, device="cuda"
+        )
+        self.layer_k_buffer_b = torch.zeros(
+            max_prefill_blocks, block_size, num_kv_heads, head_dim,
+            dtype=dtype, device="cuda"
+        )
+        self.layer_v_buffer_b = torch.zeros(
+            max_prefill_blocks, block_size, num_kv_heads, head_dim,
+            dtype=dtype, device="cuda"
+        )
+        layer_buf_mb = 4 * max_prefill_blocks * block_size * num_kv_heads * head_dim * dtype.itemsize / (1024 * 1024)
+        logger.info(f"  Cross-layer pipeline buffers: {layer_buf_mb:.1f} MB ({max_prefill_blocks} blocks × 2)")
+
+        # Pipeline state tracking
+        self._pipeline_active = False
+        self._pipeline_current_buffer = 0  # 0 = buffer A, 1 = buffer B
+        self._pipeline_next_layer_event = torch.cuda.Event()
+        self._pipeline_cpu_blocks: list = []  # CPU block IDs to load
+        self._pipeline_num_blocks = 0
+        self._pipeline_layer_stream = torch.cuda.Stream()  # Dedicated stream for layer loading
+
         # ========== Fixed-address CPU KV cache (pinned memory) ==========
         self.k_cache_cpu = torch.zeros(
             num_layers, num_cpu_blocks, block_size, num_kv_heads, head_dim,
@@ -1064,3 +1098,119 @@ class OffloadEngine:
                 if e.__class__.__name__ == 'BdbQuit':
                     raise
                 logger.warning(f"Debug hook error: {e}")
+
+    # ========== Cross-layer Pipeline Methods for Decode ==========
+
+    def start_decode_pipeline(self, cpu_block_ids: List[int]) -> None:
+        """
+        Start cross-layer pipeline for decode.
+
+        Called at the beginning of a decode step to initialize the pipeline.
+        Preloads Layer 0's data into buffer A.
+
+        Args:
+            cpu_block_ids: List of CPU block IDs for prefilled blocks
+        """
+        if not cpu_block_ids:
+            self._pipeline_active = False
+            return
+
+        self._pipeline_active = True
+        self._pipeline_cpu_blocks = cpu_block_ids
+        self._pipeline_num_blocks = len(cpu_block_ids)
+        self._pipeline_current_buffer = 0
+
+        # Preload Layer 0 into buffer A
+        self._load_layer_to_buffer(0, 0)  # layer_id=0, buffer_idx=0 (A)
+
+    def get_decode_layer_kv(self, layer_id: int, num_blocks: int) -> Tuple[Tensor, Tensor]:
+        """
+        Get KV cache for a layer during decode.
+
+        If pipeline is active, returns data from the current buffer.
+        Also triggers preloading of the next layer (if not last layer).
+
+        Args:
+            layer_id: Current layer ID
+            num_blocks: Number of blocks to return
+
+        Returns:
+            (k_cache, v_cache) tensors, shape: [num_blocks, block_size, kv_heads, head_dim]
+        """
+        if not self._pipeline_active:
+            raise RuntimeError("Decode pipeline not active. Call start_decode_pipeline first.")
+
+        # Wait for current layer's data to be ready
+        self.compute_stream.wait_event(self._pipeline_next_layer_event)
+
+        # Get current buffer
+        if self._pipeline_current_buffer == 0:
+            k = self.layer_k_buffer_a[:num_blocks]
+            v = self.layer_v_buffer_a[:num_blocks]
+        else:
+            k = self.layer_k_buffer_b[:num_blocks]
+            v = self.layer_v_buffer_b[:num_blocks]
+
+        # Trigger preloading of next layer (if not last layer)
+        next_layer_id = layer_id + 1
+        if next_layer_id < self.num_layers:
+            # Use the other buffer for next layer
+            next_buffer_idx = 1 - self._pipeline_current_buffer
+            self._load_layer_to_buffer(next_layer_id, next_buffer_idx)
+            # Switch to next buffer for next layer
+            self._pipeline_current_buffer = next_buffer_idx
+
+        return k, v
+
+    def _load_layer_to_buffer(self, layer_id: int, buffer_idx: int) -> None:
+        """
+        Async load a layer's prefilled blocks to the specified buffer.
+
+        Uses sgDMA for efficient strided transfer from CPU cache.
+
+        Args:
+            layer_id: Layer index to load
+            buffer_idx: 0 for buffer A, 1 for buffer B
+        """
+        num_blocks = self._pipeline_num_blocks
+        cpu_block_ids = self._pipeline_cpu_blocks
+
+        # Select target buffer
+        if buffer_idx == 0:
+            k_buffer = self.layer_k_buffer_a
+            v_buffer = self.layer_v_buffer_a
+        else:
+            k_buffer = self.layer_k_buffer_b
+            v_buffer = self.layer_v_buffer_b
+
+        # Load all blocks for this layer using dedicated stream
+        with torch.cuda.stream(self._pipeline_layer_stream):
+            for i, cpu_block_id in enumerate(cpu_block_ids):
+                # Copy from CPU cache (has layer dimension) to GPU buffer
+                k_buffer[i].copy_(
+                    self.k_cache_cpu[layer_id, cpu_block_id],
+                    non_blocking=True
+                )
+                v_buffer[i].copy_(
+                    self.v_cache_cpu[layer_id, cpu_block_id],
+                    non_blocking=True
+                )
+            # Record event when all transfers complete
+            self._pipeline_next_layer_event.record(self._pipeline_layer_stream)
+
+    def end_decode_pipeline(self) -> None:
+        """
+        End the cross-layer pipeline.
+
+        Called at the end of a decode step to clean up pipeline state.
+        """
+        if self._pipeline_active:
+            # Ensure all transfers complete before ending
+            self._pipeline_layer_stream.synchronize()
+            self._pipeline_active = False
+            self._pipeline_cpu_blocks = []
+            self._pipeline_num_blocks = 0
+
+    def is_pipeline_active(self) -> bool:
+        """Check if decode pipeline is currently active."""
+        return self._pipeline_active

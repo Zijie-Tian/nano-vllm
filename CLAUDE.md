@@ -46,6 +46,17 @@ python bench_offload.py
 
 ## Local Package Installation for Multi-Instance
 
+**CRITICAL**: After ANY code modification in the `nanovllm/` directory, you MUST reinstall the package before running tests or benchmarks:
+
+```bash
+pip install -e . --prefix=./.local --no-deps
+```
+
+Then run with PYTHONPATH:
+```bash
+PYTHONPATH=./.local/lib/python3.10/site-packages:$PYTHONPATH python <script.py>
+```
+
 **IMPORTANT**: When running multiple Claude instances on different worktrees, do NOT use `pip install -e .` globally as it will affect other instances. Instead, use local installation:
 
 1. **Install to worktree-local directory**:
