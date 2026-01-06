@@ -6,6 +6,44 @@ This file provides guidance to Claude Code when working with this repository.
 
 Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline LLM inference. Supports Qwen3 models with CPU offload for long-context inference.
 
+## GPU Mutex for Multi-Instance Debugging
+
+**IMPORTANT**: When running multiple Claude instances for parallel debugging, only one GPU (cuda:0) is available. Before executing ANY command that uses the GPU (python scripts, benchmarks, tests), Claude MUST:
+
+1. **Check GPU availability** by running:
+   ```bash
+   nvidia-smi --query-compute-apps=pid,name,used_memory --format=csv,noheader
+   ```
+
+2. **If processes are running on GPU**:
+   - Wait and retry every 10 seconds until GPU is free
+   - Use this polling loop:
+     ```bash
+     while [ -n "$(nvidia-smi --query-compute-apps=pid --format=csv,noheader)" ]; do
+       echo "GPU busy, waiting 10s..."
+       sleep 10
+     done
+     ```
+
+3. **Only proceed** when `nvidia-smi --query-compute-apps=pid --format=csv,noheader` returns empty output
+
+**Example workflow**:
+```bash
+# First check if GPU is in use
+nvidia-smi --query-compute-apps=pid,name,used_memory --format=csv,noheader
+
+# If output is empty, proceed with your command
+python bench_offload.py
+
+# If output shows processes, wait until they finish
+```
+
+**Note**: This applies to ALL GPU operations including:
+- Running tests (`python tests/test_*.py`)
+- Running benchmarks (`python bench*.py`)
+- Running examples (`python example.py`)
+- Any script that imports torch/cuda
+
 ## Sparse Attention
 
 For sparse attention related content (block sparse attention, MInference, FlexPrefill, XAttention, AvgPool, etc.), refer to [`docs/sparse_attention_guide.md`](docs/sparse_attention_guide.md).
