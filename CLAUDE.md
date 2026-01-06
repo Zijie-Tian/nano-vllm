@@ -10,6 +10,38 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 
 For sparse attention related content (block sparse attention, MInference, FlexPrefill, XAttention, AvgPool, etc.), refer to [`docs/sparse_attention_guide.md`](docs/sparse_attention_guide.md).
 
+### Quest Sparse Policy
+
+**Files**: `nanovllm/kvcache/sparse/quest.py`, `nanovllm/kvcache/sparse/policy.py`
+
+Quest policy selects Top-K blocks based on query-key similarity bounds using min/max key metadata.
+
+**Scoring Mechanism**:
+```python
+score_min = torch.einsum('hd,bhd->bh', q, key_min)  # [num_blocks, kv_heads]
+score_max = torch.einsum('hd,bhd->bh', q, key_max)  # [num_blocks, kv_heads]
+scores = torch.maximum(score_min, score_max).mean(dim=-1)  # [num_blocks] ← averaged!
+```
+
+**Critical Limitation - No Per-Head Scheduling**:
+
+The `.mean(dim=-1)` averages scores across all heads, making a **unified** block selection for all heads:
+
+```
+Block A: head0 needs (+4), head1 doesn't (-4) → avg = 0 → NOT selected
+Block B: head0 doesn't (-4), head1 needs (+4) → avg = 0 → NOT selected
+Block C: both heads moderately need (+2, +2) → avg = +2 → selected
+```
+
+**Why Per-Head Scheduling is Infeasible**:
+1. **Memory Layout**: GPU cache stores all heads together `[block_size, kv_heads, head_dim]`
+2. **FlashAttention**: Requires complete heads - partial heads cause dimension mismatch
+3. **Block Granularity**: If any head needs a block, the entire block (all heads) must be loaded
+
+**Policy Types**:
+- `FullAttentionPolicy`: `supports_prefill=True, supports_decode=True` - loads all blocks
+- `QuestPolicy`: `supports_prefill=False, supports_decode=True` - decode-only Top-K selection
+
 ## Architecture
 
 ### Core Components
