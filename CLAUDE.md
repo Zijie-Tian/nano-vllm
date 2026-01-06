@@ -44,6 +44,28 @@ python bench_offload.py
 - Running examples (`python example.py`)
 - Any script that imports torch/cuda
 
+## Local Package Installation for Multi-Instance
+
+**IMPORTANT**: When running multiple Claude instances on different worktrees, do NOT use `pip install -e .` globally as it will affect other instances. Instead, use local installation:
+
+1. **Install to worktree-local directory**:
+   ```bash
+   pip install -e . --prefix=./.local --no-deps
+   ```
+
+2. **Set PYTHONPATH before running any Python command**:
+   ```bash
+   export PYTHONPATH=./.local/lib/python3.10/site-packages:$PYTHONPATH
+   ```
+
+3. **Combined example**:
+   ```bash
+   # One-liner for running tests with local package
+   PYTHONPATH=./.local/lib/python3.10/site-packages:$PYTHONPATH python tests/test_needle.py
+   ```
+
+**Note**: The Python version in the path (python3.10) should match your environment.
+
 ## Sparse Attention
 
 For sparse attention related content (block sparse attention, MInference, FlexPrefill, XAttention, AvgPool, etc.), refer to [`docs/sparse_attention_guide.md`](docs/sparse_attention_guide.md).
@@ -376,24 +398,30 @@ total_prefill_tokens = kvcache_manager.get_prefill_len(seq)  # Fixed value
 - `nanovllm/kvcache/hybrid_manager.py`: Added `_prefill_len` dict and `get_prefill_len()` method
 - `nanovllm/layers/attention.py`: Use `get_prefill_len()` instead of `len(seq) - 1`
 
-### Block Size 4096 Race Condition (PENDING)
+### Block Size 4096 Race Condition (FIXED ✓)
 
-**Problem**: `block_size=4096` with multiple chunks produces garbled output. `block_size=1024` works correctly.
+**Problem**: `block_size=4096` with multiple chunks produced `index_copy_(): index out of bounds` CUDA error during Chunk 2 processing.
 
-**Symptoms**:
-- `CUDA_LAUNCH_BLOCKING=1` makes tests pass (confirms race condition)
-- `torch.cuda.synchronize()` before `store_kvcache` fixes it (heavy-handed)
-- Issue specific to larger block sizes with multiple chunks
+**Root Cause**: Race condition between default stream and compute stream. In `_prepare_chunked_offload_chunk()`, `slot_mapping` tensor was created with `non_blocking=True` H2D transfer on the default stream. However, `store_kvcache` runs on `compute_stream`. Without synchronization, `compute_stream` could use `slot_mapping` before its transfer completed, causing corrupted indices.
 
-**Current Workaround**: Default `block_size` changed from 4096 to 1024.
+**Fix** (in `attention.py`):
+```python
+if is_chunked_offload:
+    compute_stream = context.kvcache_manager.offload_engine.compute_stream
+    if k_cache.numel() and v_cache.numel():
+        # CRITICAL: Wait for default stream to ensure slot_mapping tensor transfer is complete
+        compute_stream.wait_stream(torch.cuda.default_stream())
+        with torch.cuda.stream(compute_stream):
+            store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
+```
 
-**Root Cause**: Suspected race between `compute_stream`, `transfer_stream_main`, and per-slot streams during layer-by-layer offload. Investigation ongoing.
+**Tested block sizes**: 512, 1024, 4096, 8192 - all pass.
 
 ## Configuration
 
 | Parameter | Default | Notes |
 |-----------|---------|-------|
-| `kvcache_block_size` | 1024 | Tokens per block (changed from 4096 due to race condition) |
+| `kvcache_block_size` | 1024 | Tokens per block (4096 now works after race condition fix) |
 | `max_num_batched_tokens` | 16384 | Set = max_model_len for long context |
 | `gpu_memory_utilization` | 0.9 | GPU memory fraction |
 | `enable_cpu_offload` | False | Enable for long context |

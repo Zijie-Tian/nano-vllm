@@ -195,4 +195,4 @@ cython_debug/
 .cursorindexingignore
 
 results/
-outputs/
+outputs/.local/
