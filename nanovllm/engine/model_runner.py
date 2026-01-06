@@ -455,8 +455,6 @@ class ModelRunner:
         3. After each chunk, offload from ring buffer slot to CPU
         4. All N-1 other slots are used to load previous chunks for attention
         """
-        import sys
-
         assert len(seqs) == 1, "Ring buffer prefill only supports single sequence"
         seq = seqs[0]
 
@@ -466,10 +464,9 @@ class ModelRunner:
 
         total_tokens = len(seq)
         num_chunks = (total_tokens + tokens_per_chunk - 1) // tokens_per_chunk
-        print(f"[Ring Buffer Prefill] Starting: {total_tokens} tokens, "
+        logger.debug(f"[Ring Buffer Prefill] Starting: {total_tokens} tokens, "
               f"ring_slots={offload_engine.num_ring_slots}, chunk={tokens_per_chunk} tokens, "
-              f"total_chunks={num_chunks}",
-              file=sys.stderr)
+              f"total_chunks={num_chunks}")
 
         chunk_idx = 0
         logits = None
@@ -488,9 +485,8 @@ class ModelRunner:
             # CPU block index for this chunk
             block_idx = chunk_idx
 
-            print(f"[Ring Buffer Prefill] Chunk {chunk_idx}: tokens {chunk_start}-{chunk_end}, "
-                  f"write_slot={write_slot}",
-                  file=sys.stderr)
+            logger.debug(f"[Ring Buffer Prefill] Chunk {chunk_idx}: tokens {chunk_start}-{chunk_end}, "
+                  f"write_slot={write_slot}")
 
             # Prepare inputs
             input_ids, positions = self._prepare_chunked_offload_chunk(
@@ -509,27 +505,17 @@ class ModelRunner:
                 logical_id = seq.block_table[block_idx]
                 self.kvcache_manager.prefilled_blocks.add(logical_id)
 
-            # NOTE: Per-layer offloading is now done in attention.forward
-            # Each layer offloads its KV to CPU immediately after computing attention.
-            # We just need to wait for the last offload to complete before reusing the slot.
-            if block_idx < len(cpu_block_ids):
-                # TODO: Sparse policy hook needs update for new GPU cache architecture
-                # The GPU cache no longer has layer dimension, so we can't access
-                # k_cache_gpu[layer_id, write_slot]. Sparse policy should be called
-                # in attention.forward after per-layer offload.
-                pass
-
-            # Wait for offload to complete before next chunk
-            # (slot will be reused after N chunks)
-            offload_engine.wait_slot_offload(write_slot)
+            # NOTE: Per-layer async offloading is now done in attention.forward
+            # Each layer offloads from its own prefill buffer - no waiting required!
+            # The sparse policy hook is called in offload_prefill_buffer_async.
 
             processed_tokens = chunk_end
             chunk_idx += 1
 
-        # Wait for all offloads to complete
-        offload_engine.wait_all_offload_done()
+        # Wait for all async prefill offloads to complete
+        offload_engine.wait_all_prefill_offloads()
 
-        print(f"[Ring Buffer Prefill] Complete: {chunk_idx} chunks", file=sys.stderr)
+        logger.debug(f"[Ring Buffer Prefill] Complete: {chunk_idx} chunks")
 
         # Sample from last logits
         # For chunked prefill, ParallelLMHead automatically selects last position's logits

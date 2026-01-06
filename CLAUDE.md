@@ -77,6 +77,12 @@ PYTHONPATH=./.local/lib/python3.10/site-packages:$PYTHONPATH python <script.py>
 
 **Note**: The Python version in the path (python3.10) should match your environment.
 
+**CRITICAL**: After making code changes to `nanovllm/` source files, you MUST reinstall the package for changes to take effect:
+```bash
+pip install -e . --prefix=./.local --no-deps
+```
+Without reinstallation, Python will use the old cached version and your changes will NOT be reflected!
+
 ## Sparse Attention
 
 For sparse attention related content (block sparse attention, MInference, FlexPrefill, XAttention, AvgPool, etc.), refer to [`docs/sparse_attention_guide.md`](docs/sparse_attention_guide.md).
