@@ -66,33 +66,27 @@ print("test_xxx: PASSED")
 
 ## Running Tests
 
+Use PYTHONPATH for multi-instance isolation (no pip install needed):
+
 ```bash
 # Run a specific test
-python tests/test_offload_engine.py
+PYTHONPATH=/path/to/nano-vllm:$PYTHONPATH python tests/test_offload_engine.py
 
 # Run with specific GPU
-CUDA_VISIBLE_DEVICES=0 python tests/test_ring_buffer.py
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/path/to/nano-vllm:$PYTHONPATH python tests/test_ring_buffer.py
 ```
 
 ## Benchmarks
 
 ```bash
-# Standard GPU benchmark
-python bench.py
-
-# CPU offload benchmark
-python bench_offload.py
-
-# vLLM comparison benchmark
-python bench_vllm.py
+PYTHONPATH=/path/to/nano-vllm:$PYTHONPATH python bench.py
+PYTHONPATH=/path/to/nano-vllm:$PYTHONPATH python bench_offload.py
+PYTHONPATH=/path/to/nano-vllm:$PYTHONPATH python bench_vllm.py
 ```
 
 ## Quick Verification
 
 ```bash
 # Import test
-python -c "from nanovllm import LLM"
-
-# Run offload benchmark (tests CPU-primary ring buffer mode)
-python bench_offload.py
+PYTHONPATH=/path/to/nano-vllm:$PYTHONPATH python -c "from nanovllm import LLM"
 ```

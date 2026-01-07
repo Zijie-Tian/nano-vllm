@@ -44,44 +44,30 @@ python bench_offload.py
 - Running examples (`python example.py`)
 - Any script that imports torch/cuda
 
-## Local Package Installation for Multi-Instance
+## Multi-Instance Development with PYTHONPATH
 
-**CRITICAL**: After ANY code modification in the `nanovllm/` directory, you MUST reinstall the package before running tests or benchmarks:
+**IMPORTANT**: When running multiple Claude instances on different worktrees, do NOT use `pip install -e .` globally as it will affect other instances.
+
+**Use PYTHONPATH directly** - no pip install needed:
 
 ```bash
-pip install -e . --prefix=./.local --no-deps
+# Set PYTHONPATH to point to the project root directory
+PYTHONPATH=/path/to/your/worktree:$PYTHONPATH python <script.py>
+
+# Example: running tests
+PYTHONPATH=/home/zijie/Code/nano-vllm:$PYTHONPATH python tests/test_needle.py
 ```
 
-Then run with PYTHONPATH:
+**Benefits**:
+- No `pip install` required
+- Code changes take effect immediately (no reinstall needed)
+- Each worktree is completely isolated
+
+**For shell session** (optional):
 ```bash
-PYTHONPATH=./.local/lib/python3.10/site-packages:$PYTHONPATH python <script.py>
+export PYTHONPATH=/path/to/your/worktree:$PYTHONPATH
+python tests/test_needle.py  # PYTHONPATH already set
 ```
-
-**IMPORTANT**: When running multiple Claude instances on different worktrees, do NOT use `pip install -e .` globally as it will affect other instances. Instead, use local installation:
-
-1. **Install to worktree-local directory**:
-   ```bash
-   pip install -e . --prefix=./.local --no-deps
-   ```
-
-2. **Set PYTHONPATH before running any Python command**:
-   ```bash
-   export PYTHONPATH=./.local/lib/python3.10/site-packages:$PYTHONPATH
-   ```
-
-3. **Combined example**:
-   ```bash
-   # One-liner for running tests with local package
-   PYTHONPATH=./.local/lib/python3.10/site-packages:$PYTHONPATH python tests/test_needle.py
-   ```
-
-**Note**: The Python version in the path (python3.10) should match your environment.
-
-**CRITICAL**: After making code changes to `nanovllm/` source files, you MUST reinstall the package for changes to take effect:
-```bash
-pip install -e . --prefix=./.local --no-deps
-```
-Without reinstallation, Python will use the old cached version and your changes will NOT be reflected!
 
 ## Sparse Attention
 
