@@ -31,8 +31,13 @@ def run_needle_test(
     max_new_tokens: int = 32,
     enable_cpu_offload: bool = False,
     enable_quest: bool = False,
+    enable_minference: bool = False,
     sparse_topk: int = 8,
     sparse_threshold: int = 4,
+    minference_budget: float = 0.3,
+    minference_vertical: int = 1000,
+    minference_slash: int = 6096,
+    gpu_utilization: float = 0.9,
     verbose: bool = True,
 ) -> bool:
     """
@@ -49,14 +54,25 @@ def run_needle_test(
         max_new_tokens: Maximum tokens to generate
         enable_cpu_offload: Enable CPU offload mode
         enable_quest: Enable Quest sparse attention (decode-only Top-K)
+        enable_minference: Enable MInference sparse prefill (GPU-only)
         sparse_topk: Top-K blocks for Quest
         sparse_threshold: Apply sparse only when blocks > threshold
+        minference_budget: MInference adaptive budget (fraction of seq_len, None=fixed mode)
+        minference_vertical: Fixed vertical_size (only used when budget=None)
+        minference_slash: Fixed slash_size (only used when budget=None)
+        gpu_utilization: GPU memory utilization fraction
         verbose: Print detailed output
 
     Returns:
         True if test passed, False otherwise
     """
-    sparse_policy = SparsePolicyType.QUEST if enable_quest else SparsePolicyType.FULL
+    # Determine sparse policy
+    if enable_minference:
+        sparse_policy = SparsePolicyType.MINFERENCE
+    elif enable_quest:
+        sparse_policy = SparsePolicyType.QUEST
+    else:
+        sparse_policy = SparsePolicyType.FULL
 
     if verbose:
         print(f"\n{'='*60}")
@@ -69,8 +85,14 @@ def run_needle_test(
         print(f"Needle position: {needle_position:.0%}")
         print(f"Needle value: {needle_value}")
         print(f"CPU offload: {enable_cpu_offload}")
-        if enable_cpu_offload:
-            print(f"Sparse policy: {sparse_policy.name} (topk={sparse_topk}, threshold={sparse_threshold})")
+        print(f"Sparse policy: {sparse_policy.name}")
+        if enable_cpu_offload and enable_quest:
+            print(f"  Quest: topk={sparse_topk}, threshold={sparse_threshold}")
+        if enable_minference:
+            if minference_budget is not None:
+                print(f"  MInference: adaptive (budget={minference_budget})")
+            else:
+                print(f"  MInference: fixed (vertical={minference_vertical}, slash={minference_slash})")
         print(f"{'='*60}\n")
 
     # 1. Initialize LLM
@@ -80,12 +102,19 @@ def run_needle_test(
         "max_num_batched_tokens": max_model_len,
         "enable_cpu_offload": enable_cpu_offload,
         "kvcache_block_size": block_size,
+        "gpu_memory_utilization": gpu_utilization,
     }
     if enable_cpu_offload:
         llm_kwargs["num_gpu_blocks"] = num_gpu_blocks
         llm_kwargs["sparse_policy"] = sparse_policy
         llm_kwargs["sparse_topk_blocks"] = sparse_topk
         llm_kwargs["sparse_threshold_blocks"] = sparse_threshold
+    elif enable_minference:
+        # MInference is GPU-only sparse prefill
+        llm_kwargs["sparse_policy"] = sparse_policy
+        llm_kwargs["minference_adaptive_budget"] = minference_budget
+        llm_kwargs["minference_vertical_size"] = minference_vertical
+        llm_kwargs["minference_slash_size"] = minference_slash
 
     llm = LLM(model_path, **llm_kwargs)
 
@@ -187,6 +216,11 @@ if __name__ == "__main__":
         help="Enable Quest sparse attention (decode-only Top-K selection)"
     )
     parser.add_argument(
+        "--enable-minference",
+        action="store_true",
+        help="Enable MInference sparse prefill (GPU-only, vertical+slash pattern)"
+    )
+    parser.add_argument(
         "--sparse-topk",
         type=int,
         default=8,
@@ -198,7 +232,34 @@ if __name__ == "__main__":
         default=4,
         help="Apply sparse only when blocks > threshold"
     )
+    parser.add_argument(
+        "--minference-budget",
+        type=float,
+        default=0.3,
+        help="MInference adaptive budget (fraction of seq_len, 0.3=30%% compute, 0=fixed mode)"
+    )
+    parser.add_argument(
+        "--minference-vertical",
+        type=int,
+        default=1000,
+        help="Fixed vertical_size (only used when budget=0)"
+    )
+    parser.add_argument(
+        "--minference-slash",
+        type=int,
+        default=6096,
+        help="Fixed slash_size (only used when budget=0)"
+    )
+    parser.add_argument(
+        "--gpu-utilization",
+        type=float,
+        default=0.9,
+        help="GPU memory utilization (default: 0.9)"
+    )
     args = parser.parse_args()
+
+    # Convert budget=0 to None for fixed mode
+    minference_budget = args.minference_budget if args.minference_budget > 0 else None
 
     passed = run_needle_test(
         model_path=args.model,
@@ -211,8 +272,13 @@ if __name__ == "__main__":
         max_new_tokens=args.max_new_tokens,
         enable_cpu_offload=args.enable_offload,
         enable_quest=args.enable_quest,
+        enable_minference=args.enable_minference,
         sparse_topk=args.sparse_topk,
         sparse_threshold=args.sparse_threshold,
+        minference_budget=minference_budget,
+        minference_vertical=args.minference_vertical,
+        minference_slash=args.minference_slash,
+        gpu_utilization=args.gpu_utilization,
         verbose=True,
     )
 

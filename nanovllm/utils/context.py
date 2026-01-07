@@ -35,6 +35,10 @@ class Context:
     # Current chunk index for ring buffer pipeline (prefill only)
     current_chunk_idx: int = 0
 
+    # Sparse prefill attention support (GPU-only path)
+    # When set, uses policy.sparse_prefill_attention() instead of FlashAttention
+    sparse_prefill_policy: Any = None  # SparsePolicy instance with supports_prefill=True
+
 
 _CONTEXT = Context()
 
@@ -60,6 +64,7 @@ def set_context(
     decode_pos_in_block=0,
     decode_start_pos_in_block=0,
     current_chunk_idx=0,
+    sparse_prefill_policy=None,
 ):
     global _CONTEXT
     _CONTEXT = Context(
@@ -79,6 +84,7 @@ def set_context(
         decode_pos_in_block=decode_pos_in_block,
         decode_start_pos_in_block=decode_start_pos_in_block,
         current_chunk_idx=current_chunk_idx,
+        sparse_prefill_policy=sparse_prefill_policy,
     )
 
 

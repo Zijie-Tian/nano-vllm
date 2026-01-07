@@ -140,6 +140,11 @@ class Attention(nn.Module):
                                            max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
                                            max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
                                            softmax_scale=self.scale, causal=True, block_table=context.block_tables)
+            elif context.sparse_prefill_policy is not None:
+                # Sparse prefill (GPU-only) - delegate to policy
+                o = context.sparse_prefill_policy.sparse_prefill_attention(
+                    q, k, v, self.layer_id
+                )
             else:
                 o = flash_attn_varlen_func(q, k, v,
                                            max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,

@@ -183,5 +183,32 @@ class SparsePolicy(ABC):
         """
         pass
 
+    def sparse_prefill_attention(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        layer_id: int,
+    ) -> torch.Tensor:
+        """
+        Compute sparse attention for prefill phase.
+
+        This method is called when supports_prefill=True and the policy
+        is used for GPU-only sparse prefill (no CPU offload).
+
+        Args:
+            q: Query tensor [seq_len, num_heads, head_dim]
+            k: Key tensor [seq_len, num_kv_heads, head_dim]
+            v: Value tensor [seq_len, num_kv_heads, head_dim]
+            layer_id: Current transformer layer index
+
+        Returns:
+            Attention output [seq_len, num_heads, head_dim]
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement sparse_prefill_attention. "
+            "Set supports_prefill=False or implement this method."
+        )
+
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}()"
