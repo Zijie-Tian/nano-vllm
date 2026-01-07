@@ -9,6 +9,7 @@ class SparsePolicyType(Enum):
     """Sparse attention policy types."""
     FULL = auto()   # No sparse attention (load all blocks)
     QUEST = auto()  # Query-aware Top-K block selection (decode only)
+    MINFERENCE = auto()  # MInference vertical + slash sparse prefill (GPU-only)
 
 
 @dataclass
@@ -39,9 +40,17 @@ class Config:
     # Sparse attention configuration
     # Quest: decode-only sparse attention with Top-K block selection
     # FULL: no sparse attention (load all blocks)
+    # MINFERENCE: MInference vertical + slash sparse prefill (GPU-only)
     sparse_policy: SparsePolicyType = SparsePolicyType.FULL
     sparse_topk_blocks: int = 8  # Top-K blocks for Quest
     sparse_threshold_blocks: int = 4  # Apply sparse only when blocks > threshold
+
+    # MInference configuration (used when sparse_policy == MINFERENCE)
+    minference_adaptive_budget: float = 0.3  # Budget as fraction of seq_len (None to use fixed sizes)
+    minference_vertical_size: int = 1000  # Fixed vertical size (if adaptive_budget is None)
+    minference_slash_size: int = 6096  # Fixed slash size (if adaptive_budget is None)
+    minference_num_sink_tokens: int = 30  # Sink tokens to always keep
+    minference_num_recent_diags: int = 100  # Recent diagonals to always keep
 
     def __post_init__(self):
         assert os.path.isdir(self.model)

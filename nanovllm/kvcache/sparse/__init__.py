@@ -23,6 +23,7 @@ from nanovllm.config import SparsePolicyType
 from nanovllm.kvcache.sparse.policy import SparsePolicy, PolicyContext
 from nanovllm.kvcache.sparse.full_policy import FullAttentionPolicy
 from nanovllm.kvcache.sparse.quest import QuestPolicy, QuestConfig, BlockMetadataManager
+from nanovllm.kvcache.sparse.minference import MInferencePolicy
 
 
 def create_sparse_policy(policy_type: SparsePolicyType, **kwargs) -> SparsePolicy:
@@ -55,6 +56,15 @@ def create_sparse_policy(policy_type: SparsePolicyType, **kwargs) -> SparsePolic
         )
         return QuestPolicy(config)
 
+    elif policy_type == SparsePolicyType.MINFERENCE:
+        return MInferencePolicy(
+            vertical_size=kwargs.get("vertical_size", 1000),
+            slash_size=kwargs.get("slash_size", 6096),
+            adaptive_budget=kwargs.get("adaptive_budget", 0.3),
+            num_sink_tokens=kwargs.get("num_sink_tokens", 30),
+            num_recent_diags=kwargs.get("num_recent_diags", 100),
+        )
+
     else:
         raise ValueError(f"Unknown policy type: {policy_type}")
 
@@ -67,5 +77,6 @@ __all__ = [
     "QuestPolicy",
     "QuestConfig",
     "BlockMetadataManager",
+    "MInferencePolicy",
     "create_sparse_policy",
 ]
