@@ -76,6 +76,8 @@ def create_kvcache_manager(config: "Config") -> KVCacheManager:
         block_size=config.kvcache_block_size,
         policy=eviction_policy,
         sparse_policy=sparse_policy,
+        num_kv_buffers=getattr(config, 'num_kv_buffers', 4),
+        max_seq_len=config.max_model_len,
     )
 
 

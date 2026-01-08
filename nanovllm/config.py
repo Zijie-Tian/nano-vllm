@@ -32,6 +32,7 @@ class Config:
     offload_policy: str = "lru"  # "lru", "fifo", or full class path
     num_transfer_streams: int = 4  # Number of CUDA streams for async transfers
     num_gpu_blocks: int = -1  # User-specified GPU blocks count, -1 = auto (use max available)
+    num_kv_buffers: int = 4  # Ring buffer size for layer-wise offload (decode H2D pipeline)
 
     # Computed fields for offload (set in __post_init__ or by ModelRunner)
     num_gpu_kvcache_blocks: int = -1

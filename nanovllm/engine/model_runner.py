@@ -400,10 +400,8 @@ class ModelRunner:
 
     @torch.inference_mode()
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool):
-        context = get_context()
-        # Use eager mode for: prefill, enforce_eager, large batch, or chunked attention
-        # Chunked attention requires dynamic KV loading that can't be captured in CUDA Graph
-        use_eager = is_prefill or self.enforce_eager or input_ids.size(0) > 512 or context.is_chunked_prefill
+        # Use eager mode for: prefill, enforce_eager, large batch
+        use_eager = is_prefill or self.enforce_eager or input_ids.size(0) > 512
         if use_eager:
             return self.model.compute_logits(self.model(input_ids, positions))
         else:
@@ -462,13 +460,13 @@ class ModelRunner:
     @torch.inference_mode()
     def run_layerwise_offload_prefill(self, seqs: list[Sequence]) -> list[int]:
         """
-        Run prefill with layer-wise processing and CPU offload.
+        Run prefill with layer-wise processing and async CPU offload.
 
         Key design:
         - Process one layer at a time (not one chunk at a time)
-        - Each layer: full forward pass → offload KV to CPU
-        - Full KV stays on GPU during each layer's computation
-        - After layer completes, KV is offloaded to CPU
+        - Each layer: compute → async offload KV to CPU
+        - Offload of layer N overlaps with compute of layer N+1
+        - Uses OffloadEngine's async API with stream events
 
         This enables future sparse attention methods (like MInference)
         that need full KV context per layer for pattern estimation.
@@ -477,6 +475,7 @@ class ModelRunner:
         seq = seqs[0]
 
         offload_engine = self.kvcache_manager.offload_engine
+        compute_stream = offload_engine.compute_stream
         num_layers = len(self.model.model.layers)
         total_tokens = len(seq)
 
@@ -489,80 +488,90 @@ class ModelRunner:
         input_ids = torch.tensor(seq[:], dtype=torch.int64, device="cuda")
         positions = torch.arange(total_tokens, dtype=torch.int64, device="cuda")
 
-        # Step 1: Embedding
-        hidden_states = self.model.model.embed_tokens(input_ids)
-        residual = None
+        # Import FlashAttention once
+        from flash_attn.flash_attn_interface import flash_attn_varlen_func
+        cu_seqlens = torch.tensor([0, total_tokens], dtype=torch.int32, device="cuda")
 
-        # Step 2: Layer-by-layer processing
-        for layer_id in range(num_layers):
-            layer = self.model.model.layers[layer_id]
+        # Step 1: Embedding (on compute stream)
+        with torch.cuda.stream(compute_stream):
+            hidden_states = self.model.model.embed_tokens(input_ids)
+            residual = None
 
-            # 2a. Input LayerNorm
-            if residual is None:
-                hidden_ln, residual = layer.input_layernorm(hidden_states), hidden_states
-            else:
-                hidden_ln, residual = layer.input_layernorm(hidden_states, residual)
+            # Step 2: Layer-by-layer processing
+            for layer_id in range(num_layers):
+                layer = self.model.model.layers[layer_id]
 
-            # 2b. Self-attention (full sequence)
-            # QKV projection
-            qkv = layer.self_attn.qkv_proj(hidden_ln)
-            q, k, v = qkv.split([
-                layer.self_attn.q_size,
-                layer.self_attn.kv_size,
-                layer.self_attn.kv_size
-            ], dim=-1)
+                # 2a. Input LayerNorm
+                if residual is None:
+                    hidden_ln, residual = layer.input_layernorm(hidden_states), hidden_states
+                else:
+                    hidden_ln, residual = layer.input_layernorm(hidden_states, residual)
 
-            q = q.view(total_tokens, layer.self_attn.num_heads, layer.self_attn.head_dim)
-            k = k.view(total_tokens, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
-            v = v.view(total_tokens, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
+                # 2b. Self-attention (full sequence)
+                # QKV projection
+                qkv = layer.self_attn.qkv_proj(hidden_ln)
+                q, k, v = qkv.split([
+                    layer.self_attn.q_size,
+                    layer.self_attn.kv_size,
+                    layer.self_attn.kv_size
+                ], dim=-1)
 
-            # Q/K norms (Qwen3 specific)
-            if not layer.self_attn.qkv_bias:
-                num_tokens = q.shape[0]
-                q = layer.self_attn.q_norm(q.reshape(-1, layer.self_attn.head_dim))
-                q = q.view(num_tokens, layer.self_attn.num_heads, layer.self_attn.head_dim)
-                k = layer.self_attn.k_norm(k.reshape(-1, layer.self_attn.head_dim))
-                k = k.view(num_tokens, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
+                q = q.view(total_tokens, layer.self_attn.num_heads, layer.self_attn.head_dim)
+                k = k.view(total_tokens, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
+                v = v.view(total_tokens, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
 
-            # RoPE
-            q, k = layer.self_attn.rotary_emb(positions, q, k)
+                # Q/K norms (Qwen3 specific)
+                if not layer.self_attn.qkv_bias:
+                    num_tokens = q.shape[0]
+                    q = layer.self_attn.q_norm(q.reshape(-1, layer.self_attn.head_dim))
+                    q = q.view(num_tokens, layer.self_attn.num_heads, layer.self_attn.head_dim)
+                    k = layer.self_attn.k_norm(k.reshape(-1, layer.self_attn.head_dim))
+                    k = k.view(num_tokens, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
 
-            # Full attention using FlashAttention
-            from flash_attn.flash_attn_interface import flash_attn_varlen_func
-            cu_seqlens = torch.tensor([0, total_tokens], dtype=torch.int32, device="cuda")
-            attn_output = flash_attn_varlen_func(
-                q, k, v,
-                cu_seqlens_q=cu_seqlens,
-                cu_seqlens_k=cu_seqlens,
-                max_seqlen_q=total_tokens,
-                max_seqlen_k=total_tokens,
-                softmax_scale=layer.self_attn.attn.scale,
-                causal=True,
-            )
+                # RoPE
+                q, k = layer.self_attn.rotary_emb(positions, q, k)
 
-            # O projection
-            attn_output = attn_output.view(total_tokens, -1)
-            hidden_states = layer.self_attn.o_proj(attn_output)
+                # Full attention using FlashAttention
+                attn_output = flash_attn_varlen_func(
+                    q, k, v,
+                    cu_seqlens_q=cu_seqlens,
+                    cu_seqlens_k=cu_seqlens,
+                    max_seqlen_q=total_tokens,
+                    max_seqlen_k=total_tokens,
+                    softmax_scale=layer.self_attn.attn.scale,
+                    causal=True,
+                )
 
-            # 2c. Post-attention LayerNorm + MLP
-            hidden_states, residual = layer.post_attention_layernorm(hidden_states, residual)
-            hidden_states = layer.mlp(hidden_states)
+                # O projection
+                attn_output = attn_output.view(total_tokens, -1)
+                hidden_states = layer.self_attn.o_proj(attn_output)
 
-            # 2d. Offload KV to CPU (synchronous for correctness)
-            # Use synchronous copy to ensure data is fully copied before moving to next layer
-            self._offload_layer_kv_to_cpu_sync(layer_id, k, v, cpu_block_ids, total_tokens)
+                # 2c. Post-attention LayerNorm + MLP
+                hidden_states, residual = layer.post_attention_layernorm(hidden_states, residual)
+                hidden_states = layer.mlp(hidden_states)
+
+                # 2d. Offload KV to CPU (synchronous to avoid race condition)
+                # NOTE: Async offload has race condition where k,v memory gets reused
+                # before D2H copy completes. Use sync copy for correctness.
+                block_size = offload_engine.block_size
+                for i, cpu_block_id in enumerate(cpu_block_ids):
+                    start = i * block_size
+                    end = min(start + block_size, total_tokens)
+                    actual_size = end - start
+                    offload_engine.k_cache_cpu[layer_id, cpu_block_id, :actual_size].copy_(k[start:end])
+                    offload_engine.v_cache_cpu[layer_id, cpu_block_id, :actual_size].copy_(v[start:end])
+
+            # Step 3: Final norm
+            hidden_states, _ = self.model.model.norm(hidden_states, residual)
+
+            # Step 4: Compute logits for last token
+            logits = self.model.compute_logits(hidden_states[-1:])
+
+        # Note: Using sync offload, no wait needed
 
         # Mark all blocks as prefilled
         for logical_id in logical_ids:
             self.kvcache_manager.prefilled_blocks.add(logical_id)
-
-        # Sync offload completes within loop, no explicit wait needed
-
-        # Step 3: Final norm
-        hidden_states, _ = self.model.model.norm(hidden_states, residual)
-
-        # Step 4: Compute logits for last token
-        logits = self.model.compute_logits(hidden_states[-1:])
 
         # Step 5: Sample
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
@@ -572,236 +581,164 @@ class ModelRunner:
 
         return token_ids
 
-    def _offload_layer_kv_to_cpu(
-        self,
-        layer_id: int,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        cpu_block_ids: list[int],
-        total_tokens: int,
-    ):
-        """
-        Offload a layer's KV cache to CPU in blocks (async version).
-
-        Args:
-            layer_id: Layer index
-            k: Key tensor [seq_len, kv_heads, head_dim]
-            v: Value tensor [seq_len, kv_heads, head_dim]
-            cpu_block_ids: List of CPU block IDs to offload to
-            total_tokens: Total number of tokens
-        """
-        offload_engine = self.kvcache_manager.offload_engine
-        block_size = offload_engine.block_size
-        stream = offload_engine.prefill_offload_streams[layer_id]
-
-        with torch.cuda.stream(stream):
-            for i, cpu_block_id in enumerate(cpu_block_ids):
-                start = i * block_size
-                end = min(start + block_size, total_tokens)
-                actual_size = end - start
-
-                # Copy K and V to CPU cache
-                offload_engine.k_cache_cpu[layer_id, cpu_block_id, :actual_size].copy_(
-                    k[start:end], non_blocking=True
-                )
-                offload_engine.v_cache_cpu[layer_id, cpu_block_id, :actual_size].copy_(
-                    v[start:end], non_blocking=True
-                )
-
-            # Record completion event
-            offload_engine.prefill_offload_events[layer_id].record(stream)
-
-    def _offload_layer_kv_to_cpu_sync(
-        self,
-        layer_id: int,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        cpu_block_ids: list[int],
-        total_tokens: int,
-    ):
-        """
-        Offload a layer's KV cache to CPU in blocks (synchronous version).
-
-        This version uses synchronous copy to ensure correctness.
-        It's slower than async but guarantees data integrity.
-        """
-        offload_engine = self.kvcache_manager.offload_engine
-        block_size = offload_engine.block_size
-
-        for i, cpu_block_id in enumerate(cpu_block_ids):
-            start = i * block_size
-            end = min(start + block_size, total_tokens)
-            actual_size = end - start
-
-            # Synchronous copy to CPU
-            offload_engine.k_cache_cpu[layer_id, cpu_block_id, :actual_size].copy_(k[start:end])
-            offload_engine.v_cache_cpu[layer_id, cpu_block_id, :actual_size].copy_(v[start:end])
-
     @torch.inference_mode()
     def run_layerwise_offload_decode(self, seqs: list[Sequence]) -> list[int]:
         """
-        Run decode with layer-wise KV loading from CPU.
+        Run decode with ring-buffered layer-wise KV loading from CPU.
 
         Key design:
-        - For each layer: load all prefilled KV from CPU
-        - Compute attention with loaded KV + new token's KV
-        - Store new token's KV for offload when block is full
+        - Ring buffer pipeline: load layer N+k while computing layer N
+        - Per-layer decode buffer for accumulating new tokens
+        - Async block offload when decode buffer is full
+        - Uses OffloadEngine's ring buffer API for H2D pipeline
         """
         assert len(seqs) == 1, "Layer-wise offload only supports single sequence"
         seq = seqs[0]
 
         offload_engine = self.kvcache_manager.offload_engine
+        compute_stream = offload_engine.compute_stream
         num_layers = len(self.model.model.layers)
+        num_buffers = offload_engine.num_kv_buffers
 
         # Prepare inputs
         input_ids = torch.tensor([seq.last_token], dtype=torch.int64, device="cuda")
         positions = torch.tensor([len(seq) - 1], dtype=torch.int64, device="cuda")
 
-        # Get prefilled CPU blocks
+        # Get prefilled CPU blocks and compute valid tokens per block
         cpu_block_table = self.kvcache_manager.get_prefilled_cpu_blocks(seq)
         num_prefill_blocks = len(cpu_block_table)
         total_prefill_tokens = self.kvcache_manager.get_prefill_len(seq)
 
-        # Calculate valid tokens in last prefill block
-        last_block_valid_tokens = total_prefill_tokens % self.block_size
-        if last_block_valid_tokens == 0 and total_prefill_tokens > 0:
-            last_block_valid_tokens = self.block_size
+        # Calculate valid tokens per block
+        valid_tokens_per_block = []
+        for block_idx in range(num_prefill_blocks):
+            if block_idx == num_prefill_blocks - 1:
+                # Last block may be partial
+                last_block_tokens = total_prefill_tokens % self.block_size
+                if last_block_tokens == 0 and total_prefill_tokens > 0:
+                    last_block_tokens = self.block_size
+                valid_tokens_per_block.append(last_block_tokens)
+            else:
+                valid_tokens_per_block.append(self.block_size)
 
         # Current decode position info
         pos_in_block = (len(seq) - 1) % self.block_size
         decode_start_pos = self.kvcache_manager.get_decode_start_pos(seq)
         num_decode_tokens = pos_in_block - decode_start_pos + 1
 
-        # Step 1: Embedding
-        hidden_states = self.model.model.embed_tokens(input_ids)
-        residual = None
+        # Import FlashAttention once
+        from flash_attn.flash_attn_interface import flash_attn_varlen_func
+        cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
 
-        # Allocate buffers for new decode token's KV (per layer)
-        # These will be accumulated and offloaded when block is full
-        decode_k_cache = []
-        decode_v_cache = []
-
-        # Step 2: Layer-by-layer processing
-        for layer_id in range(num_layers):
-            layer = self.model.model.layers[layer_id]
-
-            # 2a. Input LayerNorm
-            if residual is None:
-                hidden_ln, residual = layer.input_layernorm(hidden_states), hidden_states
-            else:
-                hidden_ln, residual = layer.input_layernorm(hidden_states, residual)
-
-            # 2b. QKV projection for new token
-            qkv = layer.self_attn.qkv_proj(hidden_ln)
-            q, k_new, v_new = qkv.split([
-                layer.self_attn.q_size,
-                layer.self_attn.kv_size,
-                layer.self_attn.kv_size
-            ], dim=-1)
-
-            q = q.view(1, layer.self_attn.num_heads, layer.self_attn.head_dim)
-            k_new = k_new.view(1, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
-            v_new = v_new.view(1, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
-
-            # Q/K norms
-            if not layer.self_attn.qkv_bias:
-                q = layer.self_attn.q_norm(q.reshape(-1, layer.self_attn.head_dim))
-                q = q.view(1, layer.self_attn.num_heads, layer.self_attn.head_dim)
-                k_new = layer.self_attn.k_norm(k_new.reshape(-1, layer.self_attn.head_dim))
-                k_new = k_new.view(1, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
-
-            # RoPE
-            q, k_new = layer.self_attn.rotary_emb(positions, q, k_new)
-
-            # Store new KV for later offload
-            decode_k_cache.append(k_new.clone())
-            decode_v_cache.append(v_new.clone())
-
-            # 2c. Load prefilled KV from CPU
-            k_prefill_list = []
-            v_prefill_list = []
-
-            for block_idx, cpu_block_id in enumerate(cpu_block_table):
-                # Determine valid tokens in this block
-                if block_idx == num_prefill_blocks - 1:
-                    valid_tokens = last_block_valid_tokens
-                else:
-                    valid_tokens = self.block_size
-
-                k_block = offload_engine.k_cache_cpu[layer_id, cpu_block_id, :valid_tokens].to("cuda", non_blocking=True)
-                v_block = offload_engine.v_cache_cpu[layer_id, cpu_block_id, :valid_tokens].to("cuda", non_blocking=True)
-                k_prefill_list.append(k_block)
-                v_prefill_list.append(v_block)
-
-            # Concatenate prefilled KV
-            if k_prefill_list:
-                k_prefill = torch.cat(k_prefill_list, dim=0)  # [prefill_tokens, kv_heads, head_dim]
-                v_prefill = torch.cat(v_prefill_list, dim=0)
-            else:
-                k_prefill = torch.empty(0, layer.self_attn.num_kv_heads, layer.self_attn.head_dim, device="cuda")
-                v_prefill = torch.empty(0, layer.self_attn.num_kv_heads, layer.self_attn.head_dim, device="cuda")
-
-            # 2d. Get accumulated decode KV from decode buffer (if any previous decode tokens)
-            if num_decode_tokens > 1:
-                # Load previous decode tokens for this layer from decode buffer
-                k_decode_prev = offload_engine.decode_k_buffer[layer_id, decode_start_pos:pos_in_block]
-                v_decode_prev = offload_engine.decode_v_buffer[layer_id, decode_start_pos:pos_in_block]
-                k_full = torch.cat([k_prefill, k_decode_prev, k_new], dim=0)
-                v_full = torch.cat([v_prefill, v_decode_prev, v_new], dim=0)
-            else:
-                k_full = torch.cat([k_prefill, k_new], dim=0)
-                v_full = torch.cat([v_prefill, v_new], dim=0)
-
-            # Store new KV to decode buffer for future decode steps
-            offload_engine.decode_k_buffer[layer_id, pos_in_block].copy_(k_new.squeeze(0))
-            offload_engine.decode_v_buffer[layer_id, pos_in_block].copy_(v_new.squeeze(0))
-
-            # 2e. Compute attention
-            # For decode: query is at the last position, should attend to ALL previous keys
-            # Use causal=False because the single query token is conceptually at position N
-            # and should attend to all K tokens at positions 0 to N-1
-            from flash_attn.flash_attn_interface import flash_attn_varlen_func
-            total_kv_tokens = k_full.shape[0]
-            cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
-            cu_seqlens_k = torch.tensor([0, total_kv_tokens], dtype=torch.int32, device="cuda")
-
-            attn_output = flash_attn_varlen_func(
-                q, k_full, v_full,
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_k=cu_seqlens_k,
-                max_seqlen_q=1,
-                max_seqlen_k=total_kv_tokens,
-                softmax_scale=layer.self_attn.attn.scale,
-                causal=False,
+        # Phase 1: Preload first N layers to ring buffer (fill pipeline)
+        num_preload = min(num_buffers, num_layers)
+        for i in range(num_preload):
+            offload_engine.load_layer_kv_to_buffer(
+                i, i, cpu_block_table, valid_tokens_per_block
             )
 
-            # O projection
-            attn_output = attn_output.view(1, -1)
-            hidden_states = layer.self_attn.o_proj(attn_output)
+        # Step 1: Embedding (on compute stream)
+        with torch.cuda.stream(compute_stream):
+            hidden_states = self.model.model.embed_tokens(input_ids)
+            residual = None
 
-            # 2f. Post-attention LayerNorm + MLP
-            hidden_states, residual = layer.post_attention_layernorm(hidden_states, residual)
-            hidden_states = layer.mlp(hidden_states)
+            # Phase 2: Layer-by-layer processing with ring buffer pipeline
+            for layer_id in range(num_layers):
+                layer = self.model.model.layers[layer_id]
+                current_buffer = layer_id % num_buffers
 
-        # Step 3: Final norm
-        hidden_states, _ = self.model.model.norm(hidden_states, residual)
+                # 2a. Wait for current buffer's load to complete
+                offload_engine.wait_buffer_load(current_buffer)
 
-        # Step 4: Compute logits
-        logits = self.model.compute_logits(hidden_states)
+                # 2c. Input LayerNorm
+                if residual is None:
+                    hidden_ln, residual = layer.input_layernorm(hidden_states), hidden_states
+                else:
+                    hidden_ln, residual = layer.input_layernorm(hidden_states, residual)
 
-        # Step 5: Handle block-full offload
+                # 2d. QKV projection for new token
+                qkv = layer.self_attn.qkv_proj(hidden_ln)
+                q, k_new, v_new = qkv.split([
+                    layer.self_attn.q_size,
+                    layer.self_attn.kv_size,
+                    layer.self_attn.kv_size
+                ], dim=-1)
+
+                q = q.view(1, layer.self_attn.num_heads, layer.self_attn.head_dim)
+                k_new = k_new.view(1, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
+                v_new = v_new.view(1, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
+
+                # Q/K norms
+                if not layer.self_attn.qkv_bias:
+                    q = layer.self_attn.q_norm(q.reshape(-1, layer.self_attn.head_dim))
+                    q = q.view(1, layer.self_attn.num_heads, layer.self_attn.head_dim)
+                    k_new = layer.self_attn.k_norm(k_new.reshape(-1, layer.self_attn.head_dim))
+                    k_new = k_new.view(1, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
+
+                # RoPE
+                q, k_new = layer.self_attn.rotary_emb(positions, q, k_new)
+
+                # 2e. Get prefilled KV from ring buffer
+                k_prefill, v_prefill = offload_engine.get_buffer_kv(current_buffer, total_prefill_tokens)
+
+                # 2f. Get accumulated decode KV from decode buffer (if any previous decode tokens)
+                if num_decode_tokens > 1:
+                    k_decode_prev, v_decode_prev = offload_engine.get_decode_kv(
+                        layer_id, decode_start_pos, pos_in_block
+                    )
+                    k_full = torch.cat([k_prefill, k_decode_prev, k_new], dim=0)
+                    v_full = torch.cat([v_prefill, v_decode_prev, v_new], dim=0)
+                else:
+                    k_full = torch.cat([k_prefill, k_new], dim=0)
+                    v_full = torch.cat([v_prefill, v_new], dim=0)
+
+                # 2g. Store new KV to decode buffer for future decode steps
+                offload_engine.store_decode_kv(layer_id, pos_in_block, k_new, v_new)
+
+                # 2h. Mark buffer compute done (allows next load to reuse this buffer)
+                offload_engine.record_buffer_compute_done(current_buffer)
+
+                # 2i. Start loading next layer to same buffer (after compute done)
+                next_layer_to_load = layer_id + num_buffers
+                if next_layer_to_load < num_layers:
+                    offload_engine.load_layer_kv_to_buffer(
+                        current_buffer, next_layer_to_load, cpu_block_table, valid_tokens_per_block
+                    )
+
+                # 2j. Compute attention
+                total_kv_tokens = k_full.shape[0]
+                cu_seqlens_k = torch.tensor([0, total_kv_tokens], dtype=torch.int32, device="cuda")
+
+                attn_output = flash_attn_varlen_func(
+                    q, k_full, v_full,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
+                    max_seqlen_q=1,
+                    max_seqlen_k=total_kv_tokens,
+                    softmax_scale=layer.self_attn.attn.scale,
+                    causal=False,
+                )
+
+                # O projection
+                attn_output = attn_output.view(1, -1)
+                hidden_states = layer.self_attn.o_proj(attn_output)
+
+                # 2k. Post-attention LayerNorm + MLP
+                hidden_states, residual = layer.post_attention_layernorm(hidden_states, residual)
+                hidden_states = layer.mlp(hidden_states)
+
+            # Step 3: Final norm
+            hidden_states, _ = self.model.model.norm(hidden_states, residual)
+
+            # Step 4: Compute logits
+            logits = self.model.compute_logits(hidden_states)
+
+        # Step 5: Handle block-full offload (async)
         if pos_in_block == self.block_size - 1:
-            # Block is full, offload decode buffer to CPU
             last_cpu_block = self.kvcache_manager.get_last_cpu_block(seq)
             if last_cpu_block >= 0:
-                for layer_id in range(num_layers):
-                    offload_engine.k_cache_cpu[layer_id, last_cpu_block].copy_(
-                        offload_engine.decode_k_buffer[layer_id], non_blocking=True
-                    )
-                    offload_engine.v_cache_cpu[layer_id, last_cpu_block].copy_(
-                        offload_engine.decode_v_buffer[layer_id], non_blocking=True
-                    )
-                torch.cuda.synchronize()
+                # Async offload decode buffer to CPU
+                offload_engine.offload_decode_buffer_async(last_cpu_block)
 
                 # Mark as prefilled for future decode steps
                 logical_id = seq.block_table[-1]

@@ -4,12 +4,12 @@
 Refactor layerwise offload to use proper OffloadEngine API, pre-allocate buffers, remove chunked prefill code, and pass needle test.
 
 ## Phases
-- [ ] Phase 1: Add layerwise API to OffloadEngine
-- [ ] Phase 2: Pre-allocate buffers in ModelRunner
-- [ ] Phase 3: Refactor run_layerwise_offload_prefill()
-- [ ] Phase 4: Refactor run_layerwise_offload_decode()
-- [ ] Phase 5: Remove chunked prefill code
-- [ ] Phase 6: Verify with needle test
+- [x] Phase 1: Add layerwise API to OffloadEngine
+- [x] Phase 2: Pre-allocate buffers in ModelRunner (skipped - handled by ring buffer)
+- [x] Phase 3: Refactor run_layerwise_offload_prefill()
+- [x] Phase 4: Refactor run_layerwise_offload_decode()
+- [x] Phase 5: Remove chunked prefill code
+- [x] Phase 6: Verify with needle test
 
 ## Key Questions
 1. Should we keep chunked_attention.py for MInference use?
@@ -29,7 +29,7 @@ Refactor layerwise offload to use proper OffloadEngine API, pre-allocate buffers
 (none yet)
 
 ## Status
-**Currently in Phase 0** - Planning complete, awaiting user approval
+**COMPLETE** - All phases implemented and needle test passes
 
 ---
 
