@@ -106,12 +106,15 @@ def run_needle_test(
     }
     if enable_cpu_offload:
         llm_kwargs["num_gpu_blocks"] = num_gpu_blocks
-        llm_kwargs["sparse_policy"] = sparse_policy
         llm_kwargs["sparse_topk_blocks"] = sparse_topk
         llm_kwargs["sparse_threshold_blocks"] = sparse_threshold
-    elif enable_minference:
-        # MInference is GPU-only sparse prefill
+
+    # Set sparse policy (can be used with or without offload)
+    if enable_minference or enable_quest:
         llm_kwargs["sparse_policy"] = sparse_policy
+
+    # MInference params (works with both GPU-only and offload mode)
+    if enable_minference:
         llm_kwargs["minference_adaptive_budget"] = minference_budget
         llm_kwargs["minference_vertical_size"] = minference_vertical
         llm_kwargs["minference_slash_size"] = minference_slash

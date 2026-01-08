@@ -30,6 +30,7 @@ class MInferencePolicy(SparsePolicy):
 
     supports_prefill = True
     supports_decode = False  # MInference is prefill-only sparse strategy
+    requires_block_selection = False  # MInference only affects attention computation, not KV load
 
     def __init__(
         self,

@@ -158,6 +158,7 @@ class QuestPolicy(SparsePolicy):
     # Quest is decode-only
     supports_prefill = False
     supports_decode = True
+    requires_block_selection = True  # Quest affects KV load strategy (selective block loading)
 
     def __init__(self, config: QuestConfig):
         """

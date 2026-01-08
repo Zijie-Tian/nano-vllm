@@ -25,6 +25,7 @@ class FullAttentionPolicy(SparsePolicy):
     # Full attention supports both prefill and decode
     supports_prefill = True
     supports_decode = True
+    requires_block_selection = False  # Load all blocks, no selective loading
 
     def select_blocks(
         self,

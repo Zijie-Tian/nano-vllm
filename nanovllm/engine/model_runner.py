@@ -531,16 +531,23 @@ class ModelRunner:
                 # RoPE
                 q, k = layer.self_attn.rotary_emb(positions, q, k)
 
-                # Full attention using FlashAttention
-                attn_output = flash_attn_varlen_func(
-                    q, k, v,
-                    cu_seqlens_q=cu_seqlens,
-                    cu_seqlens_k=cu_seqlens,
-                    max_seqlen_q=total_tokens,
-                    max_seqlen_k=total_tokens,
-                    softmax_scale=layer.self_attn.attn.scale,
-                    causal=True,
-                )
+                # Sparse or Full attention
+                if self.sparse_prefill_policy is not None:
+                    # MInference or other sparse prefill policy
+                    attn_output = self.sparse_prefill_policy.sparse_prefill_attention(
+                        q, k, v, layer_id
+                    )
+                else:
+                    # Full attention using FlashAttention
+                    attn_output = flash_attn_varlen_func(
+                        q, k, v,
+                        cu_seqlens_q=cu_seqlens,
+                        cu_seqlens_k=cu_seqlens,
+                        max_seqlen_q=total_tokens,
+                        max_seqlen_k=total_tokens,
+                        softmax_scale=layer.self_attn.attn.scale,
+                        causal=True,
+                    )
 
                 # O projection
                 attn_output = attn_output.view(total_tokens, -1)
@@ -550,16 +557,8 @@ class ModelRunner:
                 hidden_states, residual = layer.post_attention_layernorm(hidden_states, residual)
                 hidden_states = layer.mlp(hidden_states)
 
-                # 2d. Offload KV to CPU (synchronous to avoid race condition)
-                # NOTE: Async offload has race condition where k,v memory gets reused
-                # before D2H copy completes. Use sync copy for correctness.
-                block_size = offload_engine.block_size
-                for i, cpu_block_id in enumerate(cpu_block_ids):
-                    start = i * block_size
-                    end = min(start + block_size, total_tokens)
-                    actual_size = end - start
-                    offload_engine.k_cache_cpu[layer_id, cpu_block_id, :actual_size].copy_(k[start:end])
-                    offload_engine.v_cache_cpu[layer_id, cpu_block_id, :actual_size].copy_(v[start:end])
+                # 2d. Offload KV to CPU (encapsulated with sparse policy hooks)
+                offload_engine.offload_layer_kv_sync(layer_id, k, v, cpu_block_ids, total_tokens)
 
             # Step 3: Final norm
             hidden_states, _ = self.model.model.norm(hidden_states, residual)

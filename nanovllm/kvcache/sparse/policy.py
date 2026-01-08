@@ -77,6 +77,12 @@ class SparsePolicy(ABC):
     supports_prefill: bool = True
     supports_decode: bool = True
 
+    # Whether this policy requires selective block loading during decode
+    # If True: OffloadEngine will call select_blocks() before loading KV from CPU
+    # If False: OffloadEngine will load all blocks (select_blocks ignored for load)
+    # Example: MInference=False (only affects attention), Quest=True (affects load)
+    requires_block_selection: bool = False
+
     def initialize(
         self,
         num_layers: int,
