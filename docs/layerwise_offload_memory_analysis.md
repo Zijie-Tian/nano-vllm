@@ -407,3 +407,141 @@ k_full = seq_len * kv_dim * dtype_size
 v_full = k_full  # = 256 MB
 # Total: 512 MB
 ```
+
+---
+
+## 8. Empirical Validation
+
+This section validates the theoretical memory analysis against actual measurements.
+
+### 8.1 Test Configuration
+
+```bash
+python tests/test_needle.py --enable-offload --input-len 100000 --block-size 1024
+```
+
+**Parameters:**
+- Model: Qwen3-4B-Instruct
+- `seq_len = 100000` (actual tokens: 99925)
+- `block_size = 1024`
+- `max_model_len = 131072`
+- `num_kv_buffers = 4`
+
+### 8.2 Theoretical Peak Memory Calculation
+
+#### Step 1: Model Load Memory
+
+| Component | Formula | Size |
+|-----------|---------|------|
+| Model weights | ~4B params × 2 bytes | ~8 GB |
+| Ring buffer | 2 × 4 × 131072 × 1024 × 2 | 2048 MB |
+| Decode buffer | 2 × 36 × 1024 × 1024 × 2 | 144 MB |
+| **Subtotal** | | **~10.2 GB** |
+
+#### Step 2: Prefill Activation Peak (per-layer)
+
+| Component | Formula | Size |
+|-----------|---------|------|
+| hidden_states | 100000 × 2560 × 2 | 512 MB |
+| residual | 100000 × 2560 × 2 | 512 MB |
+| MLP gate_up | 100000 × 27392 × 2 | **5478 MB** |
+| MLP silu×gate | 100000 × 13696 × 2 | 2739 MB |
+| Other intermediates (qkv, RoPE, attn) | ~1-2 GB | ~1500 MB |
+| **Subtotal** | | **~10 GB** |
+
+#### Step 3: Total Peak
+
+```
+Total Peak = Model Load + Activation Peak
+           = 10.2 GB + 10 GB
+           = ~20.2 GB
+```
+
+### 8.3 Actual Measurement Results
+
+```python
+import torch
+torch.cuda.reset_peak_memory_stats()
+# ... run inference ...
+peak = torch.cuda.max_memory_allocated()
+```
+
+| Metric | Value |
+|--------|-------|
+| After model load | 9.82 GB |
+| Peak during inference | **20.02 GB** |
+| Activation peak (delta) | 10.20 GB |
+
+### 8.4 Comparison: Theory vs Actual
+
+| Component | Theoretical | Actual | Error |
+|-----------|-------------|--------|-------|
+| Model load memory | ~10.2 GB | 9.82 GB | -3.7% |
+| Activation peak | ~10 GB | 10.20 GB | +2.0% |
+| **Total peak** | **~20.2 GB** | **20.02 GB** | **< 1%** |
+
+### 8.5 Key Findings
+
+1. **Theoretical model is accurate**: < 5% error in all components.
+
+2. **MLP gate_up is the dominant temporary**:
+   - Size: 5.35 GB (for 100k tokens)
+   - Accounts for ~50% of activation peak
+   - Formula: `seq_len × 2 × intermediate_size × dtype_size`
+
+3. **Memory scaling with sequence length**:
+   | seq_len | Model Load | Activation Peak | Total Peak |
+   |---------|------------|-----------------|------------|
+   | 8k | ~10 GB | ~0.8 GB | ~11 GB |
+   | 32k | ~10 GB | ~3.2 GB | ~13 GB |
+   | 64k | ~10 GB | ~6.4 GB | ~16 GB |
+   | 100k | ~10 GB | ~10 GB | ~20 GB |
+   | 128k | ~10 GB | ~13 GB | ~23 GB |
+
+4. **Decode memory is much smaller**:
+   - Per-step: ~512 MB for k_full + v_full (at 100k context)
+   - Does not grow with decode steps (constant per layer)
+
+### 8.6 Memory Profiling Script
+
+To reproduce the measurement:
+
+```python
+import os
+os.environ["NANOVLLM_LOG_LEVEL"] = "INFO"
+
+import torch
+from nanovllm import LLM, SamplingParams
+from tests.utils import generate_needle_prompt
+
+# Reset memory stats
+torch.cuda.reset_peak_memory_stats()
+torch.cuda.empty_cache()
+
+# Initialize LLM
+llm = LLM(
+    "path/to/model",
+    enforce_eager=True,
+    max_model_len=131072,
+    max_num_batched_tokens=131072,
+    enable_cpu_offload=True,
+    kvcache_block_size=1024,
+    num_gpu_blocks=2,
+)
+
+after_load = torch.cuda.memory_allocated()
+print(f"After model load: {after_load / 1024**3:.2f} GB")
+
+# Generate prompt and run inference
+prompt, expected = generate_needle_prompt(
+    tokenizer=llm.tokenizer,
+    target_length=100000,
+    needle_position=0.5,
+)
+
+torch.cuda.reset_peak_memory_stats()
+outputs = llm.generate([prompt], SamplingParams(max_tokens=32))
+
+peak = torch.cuda.max_memory_allocated()
+print(f"Peak during inference: {peak / 1024**3:.2f} GB")
+```
