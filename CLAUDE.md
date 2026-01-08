@@ -8,30 +8,33 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 
 ## GPU Mutex for Multi-Instance Debugging
 
-**IMPORTANT**: When running multiple Claude instances for parallel debugging, only one GPU (cuda:0) is available. Before executing ANY command that uses the GPU (python scripts, benchmarks, tests), Claude MUST:
+**IMPORTANT**: When running multiple Claude instances for parallel debugging, different rules apply based on script type:
 
-1. **Check GPU availability** by running:
-   ```bash
-   nvidia-smi --query-compute-apps=pid,name,used_memory --format=csv,noheader
-   ```
+### Benchmarks (`bench*.py`) - Exclusive GPU Access Required
 
-2. **If processes are running on GPU**:
-   - Wait and retry every 10 seconds until GPU is free
-   - Use this polling loop:
-     ```bash
-     while [ -n "$(nvidia-smi --query-compute-apps=pid --format=csv,noheader)" ]; do
-       echo "GPU busy, waiting 10s..."
-       sleep 10
-     done
-     ```
+Before running any `bench*.py` script, Claude MUST wait for exclusive GPU access:
 
-3. **Only proceed** when `nvidia-smi --query-compute-apps=pid --format=csv,noheader` returns empty output
+```bash
+# Check and wait for GPU to be free
+while [ -n "$(nvidia-smi --query-compute-apps=pid --format=csv,noheader)" ]; do
+  echo "GPU busy, waiting 10s..."
+  sleep 10
+done
+```
 
-**Note**: This applies to ALL GPU operations including:
-- Running tests (`python tests/test_*.py`)
-- Running benchmarks (`python bench*.py`)
-- Running examples (`python example.py`)
-- Any script that imports torch/cuda
+### Other Scripts (tests, examples) - Port Conflict Check Only
+
+For non-benchmark scripts, exclusive GPU access is NOT required. However, check for **distributed port conflicts** before running:
+
+```bash
+# Check if port 29500 (default torch distributed port) is in use
+if lsof -i :29500 >/dev/null 2>&1; then
+  echo "Port 29500 in use, waiting 10s..."
+  sleep 10
+fi
+```
+
+**Note**: nanovllm's distributed port handling is not yet robust - two processes competing for the same port will cause errors. This check prevents that issue.
 
 ## Multi-Instance Development with PYTHONPATH
 
