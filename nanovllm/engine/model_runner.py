@@ -44,7 +44,17 @@ class ModelRunner:
         
         self.allocate_kv_cache()
         if not self.enforce_eager:
-            self.capture_cudagraph()
+            if config.enable_cpu_offload:
+                # TODO: Implement capture_offload_cudagraph() for offload mode
+                # For now, offload mode uses eager execution
+                # The standard capture_cudagraph() cannot be used because:
+                # - It captures the PagedAttention decode path via Attention.forward()
+                # - In offload mode, Attention.k_cache/v_cache are empty (KV is in ring buffer)
+                # - The refactored offload decode now uses Attention.forward() with ring buffer
+                # - Need specialized graph capture that sets up ring buffer correctly
+                pass
+            else:
+                self.capture_cudagraph()
         torch.set_default_device("cpu")
         torch.set_default_dtype(default_dtype)
 
@@ -845,9 +855,9 @@ class ModelRunner:
 
         Key design:
         - Ring buffer pipeline: load layer N+k while computing layer N
+        - Uses standard Attention.forward() path (not bypassing)
         - Per-layer decode buffer for accumulating new tokens
         - Async block offload when decode buffer is full
-        - Uses OffloadEngine's ring buffer API for H2D pipeline
         """
         assert len(seqs) == 1, "Layer-wise offload only supports single sequence"
         seq = seqs[0]
@@ -881,11 +891,15 @@ class ModelRunner:
         # Current decode position info
         pos_in_block = (len(seq) - 1) % self.block_size
         decode_start_pos = self.kvcache_manager.get_decode_start_pos(seq)
-        num_decode_tokens = pos_in_block - decode_start_pos + 1
+        num_prev_decode_tokens = pos_in_block - decode_start_pos  # Previous decode tokens (not including current)
 
-        # Import FlashAttention once
-        from flash_attn.flash_attn_interface import flash_attn_varlen_func
-        cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
+        # Total context length (prefill + previous decode tokens)
+        # New token will be stored at this position
+        context_len = total_prefill_tokens + num_prev_decode_tokens
+
+        # Context setup for Attention.forward() - contiguous mode (no block tables)
+        slot_mapping = torch.tensor([context_len], dtype=torch.int32, device="cuda")
+        context_lens = torch.tensor([context_len + 1], dtype=torch.int32, device="cuda")
 
         # Phase 1: Preload first N layers to ring buffer (fill pipeline)
         num_preload = min(num_buffers, num_layers)
@@ -902,93 +916,69 @@ class ModelRunner:
             # Phase 2: Layer-by-layer processing with ring buffer pipeline
             for layer_id in range(num_layers):
                 layer = self.model.model.layers[layer_id]
+                attn_module = layer.self_attn.attn  # The Attention module
                 current_buffer = layer_id % num_buffers
 
                 # 2a. Wait for current buffer's load to complete
                 offload_engine.wait_buffer_load(current_buffer)
 
-                # 2c. Input LayerNorm
-                if residual is None:
-                    hidden_ln, residual = layer.input_layernorm(hidden_states), hidden_states
-                else:
-                    hidden_ln, residual = layer.input_layernorm(hidden_states, residual)
-
-                # 2d. QKV projection for new token
-                qkv = layer.self_attn.qkv_proj(hidden_ln)
-                q, k_new, v_new = qkv.split([
-                    layer.self_attn.q_size,
-                    layer.self_attn.kv_size,
-                    layer.self_attn.kv_size
-                ], dim=-1)
-
-                q = q.view(1, layer.self_attn.num_heads, layer.self_attn.head_dim)
-                k_new = k_new.view(1, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
-                v_new = v_new.view(1, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
-
-                # Q/K norms
-                if not layer.self_attn.qkv_bias:
-                    q = layer.self_attn.q_norm(q.reshape(-1, layer.self_attn.head_dim))
-                    q = q.view(1, layer.self_attn.num_heads, layer.self_attn.head_dim)
-                    k_new = layer.self_attn.k_norm(k_new.reshape(-1, layer.self_attn.head_dim))
-                    k_new = k_new.view(1, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
-
-                # RoPE
-                q, k_new = layer.self_attn.rotary_emb(positions, q, k_new)
-
-                # 2e. Get prefilled KV from ring buffer
-                k_prefill, v_prefill = offload_engine.get_buffer_kv(current_buffer, total_prefill_tokens)
-
-                # 2f. Get accumulated decode KV from decode buffer (if any previous decode tokens)
-                if num_decode_tokens > 1:
+                # 2b. Copy previous decode KV from decode buffer to ring buffer
+                # Ring buffer already has prefill KV at [0:total_prefill_tokens]
+                # We need to add decode KV at [total_prefill_tokens:]
+                if num_prev_decode_tokens > 0:
                     k_decode_prev, v_decode_prev = offload_engine.get_decode_kv(
                         layer_id, decode_start_pos, pos_in_block
                     )
-                    k_full = torch.cat([k_prefill, k_decode_prev, k_new], dim=0)
-                    v_full = torch.cat([v_prefill, v_decode_prev, v_new], dim=0)
-                else:
-                    k_full = torch.cat([k_prefill, k_new], dim=0)
-                    v_full = torch.cat([v_prefill, v_new], dim=0)
+                    ring_k = offload_engine.layer_k_cache[current_buffer]
+                    ring_v = offload_engine.layer_v_cache[current_buffer]
+                    ring_k[total_prefill_tokens:total_prefill_tokens + num_prev_decode_tokens].copy_(k_decode_prev)
+                    ring_v[total_prefill_tokens:total_prefill_tokens + num_prev_decode_tokens].copy_(v_decode_prev)
 
-                # 2g. Store new KV to decode buffer for future decode steps
-                offload_engine.store_decode_kv(layer_id, pos_in_block, k_new, v_new)
+                # 2c. Set Attention module's cache to ring buffer (contiguous format)
+                # Shape: [max_seq_len, kv_heads, head_dim] -> [1, max_seq_len, kv_heads, head_dim]
+                attn_module.k_cache = offload_engine.layer_k_cache[current_buffer:current_buffer+1]
+                attn_module.v_cache = offload_engine.layer_v_cache[current_buffer:current_buffer+1]
 
-                # 2h. Mark buffer compute done (allows next load to reuse this buffer)
+                # 2d. Set context for Attention.forward() - contiguous mode
+                set_context(
+                    is_prefill=False,
+                    slot_mapping=slot_mapping,
+                    context_lens=context_lens,
+                    block_tables=None,  # Contiguous mode, no block tables
+                )
+
+                # 2e. Forward through layer using standard path
+                # This calls Qwen3Attention.forward() -> Attention.forward()
+                # Attention.forward() will:
+                #   - Store new K,V to ring buffer via store_kvcache
+                #   - Compute attention via flash_attn_with_kvcache
+                hidden_states, residual = layer(positions, hidden_states, residual)
+
+                # 2f. Copy new token's KV from ring buffer to decode buffer (for persistence)
+                # The new token was stored at position context_len in ring buffer
+                ring_k = offload_engine.layer_k_cache[current_buffer]
+                ring_v = offload_engine.layer_v_cache[current_buffer]
+                offload_engine.decode_k_buffer[layer_id, pos_in_block].copy_(ring_k[context_len])
+                offload_engine.decode_v_buffer[layer_id, pos_in_block].copy_(ring_v[context_len])
+
+                # 2g. Mark buffer compute done (allows next load to reuse this buffer)
                 offload_engine.record_buffer_compute_done(current_buffer)
 
-                # 2i. Start loading next layer to same buffer (after compute done)
+                # 2h. Start loading next layer to same buffer (after compute done)
                 next_layer_to_load = layer_id + num_buffers
                 if next_layer_to_load < num_layers:
                     offload_engine.load_layer_kv_to_buffer(
                         current_buffer, next_layer_to_load, cpu_block_table, valid_tokens_per_block
                     )
 
-                # 2j. Compute attention
-                total_kv_tokens = k_full.shape[0]
-                cu_seqlens_k = torch.tensor([0, total_kv_tokens], dtype=torch.int32, device="cuda")
-
-                attn_output = flash_attn_varlen_func(
-                    q, k_full, v_full,
-                    cu_seqlens_q=cu_seqlens_q,
-                    cu_seqlens_k=cu_seqlens_k,
-                    max_seqlen_q=1,
-                    max_seqlen_k=total_kv_tokens,
-                    softmax_scale=layer.self_attn.attn.scale,
-                    causal=False,
-                )
-
-                # O projection
-                attn_output = attn_output.view(1, -1)
-                hidden_states = layer.self_attn.o_proj(attn_output)
-
-                # 2k. Post-attention LayerNorm + MLP
-                hidden_states, residual = layer.post_attention_layernorm(hidden_states, residual)
-                hidden_states = layer.mlp(hidden_states)
-
             # Step 3: Final norm
             hidden_states, _ = self.model.model.norm(hidden_states, residual)
 
             # Step 4: Compute logits
             logits = self.model.compute_logits(hidden_states)
+
+        # Reset context
+        reset_context()
 
         # Step 5: Handle block-full offload (async)
         if pos_in_block == self.block_size - 1:
