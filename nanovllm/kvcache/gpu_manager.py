@@ -45,21 +45,24 @@ class GPUOnlyManager(KVCacheManager):
     - Paged attention with configurable block size
     - Prefix caching via xxhash
     - Reference counting for block sharing
+    - Contiguous cache for single-sequence layer-wise prefill (optional)
 
     This manager is fully compatible with CUDA graphs since
     all data stays on GPU at fixed addresses.
     """
 
-    def __init__(self, num_blocks: int, block_size: int):
+    def __init__(self, num_blocks: int, block_size: int, max_seq_len: int = 0):
         """
         Initialize GPU-only manager.
 
         Args:
             num_blocks: Total number of blocks to manage
             block_size: Tokens per block (default 256)
+            max_seq_len: Max sequence length for contiguous cache (0 to disable)
         """
         self._block_size = block_size
         self._num_blocks = num_blocks
+        self._max_seq_len = max_seq_len
 
         # Block metadata
         self.blocks: List[Block] = [Block(i) for i in range(num_blocks)]
@@ -76,6 +79,11 @@ class GPUOnlyManager(KVCacheManager):
         self.num_layers: int = 0
         self.num_kv_heads: int = 0
         self.head_dim: int = 0
+
+        # Contiguous cache for single-seq layer-wise prefill (set by allocate_cache)
+        self.contiguous_k_cache: Optional[Tensor] = None
+        self.contiguous_v_cache: Optional[Tensor] = None
+        self.contiguous_seq_len: int = 0  # Current sequence length in contiguous cache
 
     @property
     def block_size(self) -> int:
@@ -104,6 +112,23 @@ class GPUOnlyManager(KVCacheManager):
             num_kv_heads, head_dim,
             dtype=dtype, device="cuda"
         )
+
+        # Allocate contiguous cache for single-seq layer-wise prefill
+        # Only allocate if there's enough free memory (at least 2GB margin)
+        if self._max_seq_len > 0:
+            contiguous_cache_bytes = 2 * num_layers * self._max_seq_len * num_kv_heads * head_dim * dtype.itemsize
+            free_memory = torch.cuda.mem_get_info()[0]
+
+            if free_memory > contiguous_cache_bytes + 2 * 1024**3:  # 2GB margin
+                # Shape: [num_layers, max_seq_len, kv_heads, head_dim]
+                self.contiguous_k_cache = torch.empty(
+                    num_layers, self._max_seq_len, num_kv_heads, head_dim,
+                    dtype=dtype, device="cuda"
+                )
+                self.contiguous_v_cache = torch.empty(
+                    num_layers, self._max_seq_len, num_kv_heads, head_dim,
+                    dtype=dtype, device="cuda"
+                )
 
     def get_layer_cache(self, layer_id: int) -> Tuple[Tensor, Tensor]:
         """Get K/V cache for a layer."""

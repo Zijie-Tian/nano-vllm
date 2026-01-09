@@ -1,346 +1,412 @@
-# Task Plan: Integrate Sparsity into Layerwise Offload
+# Task Plan: Fix GPU-only Mode Performance Issue
 
 ## Goal
+Eliminate the `store_kvcache` scatter overhead in GPU-only mode by using **contiguous KV cache layout** (like offload mode), avoiding PagedAttention's blocked layout for single-sequence inference.
 
-Extend MInference (prefill sparse) and Quest (decode sparse) to the layerwise offload execution path, with an extensible architecture for future sparsity methods.
+## Problem Summary
 
-## Key Insight
+GPU-only mode with MInference is **slower** than CPU offload mode:
 
-**现有的 sparse policy 已经实现，只是 layerwise offload 路径绕过了它！**
+| Mode | Prefill Speed (32K tokens, Qwen3-4B) |
+|------|--------------------------------------|
+| GPU-only + MInference | 3383 tok/s |
+| Offload + MInference | 5373 tok/s |
 
-| 路径 | Attention 调用方式 | Sparse 支持 |
-|------|-------------------|-------------|
-| GPU-only | `attention.py` → `sparse_prefill_attention()` | YES |
-| Layerwise offload | `model_runner.py` → `flash_attn_varlen_func()` | NO (直接调用) |
+**Root cause**: PagedAttention's blocked layout requires expensive `index_copy_` scatter operations to convert contiguous K,V to blocked format.
 
-## Policy Type Analysis
+## Key Insight: Why Offload is Fast
 
-**两类 sparse policy 的本质区别：**
+Offload mode uses **contiguous layout** for KV cache:
 
-| Policy | 影响 Attention 计算 | 影响 KV Load 策略 | `select_blocks()` 行为 |
-|--------|-------------------|-----------------|----------------------|
-| **MInference** | YES (`sparse_prefill_attention`) | NO | `return available_blocks` (全部) |
-| **Quest** | NO | YES | 返回 Top-K subset |
+```python
+# OffloadEngine's CPU cache layout
+k_cache_cpu: [num_layers, num_blocks, block_size, kv_heads, head_dim]
 
-**MInference**: 只改变 attention 计算方式，不影响外部的 layer-wise load/offload 流程
-**Quest**: 选择性地只 load 部分 blocks，影响 H2D 传输
+# Store is simple contiguous slice assignment
+self.k_cache_cpu[layer_id, block_id, :actual_size].copy_(k[start:end])
+```
 
-## Architecture Constraint
+The K,V computed during prefill `[seq_len, kv_heads, head_dim]` matches the cache layout - no format conversion needed!
 
-**所有 copy_ 操作必须封装在 OffloadEngine 中，model_runner.py 不能直接访问内部存储！**
+## Solution: Contiguous Layout for GPU-only Mode
+
+For GPU-only single-sequence mode, use the **same contiguous layout as offload mode**, but on GPU:
+
+```
+Current GPU-only (PagedAttention):
+  Cache: [num_blocks, block_size, kv_heads, head_dim] (blocked)
+  Store: scatter via index_copy_ (SLOW)
+
+Proposed GPU-only (Contiguous):
+  Cache: [num_layers, max_seq_len, kv_heads, head_dim] (contiguous)
+  Store: slice assignment k_cache[layer_id, :seq_len] = k (FAST)
+```
+
+This mirrors offload mode's architecture but keeps everything on GPU - no cross-device transfer, no layout conversion.
 
 ## Phases
+- [x] Phase 1: Add contiguous GPU KV cache in GPUOnlyManager (for single-seq mode)
+- [x] Phase 2: Implement `run_gpu_only_prefill()` using contiguous cache
+- [x] Phase 3: Implement decode path for contiguous cache
+- [x] Phase 4: Test and validate performance
 
-- [x] Phase 1: 添加 `requires_block_selection` 接口标志
-- [x] Phase 2: Refactor OffloadEngine - 封装 offload 操作，支持 sparse policy hooks
-- [x] Phase 3: MInference prefill - 在 offload prefill 中调用 `sparse_prefill_attention()`
-- [x] Phase 4: Quest decode - 根据 `requires_block_selection` 选择性 load blocks (infrastructure ready, full integration deferred)
-- [x] Phase 5: Configuration 和 testing
+## Results
+
+| Mode | 32K Prefill Speed | Notes |
+|------|-------------------|-------|
+| GPU-only (before) | ~3383 tok/s | PagedAttention scatter overhead |
+| GPU-only contiguous (after) | **5293 tok/s** | 56% improvement |
+| Offload mode | 5391 tok/s | Baseline comparison |
+
+**Test passed**: `test_needle.py --input-len 32768 --max-model-len 40960` - correct output retrieved.
 
 ## Detailed Design
 
-### Phase 1: 添加 `requires_block_selection` 接口标志
+### Phase 1: Contiguous GPU KV Cache
 
-**New attribute in SparsePolicy base class:**
+**File**: `nanovllm/kvcache/gpu_manager.py`
 
-```python
-class SparsePolicy(ABC):
-    # Existing flags
-    supports_prefill: bool = True
-    supports_decode: bool = True
-
-    # NEW: Whether this policy requires selective block loading
-    # If True: OffloadEngine will call select_blocks() before loading
-    # If False: OffloadEngine will load all blocks (select_blocks ignored)
-    requires_block_selection: bool = False
-```
-
-**Policy implementations:**
+Add contiguous cache allocation for single-sequence mode:
 
 ```python
-class MInferencePolicy(SparsePolicy):
-    supports_prefill = True
-    supports_decode = False
-    requires_block_selection = False  # 不影响 load 策略
+class GPUOnlyManager(KVCacheManager):
+    def __init__(self, num_blocks: int, block_size: int, max_seq_len: int = 0):
+        # ... existing code ...
+        self.max_seq_len = max_seq_len
 
-    def select_blocks(self, available_blocks, ctx):
-        # 不会被调用（requires_block_selection=False）
-        return available_blocks
+        # Contiguous cache for single-seq mode (allocated in allocate_cache)
+        self.contiguous_k_cache = None  # [num_layers, max_seq_len, kv_heads, head_dim]
+        self.contiguous_v_cache = None
 
-
-class QuestPolicy(SparsePolicy):
-    supports_prefill = False
-    supports_decode = True
-    requires_block_selection = True  # 影响 load 策略
-
-    def select_blocks(self, available_blocks, ctx):
-        # 会被 OffloadEngine 调用
-        return self._select_topk_blocks(...)
-
-
-class FullAttentionPolicy(SparsePolicy):
-    supports_prefill = True
-    supports_decode = True
-    requires_block_selection = False  # 加载所有 blocks
-```
-
-### Phase 2: Refactor OffloadEngine
-
-**OffloadEngine 根据 `requires_block_selection` 决定是否调用 `select_blocks()`:**
-
-```python
-class OffloadEngine:
-    def __init__(self, ..., sparse_policy: "SparsePolicy" = None):
-        self.sparse_policy = sparse_policy
-
-    def offload_layer_kv_sync(
+    def allocate_cache(
         self,
-        layer_id: int,
-        k: Tensor,
-        v: Tensor,
-        cpu_block_ids: List[int],
-        total_tokens: int,
+        num_layers: int,
+        num_kv_heads: int,
+        head_dim: int,
+        dtype: torch.dtype,
     ) -> None:
-        """
-        Synchronously offload layer KV to CPU.
-        Calls sparse policy hooks internally.
-        """
-        for i, cpu_block_id in enumerate(cpu_block_ids):
-            start = i * self.block_size
-            end = min(start + self.block_size, total_tokens)
-            actual_size = end - start
+        # Existing PagedAttention cache for multi-seq/decode
+        self.kv_cache = torch.empty(
+            2, num_layers, self._num_blocks, self._block_size,
+            num_kv_heads, head_dim,
+            dtype=dtype, device="cuda"
+        )
 
-            # Hook: notify sparse policy BEFORE offload (k still on GPU)
-            if self.sparse_policy is not None:
-                self.sparse_policy.on_prefill_offload(
-                    cpu_block_id, layer_id, k[start:end], actual_size
-                )
-
-            # Synchronous copy to CPU (internal)
-            self.k_cache_cpu[layer_id, cpu_block_id, :actual_size].copy_(k[start:end])
-            self.v_cache_cpu[layer_id, cpu_block_id, :actual_size].copy_(v[start:end])
-
-    def load_layer_kv_to_buffer_with_policy(
-        self,
-        buffer_idx: int,
-        layer_id: int,
-        cpu_block_ids: List[int],
-        valid_tokens_per_block: List[int],
-        query: Optional[Tensor] = None,
-    ) -> int:
-        """
-        Load layer KV to buffer, optionally using sparse policy for block selection.
-
-        Args:
-            buffer_idx: Ring buffer slot
-            layer_id: Layer index
-            cpu_block_ids: All available CPU block IDs
-            valid_tokens_per_block: Valid tokens per block
-            query: Query tensor (needed for block selection if requires_block_selection=True)
-
-        Returns:
-            Total tokens loaded
-        """
-        # Check if policy requires block selection
-        if (self.sparse_policy is not None and
-            self.sparse_policy.requires_block_selection and
-            query is not None):
-            # Build context
-            ctx = PolicyContext(
-                query_chunk_idx=0,
-                num_query_chunks=1,
-                layer_id=layer_id,
-                query=query,
-                is_prefill=False,
-                block_size=self.block_size,
+        # Contiguous cache for single-seq prefill (if max_seq_len specified)
+        if self.max_seq_len > 0:
+            self.contiguous_k_cache = torch.empty(
+                num_layers, self.max_seq_len, num_kv_heads, head_dim,
+                dtype=dtype, device="cuda"
             )
-            # Select blocks
-            selected_blocks = self.sparse_policy.select_blocks(cpu_block_ids, ctx)
-
-            # Build valid_tokens for selected blocks
-            block_to_valid = {bid: vt for bid, vt in zip(cpu_block_ids, valid_tokens_per_block)}
-            selected_valid = [block_to_valid[bid] for bid in selected_blocks]
-
-            return self._load_blocks_to_buffer(
-                buffer_idx, layer_id, selected_blocks, selected_valid
+            self.contiguous_v_cache = torch.empty(
+                num_layers, self.max_seq_len, num_kv_heads, head_dim,
+                dtype=dtype, device="cuda"
             )
-        else:
-            # Load all blocks (no selection)
-            return self._load_blocks_to_buffer(
-                buffer_idx, layer_id, cpu_block_ids, valid_tokens_per_block
-            )
-
-    def _load_blocks_to_buffer(
-        self,
-        buffer_idx: int,
-        layer_id: int,
-        block_ids: List[int],
-        valid_tokens: List[int],
-    ) -> int:
-        """Internal: load specified blocks to buffer."""
-        stream = self.layer_load_streams[buffer_idx]
-
-        with torch.cuda.stream(stream):
-            stream.wait_event(self.buffer_compute_done_events[buffer_idx])
-
-            offset = 0
-            for cpu_block_id, vt in zip(block_ids, valid_tokens):
-                self.layer_k_cache[buffer_idx, offset:offset+vt].copy_(
-                    self.k_cache_cpu[layer_id, cpu_block_id, :vt],
-                    non_blocking=True
-                )
-                self.layer_v_cache[buffer_idx, offset:offset+vt].copy_(
-                    self.v_cache_cpu[layer_id, cpu_block_id, :vt],
-                    non_blocking=True
-                )
-                offset += vt
-
-            self.buffer_load_events[buffer_idx].record(stream)
-
-        return offset
 ```
 
-### Phase 3: MInference Prefill Integration
+### Phase 2: Layer-wise GPU-only Prefill
 
-**MInference 只影响 attention 计算，不影响 load/offload：**
+**File**: `nanovllm/engine/model_runner.py`
+
+Following offload pattern exactly - store K,V per-layer to contiguous cache:
 
 ```python
-def run_layerwise_offload_prefill(self, seqs):
-    ...
+@torch.inference_mode()
+def run_gpu_only_prefill(self, seqs: list[Sequence]) -> list[int]:
+    """
+    GPU-only prefill with contiguous KV cache layout.
+
+    Mirrors run_layerwise_offload_prefill() but stores to GPU instead of CPU.
+    No scatter operations - just contiguous slice assignment.
+    """
+    assert len(seqs) == 1, "GPU-only layer-wise prefill only supports single sequence"
+    seq = seqs[0]
+
+    num_layers = len(self.model.model.layers)
+    total_tokens = len(seq)
+
+    # Get contiguous GPU cache
+    k_cache = self.kvcache_manager.contiguous_k_cache
+    v_cache = self.kvcache_manager.contiguous_v_cache
+
+    # Prepare inputs
+    input_ids = torch.tensor(seq[:], dtype=torch.int64, device="cuda")
+    positions = torch.arange(total_tokens, dtype=torch.int64, device="cuda")
+
+    from flash_attn.flash_attn_interface import flash_attn_varlen_func
+    cu_seqlens = torch.tensor([0, total_tokens], dtype=torch.int32, device="cuda")
+
+    # Embedding
+    hidden_states = self.model.model.embed_tokens(input_ids)
+    residual = None
+
+    # Layer-by-layer processing (same as offload prefill)
     for layer_id in range(num_layers):
-        # QKV projection + RoPE
+        layer = self.model.model.layers[layer_id]
+
+        # Input LayerNorm
+        if residual is None:
+            hidden_ln, residual = layer.input_layernorm(hidden_states), hidden_states
+        else:
+            hidden_ln, residual = layer.input_layernorm(hidden_states, residual)
+
+        # QKV projection
+        qkv = layer.self_attn.qkv_proj(hidden_ln)
+        q, k, v = qkv.split([
+            layer.self_attn.q_size,
+            layer.self_attn.kv_size,
+            layer.self_attn.kv_size
+        ], dim=-1)
+
+        q = q.view(total_tokens, layer.self_attn.num_heads, layer.self_attn.head_dim)
+        k = k.view(total_tokens, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
+        v = v.view(total_tokens, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
+
+        # Q/K norms (Qwen3 specific)
+        if not layer.self_attn.qkv_bias:
+            q = layer.self_attn.q_norm(q.reshape(-1, layer.self_attn.head_dim))
+            q = q.view(total_tokens, layer.self_attn.num_heads, layer.self_attn.head_dim)
+            k = layer.self_attn.k_norm(k.reshape(-1, layer.self_attn.head_dim))
+            k = k.view(total_tokens, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
+
+        # RoPE
         q, k = layer.self_attn.rotary_emb(positions, q, k)
 
-        # Sparse or Full attention
+        # Store K,V to contiguous GPU cache (same layout - no conversion!)
+        # This is just slice assignment, not scatter
+        k_cache[layer_id, :total_tokens] = k
+        v_cache[layer_id, :total_tokens] = v
+
+        # Sparse or Full attention (uses k, v directly)
         if self.sparse_prefill_policy is not None:
-            # MInference: only changes attention computation
             attn_output = self.sparse_prefill_policy.sparse_prefill_attention(
                 q, k, v, layer_id
             )
         else:
-            attn_output = flash_attn_varlen_func(q, k, v, ...)
+            attn_output = flash_attn_varlen_func(
+                q, k, v,
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=total_tokens,
+                max_seqlen_k=total_tokens,
+                softmax_scale=layer.self_attn.attn.scale,
+                causal=True,
+            )
 
-        # MLP
-        ...
+        # O projection
+        attn_output = attn_output.view(total_tokens, -1)
+        hidden_states = layer.self_attn.o_proj(attn_output)
 
-        # Offload ALL KV (MInference doesn't affect this)
-        offload_engine.offload_layer_kv_sync(layer_id, k, v, cpu_block_ids, total_tokens)
+        # Post-attention LayerNorm + MLP
+        hidden_states, residual = layer.post_attention_layernorm(hidden_states, residual)
+        hidden_states = layer.mlp(hidden_states)
+
+    # Final norm
+    hidden_states, _ = self.model.model.norm(hidden_states, residual)
+
+    # Compute logits
+    logits = self.model.compute_logits(hidden_states[-1:])
+
+    # Record prefill length for decode
+    self.kvcache_manager.contiguous_seq_len = total_tokens
+
+    # Sample
+    temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
+    token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
+
+    return token_ids
 ```
 
-### Phase 4: Quest Decode Integration
+### Phase 3: Decode with Contiguous Cache
 
-**Quest 影响 block load 策略：**
+**File**: `nanovllm/engine/model_runner.py`
 
 ```python
-def run_layerwise_offload_decode(self, seqs):
-    ...
-    # Preload first N layers (no query available, full load)
-    for i in range(num_preload):
-        loaded_tokens[i] = offload_engine.load_layer_kv_to_buffer_with_policy(
-            i, i, cpu_block_table, valid_tokens_per_block, query=None
-        )
+@torch.inference_mode()
+def run_gpu_only_decode(self, seqs: list[Sequence]) -> list[int]:
+    """
+    Decode using contiguous GPU KV cache.
+
+    Similar to offload decode but simpler - all KV already on GPU.
+    """
+    assert len(seqs) == 1
+    seq = seqs[0]
+
+    num_layers = len(self.model.model.layers)
+    k_cache = self.kvcache_manager.contiguous_k_cache
+    v_cache = self.kvcache_manager.contiguous_v_cache
+    context_len = self.kvcache_manager.contiguous_seq_len
+
+    # Prepare inputs
+    input_ids = torch.tensor([seq.last_token], dtype=torch.int64, device="cuda")
+    positions = torch.tensor([len(seq) - 1], dtype=torch.int64, device="cuda")
+
+    from flash_attn.flash_attn_interface import flash_attn_varlen_func
+    cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
+
+    # Embedding
+    hidden_states = self.model.model.embed_tokens(input_ids)
+    residual = None
 
     for layer_id in range(num_layers):
-        current_buffer = layer_id % num_buffers
+        layer = self.model.model.layers[layer_id]
 
-        # Wait for buffer load
-        offload_engine.wait_buffer_load(current_buffer)
+        # Input LayerNorm
+        if residual is None:
+            hidden_ln, residual = layer.input_layernorm(hidden_states), hidden_states
+        else:
+            hidden_ln, residual = layer.input_layernorm(hidden_states, residual)
 
         # QKV projection
-        q, k_new, v_new = ...
+        qkv = layer.self_attn.qkv_proj(hidden_ln)
+        q, k_new, v_new = qkv.split([
+            layer.self_attn.q_size,
+            layer.self_attn.kv_size,
+            layer.self_attn.kv_size
+        ], dim=-1)
 
-        # Get loaded KV
-        k_prefill, v_prefill = offload_engine.get_buffer_kv(
-            current_buffer, loaded_tokens[current_buffer]
-        )
+        q = q.view(1, layer.self_attn.num_heads, layer.self_attn.head_dim)
+        k_new = k_new.view(1, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
+        v_new = v_new.view(1, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
+
+        # Q/K norms
+        if not layer.self_attn.qkv_bias:
+            q = layer.self_attn.q_norm(q.reshape(-1, layer.self_attn.head_dim))
+            q = q.view(1, layer.self_attn.num_heads, layer.self_attn.head_dim)
+            k_new = layer.self_attn.k_norm(k_new.reshape(-1, layer.self_attn.head_dim))
+            k_new = k_new.view(1, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
+
+        # RoPE
+        q, k_new = layer.self_attn.rotary_emb(positions, q, k_new)
+
+        # Get cached K,V and append new token
+        k_cached = k_cache[layer_id, :context_len]
+        v_cached = v_cache[layer_id, :context_len]
+
+        # Store new K,V to cache
+        k_cache[layer_id, context_len] = k_new.squeeze(0)
+        v_cache[layer_id, context_len] = v_new.squeeze(0)
+
+        # Full K,V for attention
+        k_full = k_cache[layer_id, :context_len + 1]
+        v_full = v_cache[layer_id, :context_len + 1]
 
         # Attention
-        ...
+        cu_seqlens_k = torch.tensor([0, context_len + 1], dtype=torch.int32, device="cuda")
+        attn_output = flash_attn_varlen_func(
+            q, k_full, v_full,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=1,
+            max_seqlen_k=context_len + 1,
+            softmax_scale=layer.self_attn.attn.scale,
+            causal=False,  # Single query, no causal needed
+        )
 
-        # Mark buffer done
-        offload_engine.record_buffer_compute_done(current_buffer)
+        # O projection
+        attn_output = attn_output.view(1, -1)
+        hidden_states = layer.self_attn.o_proj(attn_output)
 
-        # Load next layer (Quest: selective load if requires_block_selection=True)
-        next_layer = layer_id + num_buffers
-        if next_layer < num_layers:
-            loaded_tokens[current_buffer] = offload_engine.load_layer_kv_to_buffer_with_policy(
-                current_buffer, next_layer, cpu_block_table, valid_tokens_per_block,
-                query=q  # Pass query for block selection
-            )
+        # Post-attention LayerNorm + MLP
+        hidden_states, residual = layer.post_attention_layernorm(hidden_states, residual)
+        hidden_states = layer.mlp(hidden_states)
+
+    # Update context length
+    self.kvcache_manager.contiguous_seq_len = context_len + 1
+
+    # Final norm
+    hidden_states, _ = self.model.model.norm(hidden_states, residual)
+
+    # Compute logits
+    logits = self.model.compute_logits(hidden_states)
+
+    # Sample
+    temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
+    token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
+
+    return token_ids
 ```
 
-### Phase 5: Configuration
+### Phase 4: Decision Logic
 
 ```python
-@dataclass
-class Config:
-    # Separate policies for prefill and decode
-    sparse_prefill_policy: SparsePolicyType = SparsePolicyType.FULL  # MINFERENCE
-    sparse_decode_policy: SparsePolicyType = SparsePolicyType.FULL   # QUEST
+def _should_use_contiguous_gpu_mode(self, seqs: list[Sequence], is_prefill: bool) -> bool:
+    """Check if contiguous GPU mode should be used."""
+    # Must have contiguous cache allocated
+    if not hasattr(self.kvcache_manager, 'contiguous_k_cache'):
+        return False
+    if self.kvcache_manager.contiguous_k_cache is None:
+        return False
+
+    # Must NOT be offload mode
+    if hasattr(self.kvcache_manager, 'offload_engine'):
+        return False
+
+    # Single sequence only
+    if len(seqs) != 1:
+        return False
+
+    # For prefill: has blocks (not warmup)
+    if is_prefill and not seqs[0].block_table:
+        return False
+
+    return True
+
+
+def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
+    # Check offload mode (existing)
+    if hasattr(self, 'kvcache_manager') and hasattr(self.kvcache_manager, 'offload_engine'):
+        ...
+
+    # Check contiguous GPU mode
+    if self._should_use_contiguous_gpu_mode(seqs, is_prefill):
+        if is_prefill:
+            return self.run_gpu_only_prefill(seqs)
+        else:
+            return self.run_gpu_only_decode(seqs)
+
+    # Standard PagedAttention path
+    ...
 ```
 
-## File Changes Summary
+## Architecture Comparison
+
+| Aspect | Offload Mode | GPU-only (Proposed) | GPU-only (Current) |
+|--------|--------------|---------------------|-------------------|
+| Cache location | CPU (contiguous) | GPU (contiguous) | GPU (PagedAttention) |
+| Cache layout | `[layers, blocks, block_size, heads, dim]` | `[layers, max_seq_len, heads, dim]` | `[blocks, block_size, heads, dim]` |
+| Prefill store | Contiguous slice copy | **Slice assignment (no copy!)** | Scatter (index_copy_) |
+| Decode read | H2D ring buffer | Direct GPU access | PagedAttention |
+
+## Key Points
+
+1. **No explicit copy_ needed**: Slice assignment `cache[layer, :len] = k` is direct memory write
+2. **Same layout as computed K,V**: No format conversion required
+3. **Mirrors offload architecture**: Same layer-wise processing pattern
+4. **GPU advantage**: No cross-device transfer, faster than offload
+
+## Memory Usage
+
+Contiguous GPU cache: `2 * num_layers * max_seq_len * kv_heads * head_dim * dtype_size`
+
+For Qwen3-4B with 32K max_seq_len:
+- `2 * 28 * 32768 * 8 * 128 * 2 = 3.5GB`
+
+Same as offload mode's CPU cache, but on GPU.
+
+## Files to Modify
 
 | File | Changes |
 |------|---------|
-| `nanovllm/kvcache/sparse/policy.py` | Add `requires_block_selection` attribute |
-| `nanovllm/kvcache/sparse/minference.py` | Set `requires_block_selection = False` |
-| `nanovllm/kvcache/sparse/quest.py` | Set `requires_block_selection = True` |
-| `nanovllm/kvcache/sparse/full_policy.py` | Set `requires_block_selection = False` |
-| `nanovllm/kvcache/offload_engine.py` | Add `offload_layer_kv_sync()`, `load_layer_kv_to_buffer_with_policy()` |
-| `nanovllm/engine/model_runner.py` | Use encapsulated methods, integrate sparse policies |
+| `nanovllm/kvcache/gpu_manager.py` | Add contiguous cache allocation |
+| `nanovllm/engine/model_runner.py` | Add `run_gpu_only_prefill()`, `run_gpu_only_decode()`, modify `run()` |
 
-## Key Design Principles
+## Expected Performance
 
-1. **Encapsulation**: All copy_ operations in OffloadEngine
-2. **Interface Flag**: `requires_block_selection` declares if policy affects load strategy
-3. **Separation of Concerns**:
-   - MInference: only `sparse_prefill_attention()` (compute-level)
-   - Quest: `select_blocks()` + hooks (load-level)
-4. **Hooks inside engine**: Sparse policy hooks called within OffloadEngine methods
-
-## Decisions Made
-
-- [x] 添加 `requires_block_selection` 接口标志区分两类 policy
-- [x] 所有 copy_ 封装在 OffloadEngine 中
-- [x] Sparse policy hooks 在 OffloadEngine 内部调用
-- [x] Decode preload 使用全量加载（Q 不可用）
+| Metric | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| GPU-only prefill (32K) | 3383 tok/s | ~5400+ tok/s | ~60%+ |
+| Decode | Baseline | Similar | ~0% |
 
 ## Status
-
-**COMPLETE** - All phases implemented and tested successfully.
-
-### Test Results (Qwen3-4B-Instruct-2507)
-
-验证 offload + MInference 输出与 GPU-only + MInference 完全一致：
-
-```
-# GPU-only + MInference
-test_needle.py --model Qwen3-4B --input-len 32768 --enable-minference
-- Prefill: 3383 tok/s
-- Output tokens: [22, 19, 24, 17, 151645] = "7492<|im_end|>"
-- Result: PASSED
-
-# Offload + MInference
-test_needle.py --model Qwen3-4B --input-len 32768 --enable-offload --enable-minference
-- Prefill: 5373 tok/s (faster due to layer-wise processing)
-- Output tokens: [22, 19, 24, 17, 151645] = "7492<|im_end|>"
-- Result: PASSED
-
-两种配置输出完全一致！
-```
-
-Note: Qwen3-0.6B 在 offload 模式下有已知 bug（模型太小，长序列不稳定），不是本次修改引入。
-
-## Performance Discovery
-
-**意外发现**: Offload 模式比 GPU-only 模式更快！
-
-| Mode | Prefill Speed |
-|------|---------------|
-| GPU-only + MInference | 3383 tok/s |
-| Offload + MInference | 5373 tok/s |
-
-**根本原因**: GPU-only 模式的 `store_kvcache()` 使用 PagedAttention 的 scatter 操作 (`index_copy_`)，而 offload 模式使用 contiguous copy。
-
-详细分析和优化建议见: [`docs/gpu_only_performance_issue.md`](docs/gpu_only_performance_issue.md)
+**Currently in Phase 1** - Ready to implement contiguous GPU cache
