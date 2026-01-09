@@ -36,10 +36,11 @@ def create_kvcache_manager(config: "Config") -> KVCacheManager:
         KVCacheManager instance
     """
     if not getattr(config, 'enable_cpu_offload', False):
-        # Default: pure GPU mode
+        # Default: pure GPU mode with contiguous cache for single-seq optimization
         return GPUOnlyManager(
             num_blocks=config.num_kvcache_blocks,
             block_size=config.kvcache_block_size,
+            max_seq_len=config.max_model_len,  # Enable contiguous cache
         )
 
     # CPU offload is enabled
