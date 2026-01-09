@@ -60,6 +60,7 @@ PYTHONPATH=/home/zijie/Code/nano-vllm:$PYTHONPATH python tests/test_needle.py
 | Document | Purpose |
 |----------|---------|
 | [`docs/architecture_guide.md`](docs/architecture_guide.md) | Core components, layer-wise CPU offload design, prefill/decode flows, implementation details |
+| [`docs/cuda_graph_offload_guide.md`](docs/cuda_graph_offload_guide.md) | CUDA graph support for CPU offload decode path, 4x decode speedup |
 | [`docs/sparse_attention_guide.md`](docs/sparse_attention_guide.md) | Block sparse attention methods (MInference, FlexPrefill, XAttention, Quest), computation flow |
 | [`docs/sparse_offload_integration.md`](docs/sparse_offload_integration.md) | Sparse policy integration with layerwise offload, `requires_block_selection` interface design |
 | [`docs/layerwise_offload_memory_analysis.md`](docs/layerwise_offload_memory_analysis.md) | Memory allocation analysis with theoretical formulas and empirical validation (< 5% error) |
@@ -76,6 +77,7 @@ PYTHONPATH=/home/zijie/Code/nano-vllm:$PYTHONPATH python tests/test_needle.py
 | `enable_cpu_offload` | False | Enable for long context |
 | `num_gpu_blocks` | 2 | GPU blocks for offload mode |
 | `num_kv_buffers` | 4 | Ring buffer size for decode pipeline |
+| `enforce_eager` | False | Set True to disable CUDA graphs |
 
 ## Benchmarking
 
@@ -90,10 +92,11 @@ PYTHONPATH=/home/zijie/Code/nano-vllm:$PYTHONPATH python tests/test_needle.py
 - Qwen3-0.6B/4B: 40960 tokens
 - Qwen2.5-7B-Instruct-1M: 1048576 tokens
 
-**Performance (Qwen3-0.6B)**:
-- GPU: ~18k tok/s (prefill), ~100 tok/s (decode)
-- CPU Offload (16K): ~14k tok/s (prefill)
-- CPU Offload (32K): ~13k tok/s (prefill)
+**Performance (Qwen3-4B, CPU Offload)**:
+- Prefill: ~5700-8000 tok/s (varies by context length)
+- Decode with CUDA Graph: ~50 tok/s (TPOT ~19ms)
+- Decode Eager Mode: ~12 tok/s (TPOT ~80ms)
+- **CUDA Graph speedup: 4x decode throughput**
 
 ---
 
