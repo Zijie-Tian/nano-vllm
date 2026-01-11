@@ -1,7 +1,15 @@
 import torch
 from torch import nn
 import torch.distributed as dist
-from transformers import Qwen3Config
+
+try:
+    from transformers import Qwen3Config
+except ImportError as e:
+    raise ImportError(
+        "Qwen3Config requires transformers >= 4.51.0. "
+        f"Current error: {e}. "
+        "Install with: pip install 'transformers>=4.51.0'"
+    ) from e
 
 from nanovllm.layers.activation import SiluAndMul
 from nanovllm.layers.attention import Attention
