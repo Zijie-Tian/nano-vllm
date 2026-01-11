@@ -71,6 +71,12 @@ def create_kvcache_manager(config: "Config") -> KVCacheManager:
         threshold_blocks=getattr(config, 'sparse_threshold_blocks', 4),
     )
 
+    # max_seq_len needs to be larger than max_model_len to accommodate decode tokens
+    # When prefill uses ~max_model_len tokens, decode needs additional slots
+    # Add max_new_tokens (default 512) buffer for decode phase
+    max_new_tokens = getattr(config, 'max_new_tokens', 512)
+    max_seq_len = config.max_model_len + max_new_tokens
+
     return HybridKVCacheManager(
         num_gpu_slots=num_gpu_blocks,
         num_cpu_blocks=num_cpu_blocks,
@@ -78,7 +84,7 @@ def create_kvcache_manager(config: "Config") -> KVCacheManager:
         policy=eviction_policy,
         sparse_policy=sparse_policy,
         num_kv_buffers=getattr(config, 'num_kv_buffers', 4),
-        max_seq_len=config.max_model_len,
+        max_seq_len=max_seq_len,
     )
 
 

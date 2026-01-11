@@ -27,7 +27,9 @@ class ModelRunner:
         self.rank = rank
         self.event = event
 
-        dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
+        import os
+        port = os.environ.get("NANOVLLM_DIST_PORT", "2333")
+        dist.init_process_group("nccl", f"tcp://localhost:{port}", world_size=self.world_size, rank=rank)
         torch.cuda.set_device(rank)
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.torch_dtype)
@@ -546,8 +548,8 @@ class ModelRunner:
             k = k.view(total_tokens, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
             v = v.view(total_tokens, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
 
-            # Q/K norms (Qwen3 specific)
-            if not layer.self_attn.qkv_bias:
+            # Q/K norms (Qwen3 specific - only when qkv_bias=False)
+            if not getattr(layer.self_attn, 'qkv_bias', True):
                 num_tokens = q.shape[0]
                 q = layer.self_attn.q_norm(q.reshape(-1, layer.self_attn.head_dim))
                 q = q.view(num_tokens, layer.self_attn.num_heads, layer.self_attn.head_dim)
@@ -649,8 +651,8 @@ class ModelRunner:
             k_new = k_new.view(1, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
             v_new = v_new.view(1, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
 
-            # Q/K norms
-            if not layer.self_attn.qkv_bias:
+            # Q/K norms (Qwen3 specific - only when qkv_bias=False)
+            if not getattr(layer.self_attn, 'qkv_bias', True):
                 q = layer.self_attn.q_norm(q.reshape(-1, layer.self_attn.head_dim))
                 q = q.view(1, layer.self_attn.num_heads, layer.self_attn.head_dim)
                 k_new = layer.self_attn.k_norm(k_new.reshape(-1, layer.self_attn.head_dim))
@@ -785,8 +787,8 @@ class ModelRunner:
                 k = k.view(total_tokens, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
                 v = v.view(total_tokens, layer.self_attn.num_kv_heads, layer.self_attn.head_dim)
 
-                # Q/K norms (Qwen3 specific)
-                if not layer.self_attn.qkv_bias:
+                # Q/K norms (Qwen3 specific - only when qkv_bias=False)
+                if not getattr(layer.self_attn, 'qkv_bias', True):
                     num_tokens = q.shape[0]
                     q = layer.self_attn.q_norm(q.reshape(-1, layer.self_attn.head_dim))
                     q = q.view(num_tokens, layer.self_attn.num_heads, layer.self_attn.head_dim)

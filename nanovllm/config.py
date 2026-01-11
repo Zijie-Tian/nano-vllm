@@ -61,6 +61,15 @@ class Config:
         self.max_model_len = min(self.max_model_len, self.hf_config.max_position_embeddings)
         assert self.max_num_batched_tokens >= self.max_model_len
 
+        # CPU offload mode only supports single sequence (layer-wise processing)
+        if self.enable_cpu_offload and self.max_num_seqs != 1:
+            import logging
+            logging.warning(
+                f"CPU offload mode only supports single sequence. "
+                f"Overriding max_num_seqs from {self.max_num_seqs} to 1."
+            )
+            self.max_num_seqs = 1
+
         # Override torch_dtype if user specified
         if self.dtype is not None:
             dtype_map = {
