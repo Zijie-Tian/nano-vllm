@@ -34,13 +34,55 @@ class LLMEngine:
         # Set Sequence.block_size to match the KV cache block size
         Sequence.block_size = config.kvcache_block_size
         self.scheduler = Scheduler(config, self.model_runner.kvcache_manager)
-        atexit.register(self.exit)
+        self._closed = False
+        atexit.register(self._atexit_handler)
 
-    def exit(self):
+    def _atexit_handler(self):
+        """Handler for atexit - only runs if close() wasn't called."""
+        if not self._closed:
+            self.close()
+
+    def close(self):
+        """Explicitly close the engine and release all resources.
+
+        This method is idempotent - calling it multiple times is safe.
+        Supports: explicit close(), context manager, and __del__ fallback.
+        """
+        if self._closed:
+            return
+        self._closed = True
+
+        # Unregister atexit to prevent double cleanup
+        try:
+            atexit.unregister(self._atexit_handler)
+        except Exception:
+            pass
+
+        # Cleanup resources
         self.model_runner.call("exit")
         del self.model_runner
         for p in self.ps:
             p.join()
+
+    def exit(self):
+        """Alias for close() - kept for backward compatibility."""
+        self.close()
+
+    def __del__(self):
+        """Destructor - attempt cleanup if not already done."""
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - ensures cleanup."""
+        self.close()
+        return False
 
     def add_request(self, prompt: str | list[int], sampling_params: SamplingParams):
         if isinstance(prompt, str):
