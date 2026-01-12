@@ -46,7 +46,7 @@ eval/RULER/scripts/run.sh
 ```
 xattn/src/load_llama.py
     ├── from xattn.threshold.llama_threshold import llama_fuse_16, llama_fuse_8, llama_fuse_4
-    ├── import flashinfer  ← 外部依赖 (必需)
+    ├── import flashinfer  ← 外部依赖
     │
     ├── from xattn.src.Xattention import Xattention_prefill (try/except)
     ├── from xattn.src.Minference import Minference_prefill (try/except)
@@ -60,10 +60,10 @@ xattn/src/load_llama.py
 
 ```
 xattn/src/AvgPool.py
-    └── from block_sparse_attn import block_sparse_attn_func  ← 外部依赖 (必需)
+    └── from block_sparse_attn import block_sparse_attn_func  ← 外部依赖
 
 xattn/src/Fullprefill.py
-    └── import flashinfer  ← 外部依赖 (必需)
+    └── import flashinfer  ← 外部依赖
 ```
 
 ---
@@ -72,15 +72,15 @@ xattn/src/Fullprefill.py
 
 ### RULER Python 文件依赖
 
-| 文件 | 依赖的模块 | xattn 依赖 | 外部依赖 |
-|------|-----------|------------|----------|
-| `pred/call_api.py` | model_wrappers, yaml, tqdm, nemo | FastPrefillConfig | torch |
-| `pred/model_wrappers.py` | - | load_model, FastPrefillConfig | torch, transformers, nanovllm |
-| `pred/client_wrappers.py` | - | 无 | requests, openai, google-generativeai |
-| `data/prepare.py` | template, tokenizer, synthetic/* | 无 | nltk, yaml |
-| `data/tokenizer.py` | - | 无 | transformers, tiktoken, nemo |
-| `data/synthetic/niah.py` | tokenizer | 无 | wonderwords, nltk, numpy, nemo |
-| `eval/evaluate.py` | synthetic/constants | 无 | pandas, nltk, nemo |
+| 文件 | 依赖的模块 | xattn 依赖 | nemo 依赖 |
+|------|-----------|------------|-----------|
+| `pred/call_api.py` | model_wrappers, yaml, tqdm | FastPrefillConfig | manifest_utils |
+| `pred/model_wrappers.py` | - | load_model, FastPrefillConfig | - |
+| `pred/client_wrappers.py` | - | 无 | - |
+| `data/prepare.py` | template, tokenizer, synthetic/* | 无 | - |
+| `data/tokenizer.py` | - | 无 | SentencePieceTokenizer |
+| `data/synthetic/niah.py` | tokenizer | 无 | manifest_utils |
+| `eval/evaluate.py` | synthetic/constants | 无 | manifest_utils |
 
 ### xattn 内部文件依赖
 
@@ -98,111 +98,101 @@ xattn/src/Fullprefill.py
 
 ---
 
-## 关键外部依赖
+## 环境依赖说明
 
-### 必需依赖
+根据 **x-attention/task_plan.md** 的规划：
 
-1. **flashinfer**
-   - 用途：Full_prefill 和 decode 阶段的高效 attention 计算
-   - 使用位置：`Fullprefill.py`, `load_llama.py`
+| 依赖 | 版本 | 安装方式 | 状态 |
+|------|------|---------|------|
+| torch | 2.9.1 | pip (cuda128) | ✅ 由 x-attention 管理 |
+| transformers | 4.57.3 | pip | ✅ 由 x-attention 管理 |
+| nemo-toolkit | 2.6.1 (base) | pip | ✅ 由 x-attention 管理 |
+| flash-attn | fork | 源码编译 | ✅ 由 x-attention 管理 |
+| flashinfer | fork | 源码编译 | ✅ 由 x-attention 管理 |
 
-2. **block_sparse_attn**
-   - 用途：AvgPool 的 block sparse attention 实现
-   - 使用位置：`AvgPool.py`
-   - 注意：这是一个特殊依赖，可能需要单独安装或编译
-
-3. **nemo-toolkit**
-   - 用途：manifest_utils (JSONL 读写), SentencePieceTokenizer
-   - 使用位置：`call_api.py`, `evaluate.py`, `niah.py`, `tokenizer.py`
-
-4. **transformers**
-   - 用途：模型加载和 tokenizer
-   - 使用位置：`model_wrappers.py`, `load_llama.py`, `tokenizer.py`
-
-### 可选依赖
-
-5. **nano-vllm**
-   - 用途：NanoVLLM 推理引擎 (CPU offload 支持)
-   - 使用位置：`model_wrappers.py` (NanoVLLMModel class)
+**重要**: NeMo 安装为 base only，以下模块**不可用**：
+- `nemo.collections.asr` (ASR extra)
+- `nemo.collections.nlp` (NLP extra)
 
 ---
 
 ## Import 修改清单
 
-### 需要从 `xattn.` 改为 `compass.` 的文件
+### 1. xattn → compass 修改
 
-1. **eval/RULER/scripts/pred/call_api.py**
-   ```python
-   # 旧
-   from xattn.src.load_llama import FastPrefillConfig
-   # 新
-   from compass.src.load_llama import FastPrefillConfig
-   ```
+#### compass/src/load_llama.py (迁移后)
+```python
+# 旧
+from xattn.threshold.llama_threshold import llama_fuse_16, llama_fuse_8, llama_fuse_4
+from xattn.src.Xattention import Xattention_prefill
+from xattn.src.Minference import Minference_prefill
+from xattn.src.Fullprefill import Full_prefill
+from xattn.src.Flexprefill import Flexprefill_prefill
+from xattn.src.Compass import Compass_prefill
+from xattn.src.AvgPool import AvgPool_prefill
+from xattn.src.utils import *
 
-2. **eval/RULER/scripts/pred/model_wrappers.py**
-   ```python
-   # 旧
-   from xattn.src.load_llama import load_model, FastPrefillConfig
-   # 新
-   from compass.src.load_llama import load_model, FastPrefillConfig
-   ```
+# 新
+from compass.threshold.llama_threshold import llama_fuse_16, llama_fuse_8, llama_fuse_4
+from compass.src.Xattention import Xattention_prefill
+from compass.src.Minference import Minference_prefill
+from compass.src.Fullprefill import Full_prefill
+from compass.src.Flexprefill import Flexprefill_prefill
+from compass.src.Compass import Compass_prefill
+from compass.src.AvgPool import AvgPool_prefill
+from compass.src.utils import *
+```
 
-3. **compass/src/load_llama.py** (迁移后)
-   ```python
-   # 旧
-   from xattn.threshold.llama_threshold import llama_fuse_16, llama_fuse_8, llama_fuse_4
-   from xattn.src.Xattention import Xattention_prefill
-   from xattn.src.Minference import Minference_prefill
-   from xattn.src.Fullprefill import Full_prefill
-   from xattn.src.Flexprefill import Flexprefill_prefill
-   from xattn.src.Compass import Compass_prefill
-   from xattn.src.AvgPool import AvgPool_prefill
-   from xattn.src.utils import *
+#### eval/RULER/scripts/pred/call_api.py
+```python
+# 旧
+from xattn.src.load_llama import FastPrefillConfig
+# 新
+from compass.src.load_llama import FastPrefillConfig
+```
 
-   # 新
-   from compass.threshold.llama_threshold import llama_fuse_16, llama_fuse_8, llama_fuse_4
-   from compass.src.Xattention import Xattention_prefill
-   from compass.src.Minference import Minference_prefill
-   from compass.src.Fullprefill import Full_prefill
-   from compass.src.Flexprefill import Flexprefill_prefill
-   from compass.src.Compass import Compass_prefill
-   from compass.src.AvgPool import AvgPool_prefill
-   from compass.src.utils import *
-   ```
+#### eval/RULER/scripts/pred/model_wrappers.py
+```python
+# 旧
+from xattn.src.load_llama import load_model, FastPrefillConfig
+# 新
+from compass.src.load_llama import load_model, FastPrefillConfig
+```
 
----
+### 2. NeMo ASR Extra → 本地实现修改
 
-## Docker 脚本修改点
+**背景**: NeMo 2.6.1 base 已安装，但 ASR extra (`nemo.collections.asr`) 不可用。
+需要创建本地 `manifest_utils.py` 替代。
 
-### run_ruler_docker.sh
+#### 涉及文件
+- `eval/RULER/scripts/pred/call_api.py`
+- `eval/RULER/scripts/eval/evaluate.py`
+- `eval/RULER/scripts/data/synthetic/niah.py`
 
-1. 修改 PROJECT_DIR mount:
-   ```bash
-   # 旧
-   -v $PROJECT_DIR:/workspace/x-attention
-   # 新
-   -v $PROJECT_DIR:/workspace/compass
-   ```
+```python
+# 旧 (NeMo ASR extra - 不可用)
+from nemo.collections.asr.parts.utils.manifest_utils import read_manifest, write_manifest
 
-2. 修改 PYTHONPATH:
-   ```bash
-   # 旧
-   -e PYTHONPATH=/workspace/x-attention:/workspace/nano-vllm
-   # 新
-   -e PYTHONPATH=/workspace/compass:/workspace/nano-vllm
-   ```
+# 新 (本地实现)
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from utils.manifest_utils import read_manifest, write_manifest
+```
 
-3. 修改工作目录:
-   ```bash
-   # 旧
-   -w /workspace/x-attention
-   # 新
-   -w /workspace/compass
-   ```
+#### eval/RULER/scripts/data/tokenizer.py
 
-### run_ruler_nanovllm.sh
+检查是否依赖 NeMo NLP extra：
+```python
+# 如果有旧的 NeMo NLP 依赖
+from nemo.collections.nlp.modules.common.tokenizer_utils import get_nmt_tokenizer
 
-同上修改。
+# 替换为 HuggingFace 或 sentencepiece
+from transformers import AutoTokenizer
+# 或
+import sentencepiece as spm
+```
+
+**注意**: 大部分 RULER 代码已使用 HuggingFace tokenizer，此项可能无需修改。
 
 ---
 

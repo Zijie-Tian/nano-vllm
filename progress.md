@@ -2,13 +2,7 @@
 
 ## Session: 2026-01-13
 
-### Time: Session Start
-- [x] 初始化 COMPASS git 仓库
-- [x] 设置 remote origin
-- [x] 切换默认分支到 main
-- [x] 初始提交并推送
-
-### Time: 代码分析阶段
+### 代码分析阶段 ✓
 - [x] 探索 x-attention/eval/RULER 目录结构
 - [x] 分析 scripts/run_ruler_*.sh 入口脚本
 - [x] 阅读 eval/RULER/scripts/run.sh 主流程
@@ -20,9 +14,10 @@
 - [x] 阅读 data/synthetic/niah.py 数据生成
 - [x] 阅读 eval/evaluate.py 评估流程
 - [x] 分析 xattn 包结构和依赖
+- [x] 阅读 x-attention/task_plan.md (环境配置计划)
 
-### Time: 规划文档创建
-- [x] 创建 task_plan.md - 完整迁移计划
+### 规划文档创建 ✓
+- [x] 创建 task_plan.md - 代码迁移计划 (不含环境配置)
 - [x] 创建 findings.md - 调用链和依赖分析
 - [x] 创建 progress.md - 进度日志
 
@@ -31,11 +26,11 @@
 ## 待执行任务 (Next Steps)
 
 ### Phase 1: 创建项目目录结构
-- [ ] 创建 compass/ 包目录及 __init__.py
-- [ ] 创建 compass/src/ 子目录
-- [ ] 创建 compass/threshold/ 子目录
-- [ ] 创建 eval/RULER/scripts/ 目录结构
-- [ ] 创建 scripts/ 顶层脚本目录
+- [ ] 创建 `compass/` 包目录及 `__init__.py`
+- [ ] 创建 `compass/src/` 子目录
+- [ ] 创建 `compass/threshold/` 子目录
+- [ ] 创建 `eval/RULER/scripts/` 目录结构
+- [ ] 创建 `scripts/` 顶层脚本目录
 
 ### Phase 2: 迁移核心算子模块
 - [ ] 复制 xattn/src/*.py → compass/src/
@@ -53,14 +48,15 @@
 - [ ] 修改 pred/model_wrappers.py 的 import
 
 ### Phase 4: 迁移顶层脚本
-- [ ] 复制并修改 scripts/run_ruler_tasks.sh
-- [ ] 复制并修改 scripts/run_ruler_docker.sh
-- [ ] 复制并修改 scripts/run_ruler_nanovllm.sh
+- [ ] 创建 scripts/run_ruler.sh
 
-### Phase 5: 迁移配置文件
-- [ ] 复制 eval/RULER/requirements.txt
-- [ ] 复制 eval/RULER/Dockerfile
-- [ ] 复制数据文件 (PaulGrahamEssays.json 等)
+### Phase 5: 创建本地 manifest_utils (NeMo ASR Extra 替代)
+- [ ] 创建 `eval/RULER/scripts/utils/__init__.py`
+- [ ] 创建 `eval/RULER/scripts/utils/manifest_utils.py`
+- [ ] 修改 call_api.py, evaluate.py, niah.py 等文件的 import
+- [ ] 检查 tokenizer.py 是否需要修改（大部分已用 HuggingFace）
+
+**说明**: NeMo 2.6.1 base 已安装，但 ASR extra 不可用，需本地实现 manifest_utils
 
 ### Phase 6: 验证测试
 - [ ] Python import 测试
@@ -70,27 +66,22 @@
 
 ---
 
-## Files Modified/Created
+## Files Created
 
-| File | Action | Status |
-|------|--------|--------|
-| `README.md` | Created | Done |
-| `task_plan.md` | Created | Done |
-| `findings.md` | Created | Done |
-| `progress.md` | Created | Done |
-
----
-
-## Issues Encountered
-
-*None so far*
+| File | Status |
+|------|--------|
+| `README.md` | Done |
+| `task_plan.md` | Done |
+| `findings.md` | Done |
+| `progress.md` | Done |
 
 ---
 
 ## Notes
 
-1. 项目从 x-attention 迁移到 COMPASS
-2. 核心包名从 xattn 改为 compass
-3. 关键外部依赖：flashinfer, block_sparse_attn, nemo-toolkit
-4. nano-vllm 作为可选推理引擎，通过 PYTHONPATH 引入
-5. Docker 镜像 `tzj/ruler:v0.3` 已包含必要依赖
+1. **环境配置由 `x-attention/task_plan.md` 管理**，本计划只涉及代码迁移
+2. 环境包括：PyTorch 2.9.1, transformers 4.57.3, **nemo-toolkit 2.6.1 (base)**
+3. 原 xattn 包重命名为 compass 包
+4. 所有 `from xattn.` 改为 `from compass.`
+5. **NeMo base 不含 ASR extra**，需本地实现 `manifest_utils.py`
+6. 3rdparty 目录（flash-attention, flashinfer）由 x-attention task_plan 管理
