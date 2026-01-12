@@ -227,3 +227,6 @@ hive-mind-prompt-*.txt
 
 # Test data
 tests/data/
+
+# Serena MCP tool config
+.serena/

@@ -179,6 +179,24 @@ class OffloadEngine:
             f")"
         )
 
+    # ========== State Reset ==========
+
+    def on_sequence_finished(self):
+        """
+        Clear state after sequence completion to prevent pollution between requests.
+
+        Called by HybridKVCacheManager.deallocate() when a sequence finishes.
+        """
+        # Clear decode buffer to prevent residual KV from affecting next request
+        self.decode_k_buffer.zero_()
+        self.decode_v_buffer.zero_()
+
+        # Re-record buffer_compute_done_events to mark all buffers as available
+        for event in self.buffer_compute_done_events:
+            event.record()
+
+        logger.debug("OffloadEngine: state cleared for next sequence")
+
     # ========== Prefill: Async D2H Offload API ==========
 
     def offload_layer_kv_async(

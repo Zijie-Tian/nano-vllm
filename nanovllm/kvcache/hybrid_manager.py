@@ -244,6 +244,13 @@ class HybridKVCacheManager(KVCacheManager):
         seq.num_cached_tokens = 0
         seq.block_table.clear()
 
+        # Clear decode tracking to prevent state pollution between requests
+        self.clear_decode_tracking(seq)
+
+        # Clear offload engine state (decode buffer, events)
+        if self.offload_engine is not None:
+            self.offload_engine.on_sequence_finished()
+
     def can_append(self, seq: Sequence) -> bool:
         """Check if we can append a token."""
         need_new_block = (len(seq) % self._block_size == 1)
@@ -342,10 +349,12 @@ class HybridKVCacheManager(KVCacheManager):
                 block = self.logical_blocks[logical_id]
                 if block.location == BlockLocation.CPU:
                     cpu_blocks.append(block.cpu_block_id)
-        # logger.debug(
-        #     f"get_prefilled_cpu_blocks: prefilled_blocks={list(self.prefilled_blocks)}, "
-        #     f"returned cpu_blocks={cpu_blocks}"
-        # )
+        # DEBUG: Log on first decode call
+        logger.debug(
+            f"[DEBUG] get_prefilled_cpu_blocks: block_table={list(seq.block_table)}, "
+            f"prefilled_blocks={list(self.prefilled_blocks)}, "
+            f"returned cpu_blocks={cpu_blocks}"
+        )
         return cpu_blocks
 
     # ========== CPU Block Allocation ==========
@@ -382,6 +391,10 @@ class HybridKVCacheManager(KVCacheManager):
 
             self.cpu_block_to_logical[cpu_block_id] = logical_id
             seq.block_table.append(logical_id)
+
+        # DEBUG: Log allocated CPU blocks
+        cpu_blocks = [self.logical_blocks[lid].cpu_block_id for lid in seq.block_table]
+        logger.debug(f"[DEBUG] allocate_cpu_only: allocated cpu_blocks={cpu_blocks}")
 
             # NOTE: Prefix cache disabled in offload mode
             # If enabled, would compute hash and update:
@@ -430,6 +443,8 @@ class HybridKVCacheManager(KVCacheManager):
             if block.location == BlockLocation.CPU:
                 cpu_block_ids.append(block.cpu_block_id)
                 logical_ids.append(logical_id)
+        # DEBUG: Log during prefill
+        logger.debug(f"[DEBUG] get_all_cpu_blocks: returned cpu_block_ids={cpu_block_ids}")
         return cpu_block_ids, logical_ids
 
     def allocate_next_cpu_block(self, seq: Sequence) -> int:
@@ -502,6 +517,12 @@ class HybridKVCacheManager(KVCacheManager):
             # Decode starts at the next position
             prefill_len = len(seq) - 1  # Current len includes the new decode token
             self._decode_start_pos[seq_id] = prefill_len % self._block_size
+            # DEBUG: Log first access
+            logger.debug(
+                f"[DEBUG] get_decode_start_pos FIRST ACCESS: seq_id={seq_id}, "
+                f"len(seq)={len(seq)}, prefill_len={prefill_len}, "
+                f"stored decode_start_pos={self._decode_start_pos[seq_id]}"
+            )
         return self._decode_start_pos[seq_id]
 
     def reset_decode_start_pos(self, seq: Sequence) -> None:
@@ -534,6 +555,11 @@ class HybridKVCacheManager(KVCacheManager):
             # First decode step - store the prefill length
             # len(seq) - 1 because current len includes the first decode token
             self._prefill_len[seq_id] = len(seq) - 1
+            # DEBUG: Log first access
+            logger.debug(
+                f"[DEBUG] get_prefill_len FIRST ACCESS: seq_id={seq_id}, "
+                f"len(seq)={len(seq)}, stored prefill_len={self._prefill_len[seq_id]}"
+            )
         return self._prefill_len[seq_id]
 
     def clear_decode_tracking(self, seq: Sequence) -> None:
@@ -546,6 +572,15 @@ class HybridKVCacheManager(KVCacheManager):
             seq: Sequence
         """
         seq_id = id(seq)
+        # DEBUG: Log clearing and CPU blocks
+        cpu_blocks = [self.logical_blocks[lid].cpu_block_id for lid in seq.block_table
+                      if self.logical_blocks[lid].location == BlockLocation.CPU]
+        logger.debug(
+            f"[DEBUG] clear_decode_tracking: seq_id={seq_id}, "
+            f"clearing decode_start_pos={self._decode_start_pos.get(seq_id, 'N/A')}, "
+            f"prefill_len={self._prefill_len.get(seq_id, 'N/A')}, "
+            f"cpu_blocks={cpu_blocks}"
+        )
         self._decode_start_pos.pop(seq_id, None)
         self._prefill_len.pop(seq_id, None)
 
