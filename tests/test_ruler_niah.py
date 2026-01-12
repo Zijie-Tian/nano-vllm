@@ -14,6 +14,9 @@ Usage:
 
     # Test with custom model
     python tests/test_ruler_niah.py --model /path/to/model --enable-offload
+
+    # Group mode: test in batches with separate LLM initialization per group
+    python tests/test_ruler_niah.py --enable-offload --group-size 5
 """
 
 import os
@@ -217,6 +220,143 @@ def run_ruler_niah_test(
 
 
 # ============================================================
+# Grouped Test Function
+# ============================================================
+
+def run_grouped_test(
+    model_path: str,
+    data_file: Path,
+    group_size: int = 5,
+    total_samples: Optional[int] = None,
+    max_model_len: int = DEFAULT_MAX_MODEL_LEN,
+    max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
+    enable_cpu_offload: bool = False,
+    num_gpu_blocks: int = 4,
+    block_size: int = 1024,
+    gpu_utilization: float = 0.9,
+    enforce_eager: bool = True,
+) -> Tuple[int, int, List[dict]]:
+    """
+    Run RULER NIAH test in groups, with separate LLM initialization per group.
+
+    This mode is useful for:
+    - Avoiding state accumulation issues
+    - Testing LLM initialization stability
+    - Running large-scale tests with memory cleanup between groups
+
+    Args:
+        model_path: Path to the model
+        data_file: Path to JSONL data file
+        group_size: Number of samples per group
+        total_samples: Total samples to test (None = all in file)
+        Other args: Same as run_ruler_niah_test
+
+    Returns:
+        (total_correct, total_tested, group_results): Results summary
+    """
+    import time
+    import gc
+    import torch
+
+    # Count total samples in file
+    file_sample_count = count_samples(data_file)
+    if total_samples is None:
+        total_samples = file_sample_count
+    else:
+        total_samples = min(total_samples, file_sample_count)
+
+    num_groups = (total_samples + group_size - 1) // group_size
+
+    print(f"\n{'='*60}")
+    print(f"RULER NIAH Grouped Test")
+    print(f"{'='*60}")
+    print(f"Model: {model_path}")
+    print(f"Data file: {data_file}")
+    print(f"Total samples: {total_samples}")
+    print(f"Group size: {group_size}")
+    print(f"Number of groups: {num_groups}")
+    print(f"CPU offload: {enable_cpu_offload}")
+    print(f"{'='*60}\n")
+
+    total_correct = 0
+    total_tested = 0
+    group_results = []
+    all_failed = []
+
+    test_start_time = time.time()
+
+    for group_idx in range(num_groups):
+        start_idx = group_idx * group_size
+        end_idx = min(start_idx + group_size, total_samples)
+        sample_indices = list(range(start_idx, end_idx))
+
+        print(f"\n{'='*60}")
+        print(f"Group {group_idx + 1}/{num_groups}: Samples {start_idx}-{end_idx - 1}")
+        print(f"{'='*60}")
+
+        group_start_time = time.time()
+
+        # Run test for this group
+        correct, tested = run_ruler_niah_test(
+            model_path=model_path,
+            data_file=data_file,
+            sample_indices=sample_indices,
+            max_model_len=max_model_len,
+            max_new_tokens=max_new_tokens,
+            enable_cpu_offload=enable_cpu_offload,
+            num_gpu_blocks=num_gpu_blocks,
+            block_size=block_size,
+            gpu_utilization=gpu_utilization,
+            enforce_eager=enforce_eager,
+            verbose=True,
+        )
+
+        group_time = time.time() - group_start_time
+
+        total_correct += correct
+        total_tested += tested
+
+        group_result = {
+            "group": group_idx + 1,
+            "samples": f"{start_idx}-{end_idx - 1}",
+            "correct": correct,
+            "total": tested,
+            "accuracy": 100 * correct / tested if tested > 0 else 0,
+            "time": group_time,
+        }
+        group_results.append(group_result)
+
+        print(f"\nGroup {group_idx + 1} Summary: {correct}/{tested} PASSED ({group_result['accuracy']:.1f}%) in {group_time:.1f}s")
+
+        # Force cleanup between groups
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        # Small delay to ensure port is released
+        if group_idx < num_groups - 1:
+            time.sleep(3)
+
+    total_time = time.time() - test_start_time
+
+    # Final summary
+    print(f"\n{'='*60}")
+    print(f"FINAL SUMMARY")
+    print(f"{'='*60}")
+    print(f"\nGroup Results:")
+    print(f"{'Group':<8} {'Samples':<12} {'Result':<12} {'Accuracy':<10} {'Time':<10}")
+    print(f"{'-'*52}")
+    for r in group_results:
+        print(f"{r['group']:<8} {r['samples']:<12} {r['correct']}/{r['total']:<9} {r['accuracy']:.1f}%{'':<5} {r['time']:.1f}s")
+
+    print(f"{'-'*52}")
+    overall_accuracy = 100 * total_correct / total_tested if total_tested > 0 else 0
+    print(f"{'TOTAL':<8} {'0-' + str(total_tested-1):<12} {total_correct}/{total_tested:<9} {overall_accuracy:.1f}%{'':<5} {total_time:.1f}s")
+    print(f"{'='*60}\n")
+
+    return total_correct, total_tested, group_results
+
+
+# ============================================================
 # CLI Entry Point
 # ============================================================
 
@@ -326,6 +466,18 @@ Examples:
         action="store_true",
         help="Quiet mode, only print final result"
     )
+    parser.add_argument(
+        "--group-size",
+        type=int,
+        default=0,
+        help="Enable grouped testing mode with specified group size. Each group initializes LLM separately. (default: 0 = disabled)"
+    )
+    parser.add_argument(
+        "--total-samples",
+        type=int,
+        default=0,
+        help="Total number of samples to test in group mode (default: 0 = all samples in file)"
+    )
 
     args = parser.parse_args()
 
@@ -334,20 +486,38 @@ Examples:
     enforce_eager = not args.use_cuda_graph
     verbose = not args.quiet
 
-    # Run test
-    correct, total = run_ruler_niah_test(
-        model_path=os.path.expanduser(args.model),
-        data_file=Path(args.data_file),
-        sample_indices=sample_indices,
-        max_model_len=args.max_model_len,
-        max_new_tokens=args.max_new_tokens,
-        enable_cpu_offload=args.enable_offload,
-        num_gpu_blocks=args.num_gpu_blocks,
-        block_size=args.block_size,
-        gpu_utilization=args.gpu_utilization,
-        enforce_eager=enforce_eager,
-        verbose=verbose,
-    )
+    # Check if group mode is enabled
+    if args.group_size > 0:
+        # Grouped testing mode
+        total_samples = args.total_samples if args.total_samples > 0 else None
+        correct, total, _ = run_grouped_test(
+            model_path=os.path.expanduser(args.model),
+            data_file=Path(args.data_file),
+            group_size=args.group_size,
+            total_samples=total_samples,
+            max_model_len=args.max_model_len,
+            max_new_tokens=args.max_new_tokens,
+            enable_cpu_offload=args.enable_offload,
+            num_gpu_blocks=args.num_gpu_blocks,
+            block_size=args.block_size,
+            gpu_utilization=args.gpu_utilization,
+            enforce_eager=enforce_eager,
+        )
+    else:
+        # Standard testing mode
+        correct, total = run_ruler_niah_test(
+            model_path=os.path.expanduser(args.model),
+            data_file=Path(args.data_file),
+            sample_indices=sample_indices,
+            max_model_len=args.max_model_len,
+            max_new_tokens=args.max_new_tokens,
+            enable_cpu_offload=args.enable_offload,
+            num_gpu_blocks=args.num_gpu_blocks,
+            block_size=args.block_size,
+            gpu_utilization=args.gpu_utilization,
+            enforce_eager=enforce_eager,
+            verbose=verbose,
+        )
 
     # Final status
     if correct == total:
