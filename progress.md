@@ -1,76 +1,89 @@
-# Progress Log: Multi-Model Support
+# Progress Log: Fix Torch Distributed Port Conflict
 
-## Session: 2026-01-10
+## Status: COMPLETED & CLEANED UP
 
-### Initial Analysis Complete
+## Session: 2026-01-12
 
-**Time**: Session start
-
-**Actions:**
-1. Read `nanovllm/engine/model_runner.py` - 确认硬编码位置 (line 35)
-2. Read `nanovllm/models/qwen3.py` - 理解 Qwen3 模型结构
-3. Read `nanovllm/utils/loader.py` - 理解权重加载机制
-4. Read `nanovllm/layers/rotary_embedding.py` - 发现 RoPE scaling 限制
-5. Read `/home/zijie/models/Llama-3.1-8B-Instruct/config.json` - 理解 Llama 配置
-
-**Key Findings:**
-- 模型加载在 `model_runner.py:35` 硬编码为 Qwen3
-- RoPE 目前不支持 scaling (`assert rope_scaling is None`)
-- Llama 3.1 需要 "llama3" 类型的 RoPE scaling
-- Llama 无 q_norm/k_norm，无 attention bias
-
-**Created:**
-- `task_plan.md` - 6 阶段实施计划
-- `findings.md` - 技术分析和发现
+### Task Overview
+修复在同一 Python 进程中顺序创建多个 LLM 实例时的 EADDRINUSE 端口冲突问题，以及支持多卡环境下同时启动多个独立进程。
 
 ---
 
 ### Phase Status
 
-| Phase | Status | Notes |
-|-------|--------|-------|
-| 1. Model Registry | **COMPLETED** | `registry.py`, `__init__.py` |
-| 2. Llama3 RoPE | **COMPLETED** | `rotary_embedding.py` |
-| 3. Llama Model | **COMPLETED** | `llama.py` |
-| 4. ModelRunner | **COMPLETED** | Dynamic loading |
-| 5. Qwen3 Register | **COMPLETED** | `@register_model` decorator |
-| 6. Testing | **COMPLETED** | Both Llama & Qwen3 pass |
+| Phase | Description | Status |
+|-------|-------------|--------|
+| Phase 1 | ModelRunner 动态端口分配 | COMPLETED |
+| Phase 2 | LLMEngine close() 和 context manager | COMPLETED |
+| Phase 3 | 测试验证（GPU 4,5） | COMPLETED |
+| Phase 4 | 更新文档 | COMPLETED |
 
 ---
 
-## Test Results
+### Implementation Summary
 
-### Llama 3.1-8B-Instruct (32K needle, GPU 0, offload)
-```
-Input: 32768 tokens
-Expected: 7492
-Output: 7492
-Status: PASSED
-Prefill: 1644 tok/s
-```
+#### Phase 1: Dynamic Port Allocation
+**File**: `nanovllm/engine/model_runner.py`
+- Added `_find_free_port()` function using socket binding
+- Modified port selection logic: use env var if set, otherwise auto-assign
+- Added logging for auto-assigned ports
 
-### Qwen3-4B (8K needle, GPU 1, offload) - Regression Test
-```
-Input: 8192 tokens
-Expected: 7492
-Output: 7492
-Status: PASSED
-Prefill: 3295 tok/s
-```
+#### Phase 2: Resource Cleanup Enhancement
+**File**: `nanovllm/engine/llm_engine.py`
+- Added `_closed` flag for idempotent cleanup
+- Added `close()` method for explicit resource release
+- Added `__del__()` for GC fallback
+- Added `__enter__()` and `__exit__()` for context manager support
+- Modified atexit registration to use `_atexit_handler`
+
+#### Phase 3: Testing (GPU 4,5)
+**File**: `tests/test_port_conflict.py`
+- Created comprehensive test script
+
+**Test Results**:
+| Test | Status | Notes |
+|------|--------|-------|
+| Sequential creation (3 instances) | PASSED | Ports: 50405, 47835, 53011 |
+| Context manager | PASSED | Auto-cleanup works |
+| Parallel processes (GPU 4,5) | PASSED | Ports: 34631, 56097 |
+
+#### Phase 4: Documentation
+**File**: `docs/torch_distributed_port_issue.md`
+- Updated status to RESOLVED
+- Documented solution details
+- Added usage examples
 
 ---
 
-## Files Modified This Session
+### Files Modified
 
 | File | Action | Description |
 |------|--------|-------------|
-| `nanovllm/models/registry.py` | created | Model registry with `@register_model` decorator |
-| `nanovllm/models/__init__.py` | created | Export registry functions, import models |
-| `nanovllm/models/llama.py` | created | Llama model implementation |
-| `nanovllm/models/qwen3.py` | modified | Added `@register_model` decorator |
-| `nanovllm/layers/rotary_embedding.py` | modified | Added Llama3 RoPE scaling |
-| `nanovllm/engine/model_runner.py` | modified | Dynamic model loading via registry |
-| `.claude/rules/gpu-testing.md` | created | GPU testing rules |
-| `task_plan.md` | created | Implementation plan |
-| `findings.md` | created | Technical findings |
-| `progress.md` | created | Progress tracking |
+| `nanovllm/engine/model_runner.py` | Modified | Added `_find_free_port()`, dynamic port logic |
+| `nanovllm/engine/llm_engine.py` | Modified | Added `close()`, `__del__`, context manager |
+| `tests/test_port_conflict.py` | Created | Test script for port conflict fix |
+| `docs/torch_distributed_port_issue.md` | Deleted | Issue resolved, doc removed |
+| `CLAUDE.md` | Modified | Removed port conflict warnings, updated doc index |
+
+---
+
+### Key Features After Fix
+
+1. **Multi-GPU Parallel Testing**
+   ```bash
+   CUDA_VISIBLE_DEVICES=0 python test1.py &
+   CUDA_VISIBLE_DEVICES=1 python test2.py &
+   # Both run with different auto-assigned ports
+   ```
+
+2. **Sequential LLM Creation**
+   ```python
+   for i in range(3):
+       with LLM(model_path) as llm:
+           outputs = llm.generate(prompts, params)
+       # Automatically cleaned up
+   ```
+
+3. **Backward Compatible**
+   - `NANOVLLM_DIST_PORT` env var still works
+   - `llm.exit()` still works (alias for `close()`)

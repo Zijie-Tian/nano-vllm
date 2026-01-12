@@ -1,160 +1,169 @@
-# Findings: Multi-Model Support Analysis
+# Findings: Torch Distributed Port Conflict
 
-## Current Architecture Analysis
+## Problem Analysis
 
-### Model Loading Flow
-```
-LLM(model_path)
-  → LLMEngine.__init__()
-    → Config.__post_init__()
-      → hf_config = AutoConfig.from_pretrained(model)
-    → ModelRunner.__init__()
-      → model = Qwen3ForCausalLM(hf_config)  ← HARDCODED
-      → load_model(model, config.model)
-```
+### Issue Summary
+创建多个 LLM 实例时出现端口冲突 (EADDRINUSE)，导致第二个实例无法启动。
 
-### Key Files
-| File | Purpose |
-|------|---------|
-| `nanovllm/engine/model_runner.py` | 模型加载和运行 |
-| `nanovllm/models/qwen3.py` | Qwen3 模型定义 |
-| `nanovllm/utils/loader.py` | safetensors 权重加载 |
-| `nanovllm/layers/rotary_embedding.py` | RoPE 实现 |
+### Root Cause Deep Dive
 
----
-
-## Llama 3.1 Config Analysis
-
-```json
-{
-  "architectures": ["LlamaForCausalLM"],
-  "model_type": "llama",
-  "attention_bias": false,
-  "mlp_bias": false,
-  "head_dim": 128,
-  "hidden_size": 4096,
-  "intermediate_size": 14336,
-  "num_attention_heads": 32,
-  "num_hidden_layers": 32,
-  "num_key_value_heads": 8,
-  "hidden_act": "silu",
-  "rms_norm_eps": 1e-05,
-  "rope_theta": 500000.0,
-  "rope_scaling": {
-    "factor": 8.0,
-    "high_freq_factor": 4.0,
-    "low_freq_factor": 1.0,
-    "original_max_position_embeddings": 8192,
-    "rope_type": "llama3"
-  },
-  "max_position_embeddings": 131072,
-  "tie_word_embeddings": false,
-  "vocab_size": 128256
-}
-```
-
-### Llama 3 RoPE Scaling
-Llama 3 使用特殊的 RoPE scaling 策略 (`rope_type: "llama3"`)：
-- 低频分量保持不变（对应短距离依赖）
-- 高频分量线性插值（对应长距离依赖）
-- 参数: `factor`, `low_freq_factor`, `high_freq_factor`, `original_max_position_embeddings`
-
-参考实现 (transformers):
+#### 1. 资源绑定位置
 ```python
-def _compute_llama3_parameters(config, device, inv_freq):
-    factor = config.factor
-    low_freq_factor = config.low_freq_factor
-    high_freq_factor = config.high_freq_factor
-    old_context_len = config.original_max_position_embeddings
-
-    low_freq_wavelen = old_context_len / low_freq_factor
-    high_freq_wavelen = old_context_len / high_freq_factor
-
-    wavelen = 2 * math.pi / inv_freq
-    inv_freq_llama = torch.where(
-        wavelen > low_freq_wavelen,
-        inv_freq / factor,
-        inv_freq
-    )
-    smooth_factor = (old_context_len / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor)
-    smoothed_inv_freq = (1 - smooth_factor) * inv_freq_llama + smooth_factor * inv_freq
-    is_medium_freq = (wavelen >= high_freq_wavelen) & (wavelen <= low_freq_wavelen)
-    inv_freq_llama = torch.where(is_medium_freq, smoothed_inv_freq, inv_freq_llama)
-    return inv_freq_llama
+# nanovllm/engine/model_runner.py:30-32
+import os
+port = os.environ.get("NANOVLLM_DIST_PORT", "2333")
+dist.init_process_group("nccl", f"tcp://localhost:{port}", world_size=self.world_size, rank=rank)
 ```
 
----
+- 默认端口 **2333**，可通过 `NANOVLLM_DIST_PORT` 环境变量配置
+- `init_process_group()` 绑定 TCP 端口用于进程间通信
+- 端口绑定持续到 `destroy_process_group()` 被调用
 
-## Weight Mapping Analysis
-
-### Qwen3 packed_modules_mapping
+#### 2. 清理机制缺陷
 ```python
-packed_modules_mapping = {
-    "q_proj": ("qkv_proj", "q"),
-    "k_proj": ("qkv_proj", "k"),
-    "v_proj": ("qkv_proj", "v"),
-    "gate_proj": ("gate_up_proj", 0),
-    "up_proj": ("gate_up_proj", 1),
-}
+# nanovllm/engine/llm_engine.py:37
+atexit.register(self.exit)
+
+# nanovllm/engine/llm_engine.py:39-43
+def exit(self):
+    self.model_runner.call("exit")
+    del self.model_runner
+    for p in self.ps:
+        p.join()
+
+# nanovllm/engine/model_runner.py:66-78
+def exit(self):
+    # ... cleanup code ...
+    dist.destroy_process_group()
 ```
 
-### Llama Weight Names (from safetensors)
-预期 Llama 权重命名与 Qwen3 类似：
-- `model.layers.{i}.self_attn.q_proj.weight`
-- `model.layers.{i}.self_attn.k_proj.weight`
-- `model.layers.{i}.self_attn.v_proj.weight`
-- `model.layers.{i}.self_attn.o_proj.weight`
-- `model.layers.{i}.mlp.gate_proj.weight`
-- `model.layers.{i}.mlp.up_proj.weight`
-- `model.layers.{i}.mlp.down_proj.weight`
-- `model.layers.{i}.input_layernorm.weight`
-- `model.layers.{i}.post_attention_layernorm.weight`
+**关键问题**: `atexit` 只在 **Python 解释器退出** 时触发，而非对象被删除时！
 
-**结论**: Llama 的 `packed_modules_mapping` 与 Qwen3 相同，可以复用。
+#### 3. 问题时间线
+```
+1. 创建 LLM #1
+   ├── init_process_group() 绑定端口 2333 ✓
+   └── atexit.register(self.exit) 注册
 
----
+2. LLM #1 超出作用域或被 del
+   ├── Python GC 回收对象内存
+   ├── atexit handler 未触发（进程未退出）
+   ├── Worker 进程仍在运行
+   └── 端口 2333 仍被占用 ❌
 
-## Shared Components (Can Reuse)
+3. 创建 LLM #2
+   ├── init_process_group() 尝试绑定端口 2333
+   └── EADDRINUSE 错误 ❌
 
-| Component | File | Notes |
-|-----------|------|-------|
-| `RMSNorm` | `layers/layernorm.py` | 通用 |
-| `SiluAndMul` | `layers/activation.py` | 通用 |
-| `Attention` | `layers/attention.py` | FlashAttention wrapper |
-| `QKVParallelLinear` | `layers/linear.py` | 支持 bias=False |
-| `RowParallelLinear` | `layers/linear.py` | 通用 |
-| `MergedColumnParallelLinear` | `layers/linear.py` | 通用 |
-| `VocabParallelEmbedding` | `layers/embed_head.py` | 通用 |
-| `ParallelLMHead` | `layers/embed_head.py` | 通用 |
-| `load_model` | `utils/loader.py` | 通用 |
+4. 程序退出（此时 atexit 才运行）
+   └── 为时已晚 - 已经崩溃
+```
 
 ---
 
-## Llama vs Qwen3 Implementation Diff
+## Solution Analysis
 
-### Attention
-| Feature | Qwen3Attention | LlamaAttention |
-|---------|----------------|----------------|
-| QKV bias | 可配置 (attention_bias) | 始终 False |
-| q_norm | 有 (when bias=False) | 无 |
-| k_norm | 有 (when bias=False) | 无 |
-| RoPE | Standard | Llama3 scaled |
+### 方案对比
 
-### MLP
-| Feature | Qwen3MLP | LlamaMLP |
-|---------|----------|----------|
-| gate/up bias | False | False |
-| down bias | False | False |
-| hidden_act | silu | silu |
+| 方案 | 可靠性 | 向后兼容 | 实现复杂度 | 推荐度 |
+|------|--------|----------|------------|--------|
+| `close()` 方法 | 最高 | 是 | 低 | ★★★★★ |
+| `__del__` 方法 | 中等 | 是 | 低 | ★★★☆☆ |
+| 端口检测重试 | 中等 | 是 | 低 | ★★★☆☆ |
+| Context Manager | 最高 | 需要代码修改 | 低 | ★★★★☆ |
+| 动态端口 | 低 | 是 | 低 | ★★☆☆☆ |
 
-**结论**: Llama MLP 与 Qwen3 MLP 几乎相同，可以直接复用或简化。
+### 为什么选择三层防护
+
+1. **Layer 1: close()** - 用户显式控制，最可靠
+2. **Layer 2: __del__** - 自动清理，覆盖大部分场景
+3. **Layer 3: 端口检测** - 最后防线，提供清晰错误信息
+
+### `__del__` 的限制
+
+Python 的 `__del__` 不保证被调用：
+- 循环引用时可能不触发
+- 解释器关闭时可能无法访问依赖模块
+- 不应依赖于 `__del__` 进行关键资源清理
+
+但作为**额外防护层**是有价值的，因为：
+- 大多数情况下会被调用
+- 比没有好
+- 不影响其他清理机制
+
+---
+
+## Code Structure Analysis
+
+### LLMEngine 生命周期
+```
+__init__()
+├── 创建 worker 进程 (self.ps)
+├── 创建 ModelRunner (self.model_runner)
+├── 注册 atexit handler
+└── 设置 scheduler, tokenizer
+
+close() [新增]
+├── 检查 _closed 标志（幂等）
+├── 注销 atexit handler
+├── 调用 model_runner.exit()
+├── join worker 进程
+└── 设置 _closed = True
+
+__del__() [新增]
+└── 调用 close()（忽略异常）
+
+__enter__/__exit__() [新增]
+└── Context manager 支持
+```
+
+### ModelRunner 资源
+```
+__init__()
+├── torch.distributed 初始化（绑定端口）
+├── 模型加载
+├── KV cache 分配
+├── CUDA graph 捕获（可选）
+└── SharedMemory 创建（多GPU）
+
+exit()
+├── SharedMemory 清理
+├── CUDA graph 清理
+└── dist.destroy_process_group()
+```
 
 ---
 
 ## Risk Assessment
 
-| Risk | Impact | Mitigation |
-|------|--------|------------|
-| RoPE 实现错误 | 高 - 导致错误输出 | 参考 transformers 实现，单元测试 |
-| 权重映射错误 | 高 - 模型无法加载 | 检查 safetensors 键名 |
-| 注册表循环导入 | 中 - 启动失败 | 延迟导入 |
+| 风险 | 影响 | 缓解措施 |
+|------|------|----------|
+| `__del__` 不被调用 | 中 - 端口泄漏 | Layer 3 端口检测提供清晰错误 |
+| close() 重复调用 | 低 | `_closed` 标志保证幂等 |
+| atexit 双重调用 | 低 | 注销机制防止 |
+| 子进程残留 | 高 | join() 确保子进程退出 |
+| CUDA 资源泄漏 | 中 | ModelRunner.exit() 清理 |
+
+---
+
+## Implementation Notes
+
+### atexit.unregister 兼容性
+- Python 3.7+ 支持
+- 需要传入同一个函数对象
+- 使用 `self._atexit_handler` 而非 `self.exit` 以便正确注销
+
+### 端口检测方法
+```python
+def _check_port_available(port: int, host: str = "localhost") -> bool:
+    """使用 socket connect_ex 检测端口是否被占用."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1)
+            result = s.connect_ex((host, port))
+            return result != 0  # 0 = connected = port in use
+    except Exception:
+        return True  # 假设可用
+```
+
+**注意**: 这种检测存在 TOCTOU (Time-of-check to time-of-use) 竞争条件，但对于我们的用例足够了。

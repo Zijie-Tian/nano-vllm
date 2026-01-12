@@ -22,19 +22,9 @@ while [ -n "$(nvidia-smi --query-compute-apps=pid --format=csv,noheader)" ]; do
 done
 ```
 
-### Other Scripts (tests, examples) - Port Conflict Check Only
+### Other Scripts (tests, examples) - No Special Requirements
 
-For non-benchmark scripts, exclusive GPU access is NOT required. However, check for **distributed port conflicts** before running:
-
-```bash
-# Check if port 2333 (nanovllm default) is in use
-if lsof -i :2333 >/dev/null 2>&1; then
-  echo "Port 2333 in use, waiting 10s..."
-  sleep 10
-fi
-```
-
-**Note**: nanovllm uses port 2333 for `torch.distributed`. See [`docs/torch_distributed_port_issue.md`](docs/torch_distributed_port_issue.md) for known issues with creating multiple LLM instances in the same process.
+For non-benchmark scripts, exclusive GPU access is NOT required. Multiple nanovllm processes can run simultaneously on different GPUs - each process automatically selects a unique port for `torch.distributed` communication.
 
 ## Multi-Instance Development with PYTHONPATH
 
@@ -68,7 +58,6 @@ PYTHONPATH=/home/zijie/Code/nano-vllm:$PYTHONPATH python tests/test_needle.py
 | [`docs/layerwise_offload_memory_analysis.md`](docs/layerwise_offload_memory_analysis.md) | Memory allocation analysis with theoretical formulas and empirical validation (< 5% error) |
 | [`docs/debugging_guide.md`](docs/debugging_guide.md) | PyTorch hooks for debugging, tensor comparison, memory profiling |
 | [`docs/gpu_only_performance_issue.md`](docs/gpu_only_performance_issue.md) | GPU-only mode slower than offload due to PagedAttention scatter overhead, optimization proposals |
-| [`docs/torch_distributed_port_issue.md`](docs/torch_distributed_port_issue.md) | **BUG**: Port conflict when creating multiple LLM instances, root cause and proposed solutions |
 | [`docs/offload_accuracy_issue.md`](docs/offload_accuracy_issue.md) | **BUG**: CPU offload mode 66% accuracy vs 100% non-offload on RULER NIAH benchmark |
 
 ## Configuration
