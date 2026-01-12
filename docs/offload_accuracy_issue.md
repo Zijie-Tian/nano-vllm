@@ -2,14 +2,15 @@
 
 ## Problem Summary
 
-CPU offload mode produces significantly lower accuracy than non-offload mode on the RULER NIAH benchmark.
+**UPDATE (2026-01-12)**: Single request inference works correctly! The issue is with batch/sequential request handling.
 
-| Mode | Accuracy | Pass/Total |
-|------|----------|------------|
-| **Non-Offload (GPU only)** | **100%** | 100/100 |
-| **CPU Offload** | **66%** | 66/100 |
+| Mode | Testing Method | Accuracy |
+|------|----------------|----------|
+| **CPU Offload** | **Independent** (1 request per process) | **100%** ✓ |
+| **CPU Offload** | Batch (multiple requests per process) | 66% ✗ |
+| **Non-Offload** | Batch | 100% ✓ |
 
-This 34% accuracy drop indicates a bug in the offload implementation that affects inference correctness.
+**Conclusion**: The offload implementation is correct for single requests. The bug is in state cleanup between sequential requests within the same process.
 
 ## Test Environment
 
@@ -223,17 +224,83 @@ CUDA_VISIBLE_DEVICES=0 PYTHONPATH=.:$PYTHONPATH python tests/test_ruler_niah.py 
 
 ## Test Results Log
 
-**Date**: 2025-01-12
+### 2026-01-12 (Updated - Independent Testing)
+
+**Key Finding**: When each sample is tested independently (separate Python process per sample), CPU offload achieves **100% accuracy**.
+
+| Test | Mode | Testing Method | Samples | Passed | Accuracy |
+|------|------|----------------|---------|--------|----------|
+| RULER NIAH 32K | CPU Offload | **Independent** (separate process) | 100 | 100 | **100%** |
+| RULER NIAH 32K | CPU Offload | Batch (single process) | 100 | 66 | 66% |
+| RULER NIAH 32K | Non-Offload | Batch (single process) | 100 | 100 | 100% |
+
+**Test Configuration (Independent Mode)**:
+- GPUs: 4x RTX 3090 (parallel testing)
+- Each sample: Fresh Python process with new LLM instance
+- Port: Each GPU uses unique port (2333+gpu_id)
+- Duration: 17.9 minutes for 100 samples
+- Throughput: 5.58 samples/min
+
+### 2025-01-12 (Original - Batch Testing)
 
 | Test | Mode | Samples | Passed | Accuracy |
 |------|------|---------|--------|----------|
 | RULER NIAH 32K | Non-Offload | 100 | 100 | 100% |
 | RULER NIAH 32K | CPU Offload | 100 | 66 | 66% |
 
+## Root Cause Analysis Update
+
+### Confirmed: Single Request Inference is Correct
+
+The 100% accuracy in independent testing mode confirms that:
+1. **Single request inference works correctly** - The offload engine, ring buffer, and chunked prefill are functioning properly for individual requests
+2. **The bug is in batch/sequential request handling** - State accumulation or incomplete cleanup between requests causes failures
+
+### Suspected Issue: State Accumulation Between Requests
+
+When multiple requests are processed in the same Python process:
+- The first request succeeds (e.g., Sample 0: PASS)
+- Subsequent requests may fail due to:
+  - Residual state in ring buffer
+  - Incomplete KV cache cleanup
+  - Position tracking errors across requests
+  - CPU block allocation fragmentation
+
+### Evidence
+
+From batch mode testing (5 samples):
+| Sample | Expected | Output | Status |
+|--------|----------|--------|--------|
+| 0 | 8930103 | `: 8930103.` | PASS (first request) |
+| 1 | 4194548 | `: 419 multiplication of 4548.` | **FAIL** (second request) |
+| 2 | 8231838 | `:ное 8231838.` | PASS |
+| 3 | 8835373 | `: 8835373.` | PASS |
+| 4 | 7754864 | `aster 7754864.` | PASS |
+
+The corrupted output in Sample 1 suggests interference from Sample 0's state.
+
+## Workaround
+
+Use independent testing mode (separate process per request) for production evaluation:
+
+```bash
+# Using test_ruler_niah.sh for parallel independent testing
+./tests/test_ruler_niah.sh --gpus "0,1,2,3" --total 100
+
+# Or manually run each sample in a separate process
+for i in $(seq 0 99); do
+    CUDA_VISIBLE_DEVICES=0 python tests/test_ruler_niah.py \
+        --enable-offload --sample-indices $i --quiet
+done
+```
+
 ## Next Steps
 
-1. [ ] Identify pattern in failing samples (position of needle? specific numbers?)
-2. [ ] Add detailed logging to offload engine
-3. [ ] Compare logits between offload and non-offload modes
-4. [ ] Bisect the code to find the exact bug location
-5. [ ] Write unit test that isolates the bug
+1. [x] ~~Identify pattern in failing samples~~ → Pattern: First sample usually passes, failures occur in subsequent samples
+2. [ ] **Investigate state cleanup between requests in offload mode**
+   - Check `OffloadEngine` reset/cleanup logic
+   - Check ring buffer state between requests
+   - Check CPU block manager cleanup
+3. [ ] Add `reset()` method to `OffloadEngine` for explicit state cleanup
+4. [ ] Compare state between first and second request in batch mode
+5. [ ] Write unit test that reproduces the batch mode failure
