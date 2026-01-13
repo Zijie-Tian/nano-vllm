@@ -1,0 +1,155 @@
+# ===========================================
+# COMPASS Project .gitignore
+# ===========================================
+
+# -------------------------------------------
+# Benchmark results and outputs
+# -------------------------------------------
+**/benchmark_root/
+**/results/
+**/*.jsonl
+!**/data/**/*.jsonl
+
+# -------------------------------------------
+# Python
+# -------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+.eggs/
+*.manifest
+*.spec
+.Python
+develop-eggs/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# -------------------------------------------
+# Virtual environments
+# -------------------------------------------
+venv/
+ENV/
+env/
+.venv/
+.conda/
+
+# -------------------------------------------
+# IDE and editors
+# -------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+
+# -------------------------------------------
+# Jupyter
+# -------------------------------------------
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# -------------------------------------------
+# Logs and temp files
+# -------------------------------------------
+*.log
+logs/
+*.tmp
+*.temp
+*.bak
+
+# -------------------------------------------
+# OS files
+# -------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# -------------------------------------------
+# Compiled extensions and objects
+# -------------------------------------------
+*.o
+*.a
+*.dylib
+*.dll
+*.exe
+
+# -------------------------------------------
+# Model weights and data (too large for git)
+# -------------------------------------------
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.tflite
+models/
+checkpoints/
+
+# -------------------------------------------
+# Claude Code local settings
+# -------------------------------------------
+.mcp.json
+.claude/settings.local.json
+
+# -------------------------------------------
+# Claude Flow state (all locations)
+# -------------------------------------------
+**/.claude-flow/agents/
+**/.claude-flow/hive-mind/
+**/.claude-flow/memory/
+**/.claude-flow/metrics/
+**/.claude-flow/logs/
+**/.claude-flow/sessions/
+**/.claude-flow/workflows/
+**/.claude-flow/daemon.log
+**/.claude-flow/daemon.pid
+**/.claude-flow/daemon-state.json
+
+# -------------------------------------------
+# 3rdparty compiled outputs
+# -------------------------------------------
+3rdparty/flash-attention/*.so
+3rdparty/flash-attention/build/
+3rdparty/flashinfer/*.so
+3rdparty/flashinfer/build/
+
+# -------------------------------------------
+# Coverage and test artifacts
+# -------------------------------------------
+htmlcov/
+.coverage
+.coverage.*
+.pytest_cache/
+.tox/
+nosetests.xml
+coverage.xml
+*.cover
+
+# -------------------------------------------
+# Documentation build
+# -------------------------------------------
+docs/_build/
+site/
+
+# -------------------------------------------
+# Misc
+# -------------------------------------------
+*.manifest
+*.spec
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/

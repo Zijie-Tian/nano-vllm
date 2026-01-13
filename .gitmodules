@@ -1,0 +1,7 @@
+[submodule "3rdparty/flashinfer"]
+	path = 3rdparty/flashinfer
+	url = git@github.com:Zijie-Tian/flashinfer.git
+	branch = tzj/minference
+[submodule "3rdparty/flash-attention"]
+	path = 3rdparty/flash-attention
+	url = git@github.com:Zijie-Tian/flash-attention.git
