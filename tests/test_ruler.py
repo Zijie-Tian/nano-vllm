@@ -38,11 +38,11 @@ from nanovllm import LLM, SamplingParams
 # Constants
 # ============================================================
 
-DEFAULT_DATA_DIR = Path(__file__).parent / "data/ruler_32k"
+DEFAULT_DATA_DIR = Path(__file__).parent / "data/ruler_64k"
 DEFAULT_MODEL = os.path.expanduser("~/models/Llama-3.1-8B-Instruct")
 # Note: max_model_len must be > max_input_len to leave room for output tokens
-# 32k benchmark has inputs up to 32760 tokens, so we need 32768 + 128 = 32896
-DEFAULT_MAX_MODEL_LEN = 32896
+# 64k benchmark has inputs up to 65536 tokens, so we need 65536 + 128 = 65664
+DEFAULT_MAX_MODEL_LEN = 65664
 DEFAULT_MAX_NEW_TOKENS = 128  # Larger for multi-value tasks
 
 # Task categories for evaluation
@@ -222,6 +222,7 @@ def run_ruler_benchmark(
     enable_cpu_offload: bool = False,
     num_gpu_blocks: int = 4,
     block_size: int = 1024,
+    num_kv_buffers: int = 4,
     gpu_utilization: float = 0.9,
     enforce_eager: bool = True,
     verbose: bool = True,
@@ -270,6 +271,7 @@ def run_ruler_benchmark(
     }
     if enable_cpu_offload:
         llm_kwargs["num_gpu_blocks"] = num_gpu_blocks
+        llm_kwargs["num_kv_buffers"] = num_kv_buffers
 
     llm = LLM(model_path, **llm_kwargs)
 
@@ -356,6 +358,8 @@ if __name__ == "__main__":
                         help="Number of GPU blocks for CPU offload (default: 4)")
     parser.add_argument("--block-size", type=int, default=1024,
                         help="KV cache block size (default: 1024)")
+    parser.add_argument("--num-kv-buffers", type=int, default=4,
+                        help="Number of KV buffers for ring buffer (default: 4)")
     parser.add_argument("--gpu-utilization", type=float, default=0.9,
                         help="GPU memory utilization (default: 0.9)")
     parser.add_argument("--use-cuda-graph", action="store_true",
@@ -379,6 +383,7 @@ if __name__ == "__main__":
         enable_cpu_offload=args.enable_offload,
         num_gpu_blocks=args.num_gpu_blocks,
         block_size=args.block_size,
+        num_kv_buffers=args.num_kv_buffers,
         gpu_utilization=args.gpu_utilization,
         enforce_eager=not args.use_cuda_graph,
         verbose=not args.quiet,

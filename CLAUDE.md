@@ -59,6 +59,7 @@ PYTHONPATH=/home/zijie/Code/nano-vllm:$PYTHONPATH python tests/test_needle.py
 | [`docs/debugging_guide.md`](docs/debugging_guide.md) | PyTorch hooks for debugging, tensor comparison, memory profiling |
 | [`docs/gpu_only_performance_issue.md`](docs/gpu_only_performance_issue.md) | GPU-only mode slower than offload due to PagedAttention scatter overhead, optimization proposals |
 | [`docs/offload_accuracy_issue.md`](docs/offload_accuracy_issue.md) | **BUG**: CPU offload mode 66% accuracy vs 100% non-offload on RULER NIAH benchmark |
+| [`docs/64k_memory_analysis.md`](docs/64k_memory_analysis.md) | 64k inference memory analysis: GPU-only vs offload, OOM root cause (fragmentation), RTX 3090 limitations |
 
 ## Configuration
 
@@ -69,7 +70,7 @@ PYTHONPATH=/home/zijie/Code/nano-vllm:$PYTHONPATH python tests/test_needle.py
 | `gpu_memory_utilization` | 0.9 | GPU memory fraction |
 | `enable_cpu_offload` | False | Enable for long context |
 | `num_gpu_blocks` | 2 | GPU blocks for offload mode |
-| `num_kv_buffers` | 4 | Ring buffer size for decode pipeline |
+| `num_kv_buffers` | 4 | Ring buffer size (1-4), lower = less memory but slower decode |
 | `enforce_eager` | False | Set True to disable CUDA graphs |
 
 ## Benchmarking
@@ -85,6 +86,7 @@ PYTHONPATH=/home/zijie/Code/nano-vllm:$PYTHONPATH python tests/test_needle.py
 - Qwen3-0.6B/4B: 40960 tokens
 - Qwen2.5-7B-Instruct-1M: 1048576 tokens
 - Llama-3.1-8B-Instruct: 131072 tokens
+- **64k on RTX 3090/4090 (24GB)**: Requires CPU offload + optimizations, see [`docs/64k_memory_analysis.md`](docs/64k_memory_analysis.md)
 
 **Performance (Qwen3-4B, CPU Offload)**:
 - Prefill: ~5700-8000 tok/s (varies by context length)
