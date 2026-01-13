@@ -1,4 +1,59 @@
-# Claude Code Configuration - Claude Flow V3
+# Claude Code Configuration - COMPASS Project
+
+## 📚 Documentation References (Lazy Loading)
+
+> **为减少 runtime token 消耗，详细文档按需加载。需要时读取对应文档。**
+
+| 文档 | 路径 | 用途 | 何时读取 |
+|------|------|------|----------|
+| 环境配置指南 | `docs/ENVIRONMENT_SETUP.md` | 完整环境配置步骤、依赖版本、常见问题 | 配置新环境时 |
+| Claude 配置任务 | `docs/CLAUDE_SETUP_TASK.md` | Claude 专用的详细配置步骤 (7步) | 在新主机配置环境时 |
+| 依赖列表 | `requirements.txt` | Python 依赖及版本 | pip install 时 |
+| **文档规则** | `.claude/rules/documentation-lazy-loading.md` | 文档写作的 lazy loading 规范 | 创建新文档时 |
+
+### 使用示例
+```bash
+# 在新主机配置环境时，读取 Claude 配置任务文档
+Read("docs/CLAUDE_SETUP_TASK.md")
+
+# 按文档中的 7 个步骤依次执行配置
+```
+
+---
+
+## 🎯 Project-Specific: COMPASS RULER Benchmark
+
+### 运行 RULER 测试
+```bash
+conda activate ruler
+export PYTHONPATH=/path/to/COMPASS:$PYTHONPATH
+export MODEL_DIR=/path/to/models
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+cd eval/RULER/scripts
+bash run.sh llama3.1-8b-chat synthetic --metric full
+```
+
+### 可用 Metric
+| Metric | 描述 |
+|--------|------|
+| `full` | 完整 attention (基准) |
+| `xattn` | X-attention |
+| `avgpool` | 平均池化稀疏 |
+| `minfer` | Minference |
+| `compass` | COMPASS 方法 |
+
+### 指定任务
+```bash
+# 单任务
+bash run.sh llama3.1-8b-chat synthetic --metric full --task niah_single_1
+
+# 多任务
+bash run.sh llama3.1-8b-chat synthetic --metric full --task niah_single_1,vt,qa_1
+```
+
+---
+
+# Claude Flow V3 Configuration
 
 ## 🚨 AUTOMATIC SWARM ORCHESTRATION
 

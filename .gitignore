@@ -11,6 +11,15 @@
 !**/data/**/*.jsonl
 
 # -------------------------------------------
+# Downloaded datasets (use setup.sh to download)
+# -------------------------------------------
+eval/RULER/scripts/data/synthetic/json/PaulGrahamEssays.json
+eval/RULER/scripts/data/synthetic/json/hotpotqa.json
+eval/RULER/scripts/data/synthetic/json/squad.json
+eval/RULER/scripts/data/synthetic/json/essay_html/
+eval/RULER/scripts/data/synthetic/json/essay_repo/
+
+# -------------------------------------------
 # Python
 # -------------------------------------------
 __pycache__/
