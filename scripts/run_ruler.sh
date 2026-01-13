@@ -21,8 +21,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "${SCRIPT_DIR}")"
 MODEL_DIR="${MODEL_DIR:-/home/zijie/models}"
 
-# Set PYTHONPATH
-export PYTHONPATH="${PROJECT_DIR}:${PYTHONPATH}"
+# Set PYTHONPATH (nanovllm from 3rdparty takes priority over system version)
+export PYTHONPATH="${PROJECT_DIR}/3rdparty/nanovllm:${PROJECT_DIR}:${PYTHONPATH}"
 
 #############################################
 # Activate conda and run
