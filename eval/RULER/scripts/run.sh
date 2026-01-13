@@ -23,6 +23,10 @@ MODEL_DIR="${MODEL_DIR:-/home/zijie/models}" # the path that contains individual
 ENGINE_DIR="." # the path that contains individual engine folders from TensorRT-LLM.
 BATCH_SIZE=1  # increase to improve GPU utilization
 
+# Set PYTHONPATH for COMPASS and 3rdparty modules
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/3rdparty/nanovllm:${PYTHONPATH}"
 
 # Model and Tokenizer
 source config_models.sh
@@ -131,7 +135,10 @@ fi
 
 
 # NanoVLLM parallel execution settings
-NUM_GPUS=${NUM_GPUS:-4}  # Number of GPUs for parallel execution
+# GPU configuration for parallel execution
+GPU_LIST=${GPU_LIST:-"0,1,2,3"}  # Comma-separated GPU IDs to use
+IFS=',' read -ra GPU_ARRAY <<< "$GPU_LIST"
+NUM_GPUS=${#GPU_ARRAY[@]}
 
 # Start client (prepare data / call model API / obtain final metrics)
 total_time=0
@@ -175,14 +182,15 @@ for MAX_SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
 
     # NanoVLLM: parallel execution (1 task per GPU, round-robin)
     if [ "$MODEL_FRAMEWORK" == "nanovllm" ]; then
-        echo "NanoVLLM detected: using parallel execution with ${NUM_GPUS} GPUs"
+        echo "NanoVLLM detected: using parallel execution with ${NUM_GPUS} GPUs (${GPU_LIST})"
         start_time=$(date +%s)
 
         TASK_INDEX=0
         PIDS=()
 
         for TASK in "${TASKS[@]}"; do
-            GPU_ID=$((TASK_INDEX % NUM_GPUS))
+            GPU_IDX=$((TASK_INDEX % NUM_GPUS))
+            GPU_ID=${GPU_ARRAY[$GPU_IDX]}
             echo "  Task ${TASK} -> GPU ${GPU_ID}"
 
             CUDA_VISIBLE_DEVICES=${GPU_ID} python pred/call_api.py \
