@@ -1,6 +1,11 @@
 #!/bin/bash
-# RULER Benchmark Runner (Conda Mode)
-# Usage: ./scripts/run_ruler.sh [MODEL_NAME] [BENCHMARK] [METRIC]
+# RULER Benchmark Runner
+# Usage: ./scripts/run_ruler.sh [MODEL_NAME] [BENCHMARK] [METRIC] [--task TASK]
+#
+# Examples:
+#   ./scripts/run_ruler.sh llama3.1-8b-chat synthetic full
+#   ./scripts/run_ruler.sh llama3.1-8b-chat synthetic full --task niah_single_1
+#   CUDA_VISIBLE_DEVICES=0 ./scripts/run_ruler.sh llama3.1-8b-chat synthetic xattn
 
 set -e
 
@@ -8,13 +13,14 @@ set -e
 # Configuration
 #############################################
 
-# Conda environment
-CONDA_ENV="${CONDA_ENV:-ruler}"
-
 # Model settings
 MODEL_NAME="${1:-llama3.1-8b-chat}"
 BENCHMARK="${2:-synthetic}"
 METRIC="${3:-full}"  # Options: full, xattn, avgpool, compass, minfer, flex
+
+# Parse additional arguments (--task)
+shift 3 2>/dev/null || true
+EXTRA_ARGS="$@"
 
 # Paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,32 +31,24 @@ MODEL_DIR="${MODEL_DIR:-/home/zijie/models}"
 export PYTHONPATH="${PROJECT_DIR}/3rdparty/nanovllm:${PROJECT_DIR}:${PYTHONPATH}"
 
 #############################################
-# Activate conda and run
+# Run benchmark (use current environment)
 #############################################
 
 echo "========================================"
-echo "RULER Benchmark (Conda Mode)"
+echo "RULER Benchmark"
 echo "========================================"
-echo "Conda Env:    $CONDA_ENV"
 echo "Project:      $PROJECT_DIR"
 echo "Model Dir:    $MODEL_DIR"
 echo "Model:        $MODEL_NAME"
 echo "Benchmark:    $BENCHMARK"
 echo "Metric:       $METRIC"
+if [ -n "$EXTRA_ARGS" ]; then
+    echo "Extra Args:   $EXTRA_ARGS"
+fi
 echo "========================================"
 
-# Source conda
-if [ -f ~/anaconda3/etc/profile.d/conda.sh ]; then
-    source ~/anaconda3/etc/profile.d/conda.sh
-elif [ -f ~/miniconda3/etc/profile.d/conda.sh ]; then
-    source ~/miniconda3/etc/profile.d/conda.sh
-fi
-
-# Activate conda environment
-conda activate "$CONDA_ENV"
-
 # Download NLTK data if needed
-python -c "import nltk; nltk.download('punkt_tab', quiet=True)"
+python -c "import nltk; nltk.download('punkt_tab', quiet=True)" 2>/dev/null || true
 
 # Download datasets if needed (auto-skip if exist)
 cd "${PROJECT_DIR}/eval/RULER"
@@ -58,4 +56,4 @@ bash setup.sh
 
 # Run RULER benchmark
 cd "${PROJECT_DIR}/eval/RULER/scripts"
-./run.sh "$MODEL_NAME" "$BENCHMARK" --metric "$METRIC"
+./run.sh "$MODEL_NAME" "$BENCHMARK" --metric "$METRIC" $EXTRA_ARGS
