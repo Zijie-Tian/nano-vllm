@@ -130,6 +130,9 @@ elif [ "$MODEL_FRAMEWORK" == "sglang" ]; then
 fi
 
 
+# NanoVLLM parallel execution settings
+NUM_GPUS=${NUM_GPUS:-4}  # Number of GPUs for parallel execution
+
 # Start client (prepare data / call model API / obtain final metrics)
 total_time=0
 for MAX_SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
@@ -155,7 +158,8 @@ for MAX_SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
     PRED_DIR="${RESULTS_DIR}/pred"
     mkdir -p ${DATA_DIR}
     mkdir -p ${PRED_DIR}
-    
+
+    # Prepare data for all tasks first
     for TASK in "${TASKS[@]}"; do
         python data/prepare.py \
             --save_dir ${DATA_DIR} \
@@ -167,31 +171,92 @@ for MAX_SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
             --model_template_type ${MODEL_TEMPLATE_TYPE} \
             --num_samples ${NUM_SAMPLES} \
             ${REMOVE_NEWLINE_TAB}
-        
+    done
+
+    # NanoVLLM: parallel execution (1 task per GPU, round-robin)
+    if [ "$MODEL_FRAMEWORK" == "nanovllm" ]; then
+        echo "NanoVLLM detected: using parallel execution with ${NUM_GPUS} GPUs"
         start_time=$(date +%s)
-        python pred/call_api.py \
-            --data_dir ${DATA_DIR} \
-            --save_dir ${PRED_DIR} \
-            --benchmark ${BENCHMARK} \
-            --task ${TASK} \
-            --server_type ${MODEL_FRAMEWORK} \
-            --model_name_or_path ${MODEL_PATH} \
-            --temperature ${TEMPERATURE} \
-            --top_k ${TOP_K} \
-            --top_p ${TOP_P} \
-            --batch_size ${BATCH_SIZE} \
-            ${STOP_WORDS} \
-            ${METRIC} \
-            ${THRESHOLD} \
-            ${STRIDE} \
-            ${AVGPOOL_TOPK} \
-            ${AVGPOOL_TOPP} \
-            ${PRINT_DETAIL}
+
+        TASK_INDEX=0
+        PIDS=()
+
+        for TASK in "${TASKS[@]}"; do
+            GPU_ID=$((TASK_INDEX % NUM_GPUS))
+            echo "  Task ${TASK} -> GPU ${GPU_ID}"
+
+            CUDA_VISIBLE_DEVICES=${GPU_ID} python pred/call_api.py \
+                --data_dir ${DATA_DIR} \
+                --save_dir ${PRED_DIR} \
+                --benchmark ${BENCHMARK} \
+                --task ${TASK} \
+                --server_type ${MODEL_FRAMEWORK} \
+                --model_name_or_path ${MODEL_PATH} \
+                --temperature ${TEMPERATURE} \
+                --top_k ${TOP_K} \
+                --top_p ${TOP_P} \
+                --batch_size ${BATCH_SIZE} \
+                ${STOP_WORDS} \
+                ${METRIC} \
+                ${THRESHOLD} \
+                ${STRIDE} \
+                ${AVGPOOL_TOPK} \
+                ${AVGPOOL_TOPP} \
+                ${PRINT_DETAIL} &
+
+            PIDS+=($!)
+            TASK_INDEX=$((TASK_INDEX + 1))
+
+            # Wait when all GPUs are occupied
+            if [ $((TASK_INDEX % NUM_GPUS)) -eq 0 ]; then
+                echo "  Waiting for batch of ${NUM_GPUS} tasks to complete..."
+                for PID in "${PIDS[@]}"; do
+                    wait $PID
+                done
+                PIDS=()
+            fi
+        done
+
+        # Wait for remaining tasks
+        if [ ${#PIDS[@]} -gt 0 ]; then
+            echo "  Waiting for remaining ${#PIDS[@]} tasks to complete..."
+            for PID in "${PIDS[@]}"; do
+                wait $PID
+            done
+        fi
+
         end_time=$(date +%s)
         time_diff=$((end_time - start_time))
         total_time=$((total_time + time_diff))
-    done
-    
+
+    # Other backends: sequential execution
+    else
+        for TASK in "${TASKS[@]}"; do
+            start_time=$(date +%s)
+            python pred/call_api.py \
+                --data_dir ${DATA_DIR} \
+                --save_dir ${PRED_DIR} \
+                --benchmark ${BENCHMARK} \
+                --task ${TASK} \
+                --server_type ${MODEL_FRAMEWORK} \
+                --model_name_or_path ${MODEL_PATH} \
+                --temperature ${TEMPERATURE} \
+                --top_k ${TOP_K} \
+                --top_p ${TOP_P} \
+                --batch_size ${BATCH_SIZE} \
+                ${STOP_WORDS} \
+                ${METRIC} \
+                ${THRESHOLD} \
+                ${STRIDE} \
+                ${AVGPOOL_TOPK} \
+                ${AVGPOOL_TOPP} \
+                ${PRINT_DETAIL}
+            end_time=$(date +%s)
+            time_diff=$((end_time - start_time))
+            total_time=$((total_time + time_diff))
+        done
+    fi
+
     python eval/evaluate.py \
         --data_dir ${PRED_DIR} \
         --benchmark ${BENCHMARK}
