@@ -19,8 +19,11 @@ BENCHMARK="${2:-synthetic}"
 METRIC="${3:-full}"  # Options: full, xattn, avgpool, compass, minfer, flex
 
 # Parse additional arguments (--task)
-shift 3 2>/dev/null || true
-EXTRA_ARGS="$@"
+EXTRA_ARGS=""
+if [ $# -gt 3 ]; then
+    shift 3
+    EXTRA_ARGS="$@"
+fi
 
 # Paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
