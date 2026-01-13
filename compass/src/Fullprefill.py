@@ -1,5 +1,5 @@
 import torch
-import flashinfer
+from flash_attn import flash_attn_func
 
 def Full_prefill(
     query_states: torch.Tensor,
@@ -8,14 +8,14 @@ def Full_prefill(
     causal: bool = True,
     attention_mask = None,
 ):
-    if attention_mask is not None and attention_mask.dtype != bool:
-        attention_mask = torch.where(attention_mask == 0,True,False)
-    attn_output = flashinfer.single_prefill_with_kv_cache(
-        query_states.transpose(1, 2).squeeze(0),
-        key_states.transpose(1, 2).squeeze(0),
-        value_states.transpose(1, 2).squeeze(0),
-        custom_mask = attention_mask,
-        causal=causal
-    ).unsqueeze(0).transpose(1, 2)
+    # flash_attn_func expects shape: (batch, seqlen, nheads, headdim)
+    # Input shape: (batch, nheads, seqlen, headdim)
+    q = query_states.transpose(1, 2)  # (batch, seqlen, nheads, headdim)
+    k = key_states.transpose(1, 2)
+    v = value_states.transpose(1, 2)
 
-    return attn_output
+    # flash_attn_func returns (batch, seqlen, nheads, headdim)
+    attn_output = flash_attn_func(q, k, v, causal=causal)
+
+    # Convert back to (batch, nheads, seqlen, headdim)
+    return attn_output.transpose(1, 2)

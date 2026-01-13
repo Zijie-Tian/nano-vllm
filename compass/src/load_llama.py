@@ -7,7 +7,7 @@ from transformers.models.llama.modeling_llama import (
 )
 
 from compass.threshold.llama_threshold import llama_fuse_16,llama_fuse_8,llama_fuse_4
-import flashinfer
+from flash_attn import flash_attn_func
 import time
 try:
     from compass.src.Xattention import Xattention_prefill
@@ -201,21 +201,23 @@ def forward_eval(
                 top_p = self.fastprefillconfig.top_p
                 attn_output = AvgPool_prefill(query_states, key_states, value_states, top_k=top_k, top_p=top_p)
         else:
+            # Decode: q_len=1, k_len > 1
             if key_states.device != query_states.device:
                 key_states = key_states.to(query_states.device)
             if value_states.device != query_states.device:
                 value_states = value_states.to(query_states.device)
 
-            value_states = value_states.squeeze(0).contiguous()
-            query_states = query_states.squeeze(0).squeeze(1)
-            key_states = key_states.squeeze(0).contiguous()
-            attn_output = flashinfer.single_decode_with_kv_cache(
-                query_states, 
-                key_states, 
-                value_states,
-                kv_layout="HND"
-            )
-            attn_output = attn_output.unsqueeze(0).unsqueeze(2)
+            # Repeat KV for GQA
+            key_states = repeat_kv(key_states, self.num_key_value_groups)
+            value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+            # flash_attn expects (batch, seqlen, nheads, headdim)
+            q = query_states.transpose(1, 2)  # (batch, 1, nheads, headdim)
+            k = key_states.transpose(1, 2)    # (batch, k_len, nheads, headdim)
+            v = value_states.transpose(1, 2)  # (batch, k_len, nheads, headdim)
+
+            attn_output = flash_attn_func(q, k, v, causal=False)  # No causal mask for decode
+            attn_output = attn_output.transpose(1, 2)  # (batch, nheads, 1, headdim)
         
         if self.fastprefillconfig.print_detail:
             torch.cuda.synchronize()
@@ -439,21 +441,23 @@ def forward_to_save(
                 top_p = self.fastprefillconfig.top_p
                 attn_output = AvgPool_prefill(query_states, key_states, value_states, top_k=top_k, top_p=top_p)
         else:
+            # Decode: q_len=1, k_len > 1
             if key_states.device != query_states.device:
                 key_states = key_states.to(query_states.device)
             if value_states.device != query_states.device:
                 value_states = value_states.to(query_states.device)
 
-            value_states = value_states.squeeze(0).contiguous()
-            query_states = query_states.squeeze(0).squeeze(1)
-            key_states = key_states.squeeze(0).contiguous()
-            attn_output = flashinfer.single_decode_with_kv_cache(
-                query_states,
-                key_states,
-                value_states,
-                kv_layout="HND"
-            )
-            attn_output = attn_output.unsqueeze(0).unsqueeze(2)
+            # Repeat KV for GQA
+            key_states = repeat_kv(key_states, self.num_key_value_groups)
+            value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+            # flash_attn expects (batch, seqlen, nheads, headdim)
+            q = query_states.transpose(1, 2)  # (batch, 1, nheads, headdim)
+            k = key_states.transpose(1, 2)    # (batch, k_len, nheads, headdim)
+            v = value_states.transpose(1, 2)  # (batch, k_len, nheads, headdim)
+
+            attn_output = flash_attn_func(q, k, v, causal=False)  # No causal mask for decode
+            attn_output = attn_output.transpose(1, 2)  # (batch, nheads, 1, headdim)
         if self.layer_idx == self.layer_to_save:
             import pickle
             import os
