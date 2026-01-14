@@ -10,6 +10,7 @@ class SparsePolicyType(Enum):
     FULL = auto()   # No sparse attention (load all blocks)
     QUEST = auto()  # Query-aware Top-K block selection (decode only)
     MINFERENCE = auto()  # MInference vertical + slash sparse prefill (GPU-only)
+    XATTN = auto()  # XAttention chunked estimation + block-sparse attention
 
 
 @dataclass
@@ -52,6 +53,15 @@ class Config:
     minference_slash_size: int = 6096  # Fixed slash size (if adaptive_budget is None)
     minference_num_sink_tokens: int = 30  # Sink tokens to always keep
     minference_num_recent_diags: int = 100  # Recent diagonals to always keep
+
+    # XAttention configuration (used when sparse_policy == XATTN)
+    xattn_stride: int = 8  # Stride for reorganizing Q/K
+    xattn_threshold: float = 0.9  # Block selection threshold (0-1)
+    xattn_chunk_size: int = 16384  # Chunk size for estimation (auto if None)
+    xattn_use_triton: bool = True  # Use Triton kernels (requires SM 80+)
+    xattn_keep_sink: bool = False  # Always keep first block (sink tokens)
+    xattn_keep_recent: bool = False  # Always keep recent diagonal blocks
+    xattn_norm: float = 1.0  # Normalization factor for attention scores
 
     def __post_init__(self):
         assert os.path.isdir(self.model)
