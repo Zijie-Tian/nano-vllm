@@ -17,11 +17,12 @@ import logging
 import requests
 import torch
 from typing import Dict, List, Optional
-from compass.src.load_llama import load_model, FastPrefillConfig
 
 class HuggingFaceModel:
-    def __init__(self, name_or_path: str,fastprefillconfig:FastPrefillConfig, **generation_kwargs) -> None:
+    def __init__(self, name_or_path: str, fastprefillconfig: 'FastPrefillConfig', **generation_kwargs) -> None:
         from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+        # Import load_model only when actually used (for HuggingFace backend)
+        from compass.src.load_llama import load_model
         self.tokenizer = AutoTokenizer.from_pretrained(name_or_path, trust_remote_code=True)
 
         if 'Yarn-Llama' in name_or_path:
@@ -141,6 +142,19 @@ class NanoVLLMModel:
         from nanovllm import LLM, SamplingParams
         from nanovllm.config import SparsePolicyType
 
+        # ========== XAttention Integration: sparse_policy parameter support ==========
+        sparse_policy_name = generation_kwargs.pop('sparse_policy', 'FULL')
+        sparse_policy = getattr(SparsePolicyType, sparse_policy_name, SparsePolicyType.FULL)
+
+        # Extract XAttention-specific parameters
+        xattn_stride = generation_kwargs.pop('xattn_stride', 8)
+        xattn_threshold = generation_kwargs.pop('xattn_threshold', 0.9)
+        xattn_chunk_size = generation_kwargs.pop('xattn_chunk_size', 16384)
+        xattn_use_triton = generation_kwargs.pop('xattn_use_triton', True)
+        xattn_keep_sink = generation_kwargs.pop('xattn_keep_sink', False)
+        xattn_keep_recent = generation_kwargs.pop('xattn_keep_recent', False)
+        xattn_norm = generation_kwargs.pop('xattn_norm', 1.0)
+
         # Extract nano-vllm specific configuration
         max_model_len = generation_kwargs.pop('max_model_len', 128 * 1024)
         enable_cpu_offload = generation_kwargs.pop('enable_cpu_offload', True)
@@ -149,14 +163,22 @@ class NanoVLLMModel:
         gpu_memory_utilization = generation_kwargs.pop('gpu_memory_utilization', 0.9)
         enforce_eager = generation_kwargs.pop('enforce_eager', True)
 
-        # Build LLM kwargs
+        # Build LLM kwargs with sparse_policy support
         llm_kwargs = {
             "max_model_len": max_model_len,
             "max_num_batched_tokens": max_model_len,
             "kvcache_block_size": kvcache_block_size,
             "gpu_memory_utilization": gpu_memory_utilization,
             "enforce_eager": enforce_eager,
-            "sparse_policy": SparsePolicyType.FULL,  # Always use full attention for RULER
+            "sparse_policy": sparse_policy,  # Use passed sparse_policy instead of hardcoded FULL
+            # XAttention parameters
+            "xattn_stride": xattn_stride,
+            "xattn_threshold": xattn_threshold,
+            "xattn_chunk_size": xattn_chunk_size,
+            "xattn_use_triton": xattn_use_triton,
+            "xattn_keep_sink": xattn_keep_sink,
+            "xattn_keep_recent": xattn_keep_recent,
+            "xattn_norm": xattn_norm,
         }
 
         if enable_cpu_offload:

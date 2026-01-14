@@ -44,7 +44,6 @@ from tqdm import tqdm
 from pathlib import Path
 import traceback
 from nemo.collections.asr.parts.utils.manifest_utils import read_manifest
-from compass.src.load_llama import FastPrefillConfig
 
 SERVER_TYPES = (
     'trtllm',
@@ -106,15 +105,6 @@ args = parser.parse_args()
 args.stop_words = list(filter(None, args.stop_words.split(',')))
 if args.server_type in ('hf', 'gemini', 'nanovllm'):
     args.threads = 1
-
-fastprefillconfig = FastPrefillConfig(
-    threshold=args.threshold,
-    print_detail=args.print_detail,
-    stride=args.stride,
-    metric=args.metric,
-    top_k=args.avgpool_topk,
-    top_p=args.avgpool_topp,
-)
 
 def get_llm(tokens_to_generate):
     if args.server_type == 'trtllm':
@@ -189,6 +179,15 @@ def get_llm(tokens_to_generate):
         
     elif args.server_type == 'hf':
         from model_wrappers import HuggingFaceModel
+        from compass.src.load_llama import FastPrefillConfig
+        fastprefillconfig = FastPrefillConfig(
+            threshold=args.threshold,
+            print_detail=args.print_detail,
+            stride=args.stride,
+            metric=args.metric,
+            top_k=args.avgpool_topk,
+            top_p=args.avgpool_topp,
+        )
         llm = HuggingFaceModel(
             name_or_path=args.model_name_or_path,
             fastprefillconfig=fastprefillconfig,
@@ -217,12 +216,32 @@ def get_llm(tokens_to_generate):
 
     elif args.server_type == 'nanovllm':
         from model_wrappers import NanoVLLMModel
+
+        # ========== XAttention Integration: Metric to Sparse Policy mapping ==========
+        metric_to_policy = {
+            'full': 'FULL',
+            'xattn': 'XATTN',
+            'compass': 'XATTN',  # COMPASS uses XAttention
+            'minfer': 'MINFERENCE',
+            'avgpool': 'FULL',  # No direct mapping, use FULL
+        }
+
+        sparse_policy = metric_to_policy.get(args.metric, 'FULL')
+
         # nano-vllm: lightweight inference with CPU offload support
         llm = NanoVLLMModel(
             name_or_path=args.model_name_or_path,
             temperature=args.temperature,
             stop=args.stop_words,
             max_new_tokens=tokens_to_generate,
+            # XAttention: sparse_policy parameter
+            sparse_policy=sparse_policy,
+            # XAttention: configuration parameters (can be overridden via env vars)
+            xattn_stride=int(os.environ.get('NANOVLLM_XATTN_STRIDE',
+                int(args.stride) if hasattr(args, 'stride') and args.stride else 8)),
+            xattn_threshold=float(os.environ.get('NANOVLLM_XATTN_THRESHOLD',
+                float(args.threshold) if hasattr(args, 'threshold') and args.threshold else 0.9)),
+            xattn_chunk_size=int(os.environ.get('NANOVLLM_XATTN_CHUNK_SIZE', 16384)),
             # NanoVLLM specific settings (can be overridden via env vars)
             max_model_len=int(os.environ.get('NANOVLLM_MAX_MODEL_LEN', 128 * 1024)),
             enable_cpu_offload=os.environ.get('NANOVLLM_CPU_OFFLOAD', 'true').lower() == 'true',

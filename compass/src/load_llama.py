@@ -7,7 +7,14 @@ from transformers.models.llama.modeling_llama import (
 )
 
 from compass.threshold.llama_threshold import llama_fuse_16,llama_fuse_8,llama_fuse_4
-from flash_attn import flash_attn_func
+try:
+    from flash_attn import flash_attn_func
+    HAS_FLASH_ATTN = True
+except ImportError:
+    print("Warning: flash_attn not available, decode path will use fallback")
+    HAS_FLASH_ATTN = False
+    def flash_attn_func(*args, **kwargs):
+        raise NotImplementedError("flash_attn is not available")
 import time
 try:
     from compass.src.Xattention import Xattention_prefill
@@ -211,13 +218,20 @@ def forward_eval(
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-            # flash_attn expects (batch, seqlen, nheads, headdim)
-            q = query_states.transpose(1, 2)  # (batch, 1, nheads, headdim)
-            k = key_states.transpose(1, 2)    # (batch, k_len, nheads, headdim)
-            v = value_states.transpose(1, 2)  # (batch, k_len, nheads, headdim)
+            if HAS_FLASH_ATTN:
+                # flash_attn expects (batch, seqlen, nheads, headdim)
+                q = query_states.transpose(1, 2)  # (batch, 1, nheads, headdim)
+                k = key_states.transpose(1, 2)    # (batch, k_len, nheads, headdim)
+                v = value_states.transpose(1, 2)  # (batch, k_len, nheads, headdim)
 
-            attn_output = flash_attn_func(q, k, v, causal=False)  # No causal mask for decode
-            attn_output = attn_output.transpose(1, 2)  # (batch, nheads, 1, headdim)
+                attn_output = flash_attn_func(q, k, v, causal=False)  # No causal mask for decode
+                attn_output = attn_output.transpose(1, 2)  # (batch, nheads, 1, headdim)
+            else:
+                # Fallback: use standard attention for decode
+                # (batch, nheads, 1, headdim) x (batch, nheads, headdim, k_len) -> (batch, nheads, 1, k_len)
+                attn_weights = torch.matmul(query_states, key_states.transpose(-2, -1)) / (self.head_dim ** 0.5)
+                attn_weights = torch.softmax(attn_weights, dim=-1)
+                attn_output = torch.matmul(attn_weights, value_states)  # (batch, nheads, 1, headdim)
         
         if self.fastprefillconfig.print_detail:
             torch.cuda.synchronize()
@@ -451,13 +465,20 @@ def forward_to_save(
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-            # flash_attn expects (batch, seqlen, nheads, headdim)
-            q = query_states.transpose(1, 2)  # (batch, 1, nheads, headdim)
-            k = key_states.transpose(1, 2)    # (batch, k_len, nheads, headdim)
-            v = value_states.transpose(1, 2)  # (batch, k_len, nheads, headdim)
+            if HAS_FLASH_ATTN:
+                # flash_attn expects (batch, seqlen, nheads, headdim)
+                q = query_states.transpose(1, 2)  # (batch, 1, nheads, headdim)
+                k = key_states.transpose(1, 2)    # (batch, k_len, nheads, headdim)
+                v = value_states.transpose(1, 2)  # (batch, k_len, nheads, headdim)
 
-            attn_output = flash_attn_func(q, k, v, causal=False)  # No causal mask for decode
-            attn_output = attn_output.transpose(1, 2)  # (batch, nheads, 1, headdim)
+                attn_output = flash_attn_func(q, k, v, causal=False)  # No causal mask for decode
+                attn_output = attn_output.transpose(1, 2)  # (batch, nheads, 1, headdim)
+            else:
+                # Fallback: use standard attention for decode
+                # (batch, nheads, 1, headdim) x (batch, nheads, headdim, k_len) -> (batch, nheads, 1, k_len)
+                attn_weights = torch.matmul(query_states, key_states.transpose(-2, -1)) / (self.head_dim ** 0.5)
+                attn_weights = torch.softmax(attn_weights, dim=-1)
+                attn_output = torch.matmul(attn_weights, value_states)  # (batch, nheads, 1, headdim)
         if self.layer_idx == self.layer_to_save:
             import pickle
             import os
