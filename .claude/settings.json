@@ -1,0 +1,70 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx @claude-flow/cli@latest daemon start --quiet 2>/dev/null || true",
+            "timeout": 5000,
+            "continueOnError": true
+          },
+          {
+            "type": "command",
+            "command": "[ -n \"$SESSION_ID\" ] && npx @claude-flow/cli@latest hooks session-restore --session-id \"$SESSION_ID\" 2>/dev/null || true",
+            "timeout": 10000,
+            "continueOnError": true
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"ok\": true}'",
+            "timeout": 1000
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "^mcp__claude-flow__.*$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"decision\": \"allow\", \"reason\": \"claude-flow MCP tool auto-approved\"}'",
+            "timeout": 1000
+          }
+        ]
+      },
+      {
+        "matcher": "^Bash\\(npx @?claude-flow.*\\)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"decision\": \"allow\", \"reason\": \"claude-flow CLI auto-approved\"}'",
+            "timeout": 1000
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(npx claude-flow*)",
+      "Bash(npx @claude-flow/*)",
+      "mcp__claude-flow__*"
+    ],
+    "deny": []
+  },
+  "claudeFlow": {
+    "version": "3.0.0",
+    "enabled": true,
+    "daemon": {
+      "autoStart": true
+    }
+  }
+}
