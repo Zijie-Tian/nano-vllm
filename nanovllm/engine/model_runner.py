@@ -55,6 +55,13 @@ class ModelRunner:
         model_class = get_model_class(hf_config)
         self.model = model_class(hf_config)
         load_model(self.model, config.model)
+
+        # For CPU offload mode, immediately move model to CPU to save GPU memory
+        # The layers will be loaded to GPU one at a time during graph capture
+        if config.enable_cpu_offload:
+            self.model = self.model.cpu()
+            torch.cuda.empty_cache()
+
         self.sampler = GreedySampler()
 
         # Initialize sparse_prefill_policy before warmup (will be configured in allocate_kv_cache)
@@ -911,22 +918,31 @@ class ModelRunner:
                 else:
                     hidden_states, residual = layer.post_attention_layernorm(hidden_states, residual)
 
-                # Chunked MLP processing to reduce activation memory for long sequences
-                # MLP activation = seq_len * intermediate_size * 2 bytes
-                # For 64k: 65536 * 14336 * 2 = ~1.75 GB (down_proj input)
-                # Using chunk_size=2048 reduces peak to ~55 MB
-                mlp_chunk_size = 128
-                if total_tokens > mlp_chunk_size:
+                # MLP processing: Use MST for long sequences, fallback to chunked for medium
+                # MST (Mini-Sequence Transformer) provides 16x memory reduction for very long sequences
+                # For 128k: 128k * 14336 * 2 bytes = 7.34 GB -> 0.45 GB (16x reduction)
+                use_mst = (
+                    self.config.enable_mst and
+                    total_tokens > self.config.mst_min_seq_len
+                )
+
+                if use_mst:
+                    # Use MST-enabled MLP forward for extreme memory reduction
+                    hidden_states = layer.mlp.forward_mst(
+                        hidden_states,
+                        chunk_size=self.config.mst_chunk_size
+                    )
+                elif total_tokens > 128:
+                    # For medium sequences, use existing chunked processing (chunk_size=128)
+                    mlp_chunk_size = 128
                     chunks = hidden_states.split(mlp_chunk_size, dim=0)
                     outputs = []
-                    for i, chunk in enumerate(chunks):
+                    for chunk in chunks:
                         outputs.append(layer.mlp(chunk))
-                        del chunk
-                        torch.cuda.empty_cache()  # Clean after every chunk
                     hidden_states = torch.cat(outputs, dim=0)
                     del outputs
-                    torch.cuda.empty_cache()
                 else:
+                    # For short sequences, use standard processing
                     hidden_states = layer.mlp(hidden_states)
 
                 # 2d. Offload KV to CPU (encapsulated with sparse policy hooks)
@@ -1308,7 +1324,10 @@ class ModelRunner:
         # Capture per-layer graphs
         for layer_id in range(num_layers):
             buffer_idx = layer_id % num_buffers
+
+            # Load layer from CPU to GPU for graph capture
             layer = self.model.model.layers[layer_id]
+            layer = layer.cuda()
             attn_module = layer.self_attn.attn
 
             # Set Attention cache to ring buffer (fixed address for this layer)
@@ -1341,6 +1360,12 @@ class ModelRunner:
 
             self.offload_graphs[layer_id] = graph
             reset_context()
+
+            # Move layer back to CPU and explicitly delete references
+            # This prevents memory accumulation during graph capture
+            self.model.model.layers[layer_id] = layer.cpu()
+            del layer, attn_module, out_h, out_r
+            torch.cuda.empty_cache()
 
             # Update hidden_states and residual for next layer's capture
             # This ensures subsequent layers see realistic input distributions

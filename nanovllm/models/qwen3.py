@@ -120,6 +120,35 @@ class Qwen3MLP(nn.Module):
         x = self.down_proj(x)
         return x
 
+    def forward_mst(self, x, chunk_size: int = 8192):
+        """
+        MST-enabled forward pass with mini-sequence partitioning for memory reduction.
+
+        Args:
+            x: Input tensor [seq_len, hidden_size]
+            chunk_size: Size of each mini-sequence (default: 8192 for 16x reduction)
+
+        Returns:
+            Output tensor [seq_len, hidden_size]
+        """
+        seq_len = x.size(0)
+
+        # For short sequences, use standard forward pass (no benefit to chunking)
+        if seq_len <= chunk_size:
+            return self.forward(x)
+
+        # Partition into mini-sequences and process each chunk
+        chunks = x.split(chunk_size, dim=0)
+        outputs = []
+
+        for chunk in chunks:
+            # Process each mini-sequence through standard forward pass
+            chunk_output = self.forward(chunk)
+            outputs.append(chunk_output)
+
+        # Recombine mini-sequences
+        return torch.cat(outputs, dim=0)
+
 
 class Qwen3DecoderLayer(nn.Module):
 

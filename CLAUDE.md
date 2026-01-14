@@ -60,6 +60,7 @@ PYTHONPATH=/home/zijie/Code/nano-vllm:$PYTHONPATH python tests/test_needle.py
 | [`docs/debugging_guide.md`](docs/debugging_guide.md) | PyTorch hooks for debugging, tensor comparison, memory profiling |
 | [`docs/gpu_only_performance_issue.md`](docs/gpu_only_performance_issue.md) | GPU-only mode slower than offload due to PagedAttention scatter overhead, optimization proposals |
 | [`docs/offload_accuracy_issue.md`](docs/offload_accuracy_issue.md) | **BUG**: CPU offload mode 66% accuracy vs 100% non-offload on RULER NIAH benchmark |
+| [`docs/mst_memory_overhead_issue.md`](docs/mst_memory_overhead_issue.md) | **BUG**: MST integration shows ~18GB unexplained memory overhead. **Includes**: Root cause analysis (layer-wise processing), Appendix A: CUDA Graph memory deep dive (~13GB breakdown and why it's needed) |
 | [`docs/64k_memory_analysis.md`](docs/64k_memory_analysis.md) | 64k inference memory analysis: GPU-only vs offload, OOM root cause (fragmentation), RTX 3090 limitations |
 | [`docs/xattention_integration.md`](docs/xattention_integration.md) | XAttention integration guide: algorithm, implementation, design decisions, and testing |
 | [`docs/xattention_analysis.md`](docs/xattention_analysis.md) | XAttention algorithm analysis: chunked estimation, block sparse attention, integration design |
@@ -76,6 +77,9 @@ PYTHONPATH=/home/zijie/Code/nano-vllm:$PYTHONPATH python tests/test_needle.py
 | `num_gpu_blocks` | 2 | GPU blocks for offload mode |
 | `num_kv_buffers` | 4 | Ring buffer size (1-4), lower = less memory but slower decode |
 | `enforce_eager` | False | Set True to disable CUDA graphs |
+| `enable_mst` | False | Mini-Sequence Transformer for MLP memory reduction (16x at 128k) |
+| `mst_chunk_size` | 8192 | Chunk size for MST (default: 8192 for 16x reduction at 128k) |
+| `mst_min_seq_len` | 32768 | Minimum sequence length to activate MST |
 
 ## Benchmarking
 

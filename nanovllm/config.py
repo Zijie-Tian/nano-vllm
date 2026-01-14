@@ -63,6 +63,16 @@ class Config:
     xattn_keep_recent: bool = False  # Always keep recent diagonal blocks
     xattn_norm: float = 1.0  # Normalization factor for attention scores
 
+    # MST (Mini-Sequence Transformer) configuration for MLP memory reduction
+    enable_mst: bool = False
+    """Enable mini-sequence transformer optimization for MLP layers (reduces activation memory)"""
+
+    mst_chunk_size: int = 8192
+    """Chunk size for MLP mini-sequence processing (default: 8192 for 16x memory reduction on 128k sequences)"""
+
+    mst_min_seq_len: int = 32768
+    """Minimum sequence length to activate MST (default: 32k, RTX 3090 threshold without MST)"""
+
     def __post_init__(self):
         assert os.path.isdir(self.model)
         assert self.kvcache_block_size % 256 == 0
