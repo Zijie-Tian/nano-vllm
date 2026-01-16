@@ -1,11 +1,16 @@
 #!/bin/bash
 # RULER Benchmark Runner
-# Usage: ./scripts/run_ruler.sh [MODEL_NAME] [BENCHMARK] [METRIC] [--task TASK]
+# Usage: ./scripts/run_ruler.sh [MODEL_NAME] [BENCHMARK] [METRIC] [OPTIONS]
 #
 # Examples:
-#   ./scripts/run_ruler.sh llama3.1-8b-chat synthetic full
-#   ./scripts/run_ruler.sh llama3.1-8b-chat synthetic full --task niah_single_1
-#   CUDA_VISIBLE_DEVICES=0 ./scripts/run_ruler.sh llama3.1-8b-chat synthetic xattn
+#   ./scripts/run_ruler.sh llama3.1-8b-nanovllm synthetic xattn --stride 8
+#   ./scripts/run_ruler.sh llama3.1-8b-nanovllm synthetic xattn --stride 16 --task niah_single_1
+#   CUDA_VISIBLE_DEVICES=0 ./scripts/run_ruler.sh llama3.1-8b-nanovllm synthetic xattn --stride 8
+#
+# Options:
+#   --stride N     Set XAttention stride (for nanovllm xattn)
+#   --task TASK    Run specific task(s) only
+#   --threshold N  Set XAttention threshold
 
 set -e
 
@@ -45,6 +50,11 @@ echo "Model Dir:    $MODEL_DIR"
 echo "Model:        $MODEL_NAME"
 echo "Benchmark:    $BENCHMARK"
 echo "Metric:       $METRIC"
+# Extract stride from EXTRA_ARGS for display
+if [[ "$EXTRA_ARGS" == *"--stride"* ]]; then
+    STRIDE_VALUE=$(echo "$EXTRA_ARGS" | grep -o -- '--stride [0-9]*' | awk '{print $2}')
+    echo "Stride:       $STRIDE_VALUE"
+fi
 if [ -n "$EXTRA_ARGS" ]; then
     echo "Extra Args:   $EXTRA_ARGS"
 fi

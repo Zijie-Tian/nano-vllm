@@ -136,7 +136,7 @@ fi
 
 # NanoVLLM parallel execution settings
 # GPU configuration for parallel execution
-GPU_LIST=${GPU_LIST:-"0,1,2,3"}  # Comma-separated GPU IDs to use
+GPU_LIST=${GPU_LIST:-"0,1,2,3,4,5"}  # Comma-separated GPU IDs to use (all 6 GPUs)
 IFS=',' read -ra GPU_ARRAY <<< "$GPU_LIST"
 NUM_GPUS=${#GPU_ARRAY[@]}
 
@@ -145,8 +145,8 @@ total_time=0
 for MAX_SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
     SETTINGS_INFO=""
     if [[ -n ${METRIC} ]]; then SETTINGS_INFO+="${METRIC#--metric }_"; fi
-    # For avgpool: use topp or topk instead of fuse/stride
-    # For other metrics (xattn, etc.): use fuse/stride
+    # For avgpool: use topp or topk instead of stride
+    # For xattn with nanovllm: use stride for folder naming
     METRIC_NAME="${METRIC#--metric }"
     if [[ "${METRIC_NAME}" == "avgpool" ]]; then
         # top-p takes priority over top-k for folder naming
@@ -156,7 +156,12 @@ for MAX_SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
             SETTINGS_INFO+="topk_${AVGPOOL_TOPK##* }_"
         fi
     else
-        if [[ -n ${STRIDE} ]]; then SETTINGS_INFO+="fuse_${STRIDE##* }_"; fi
+        # For xattn (nanovllm or other backends), include stride in folder name
+        if [[ -n ${STRIDE} ]]; then
+            SETTINGS_INFO+="stride${STRIDE##* }_"
+            # Export for nanovllm backend
+            export NANOVLLM_XATTN_STRIDE="${STRIDE##* }"
+        fi
     fi
     if [[ -n ${THRESHOLD} && -z ${PRECISE_THRESHOLD} ]]; then SETTINGS_INFO+="thresh_${THRESHOLD#--threshold }_"; fi
 
