@@ -440,3 +440,79 @@ Required libraries:
 - `minference`: For MInference vertical_slash kernel
 
 Docker image `tzj/xattn:v0.5` has all dependencies pre-installed.
+
+---
+
+## Quest Sparse Policy
+
+**Files**: `nanovllm/kvcache/sparse/quest.py`, `nanovllm/kvcache/sparse/policy.py`
+
+### Core Idea
+
+Quest policy selects Top-K blocks based on query-key similarity bounds using min/max key metadata. This enables efficient block selection for CPU offload scenarios.
+
+### Scoring Mechanism
+
+```python
+# Compute scores using key metadata bounds
+score_min = torch.einsum('hd,bhd->bh', q, key_min)  # [num_blocks, kv_heads]
+score_max = torch.einsum('hd,bhd->bh', q, key_max)  # [num_blocks, kv_heads]
+scores = torch.maximum(score_min, score_max).mean(dim=-1)  # [num_blocks] ← averaged!
+```
+
+### Critical Limitation - No Per-Head Scheduling
+
+The `.mean(dim=-1)` averages scores across all heads, making a **unified** block selection for all heads:
+
+```
+Block A: head0 needs (+4), head1 doesn't (-4) → avg = 0 → NOT selected
+Block B: head0 doesn't (-4), head1 needs (+4) → avg = 0 → NOT selected
+Block C: both heads moderately need (+2, +2) → avg = +2 → selected
+```
+
+### Why Per-Head Scheduling is Infeasible
+
+1. **Memory Layout**: GPU cache stores all heads together `[block_size, kv_heads, head_dim]`
+
+2. **FlashAttention**: Requires complete heads - partial heads cause dimension mismatch
+
+3. **Block Granularity**: If any head needs a block, the entire block (all heads) must be loaded
+
+### Policy Types
+
+| Policy | supports_prefill | supports_decode | Description |
+|--------|------------------|-----------------|-------------|
+| `FullAttentionPolicy` | True | True | Loads all blocks (no sparsity) |
+| `QuestPolicy` | False | True | Decode-only Top-K selection |
+
+### Usage Example
+
+```python
+from nanovllm.kvcache.sparse.policy import QuestPolicy
+
+# Create Quest policy for decode-only sparse attention
+policy = QuestPolicy(topk=8, threshold=4.0)
+
+# Select blocks based on query and key metadata
+selected_blocks = policy.select_blocks(
+    query,           # [num_tokens, num_heads, head_dim]
+    key_min,         # [num_blocks, num_heads, head_dim]
+    key_max,         # [num_blocks, num_heads, head_dim]
+)
+```
+
+### Key Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `topk` | 8 | Number of blocks to select |
+| `threshold` | 4.0 | Minimum score threshold for selection |
+
+### Integration with CPU Offload
+
+The Quest policy is used in conjunction with CPU offload to reduce the number of blocks transferred from CPU to GPU during decode:
+
+1. During prefill, all blocks are loaded (full attention)
+2. During decode, Quest selects only top-K important blocks
+3. Only selected blocks are transferred from CPU to GPU
+4. This reduces memory bandwidth requirements for long sequences
