@@ -195,10 +195,10 @@ def run_task_test(
         })
 
         if verbose:
-            status = "PASS" if passed else "FAIL"
+            status = "✓ PASS" if passed else "✗ FAIL"
             exp_preview = str(expected[0])[:30] if expected else "N/A"
             out_preview = output_text[:50].replace('\n', ' ')
-            print(f"    [{idx}] {status} (score={score:.2f}) exp={exp_preview}... out={out_preview}...")
+            print(f"    [{idx:3d}] {status} (score={score:.2f}) exp={exp_preview}... | out={out_preview}...")
 
     avg_score = total_score / len(samples) if samples else 0.0
 

@@ -231,6 +231,11 @@ class HybridKVCacheManager(KVCacheManager):
         seq.num_cached_tokens = 0
         seq.block_table.clear()
 
+        # Reset OffloadEngine state to prevent request-to-request contamination
+        # This clears all KV buffers and pending async events
+        if self.offload_engine is not None:
+            self.offload_engine.reset()
+
     def can_append(self, seq: Sequence) -> bool:
         """Check if we can append a token."""
         need_new_block = (len(seq) % self._block_size == 1)

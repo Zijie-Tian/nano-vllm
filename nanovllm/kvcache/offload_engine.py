@@ -278,6 +278,42 @@ class OffloadEngine:
         """
         return self.k_cache_gpu, self.v_cache_gpu
 
+    def reset(self) -> None:
+        """
+        Reset all KV cache buffers to zero.
+
+        This clears all GPU and CPU-side KV cache storage, preventing
+        request-to-request contamination. Must be called between generate()
+        calls when reusing the same OffloadEngine instance.
+
+        Clears:
+        - GPU ring buffer slots (k_cache_gpu, v_cache_gpu)
+        - Per-layer decode buffers (decode_k_buffer, decode_v_buffer)
+        - Cross-layer pipeline buffers (layer_k/v_buffer_a/b)
+        - Per-layer prefill buffers (prefill_k/v_buffer)
+        - All pending async transfer events
+        """
+        # Clear GPU ring buffer slots
+        self.k_cache_gpu.zero_()
+        self.v_cache_gpu.zero_()
+
+        # Clear per-layer decode buffers
+        self.decode_k_buffer.zero_()
+        self.decode_v_buffer.zero_()
+
+        # Clear cross-layer pipeline buffers
+        self.layer_k_buffer_a.zero_()
+        self.layer_v_buffer_a.zero_()
+        self.layer_k_buffer_b.zero_()
+        self.layer_v_buffer_b.zero_()
+
+        # Clear per-layer prefill buffers
+        self.prefill_k_buffer.zero_()
+        self.prefill_v_buffer.zero_()
+
+        # Clear all pending async transfer events
+        self.pending_events.clear()
+
     # ========== Memory info ==========
 
     def gpu_memory_bytes(self) -> int:
