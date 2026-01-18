@@ -1,0 +1,4 @@
+[submodule "3rdparty/Block-SparseAttention"]
+	path = 3rdparty/Block-SparseAttention
+	url = https://github.com/Zijie-Tian/Block-Sparse-Attention.git
+	branch = tzj/minference
