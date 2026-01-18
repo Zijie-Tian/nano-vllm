@@ -1,4 +1,6 @@
+import os
 import pickle
+import socket
 import torch
 import torch.distributed as dist
 from multiprocessing.synchronize import Event
@@ -16,6 +18,17 @@ from nanovllm.kvcache import create_kvcache_manager, KVCacheManager
 logger = get_logger("model_runner")
 
 
+def _find_free_port() -> int:
+    """Find a free port for distributed communication.
+
+    Uses socket binding with port 0 to let the OS assign an available port.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(('', 0))
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        return s.getsockname()[1]
+
+
 class ModelRunner:
 
     def __init__(self, config: Config, rank: int, event: Event | list[Event]):
@@ -27,7 +40,14 @@ class ModelRunner:
         self.rank = rank
         self.event = event
 
-        dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
+        # Dynamic port allocation: use env var if set, otherwise find a free port
+        env_port = os.environ.get("NANOVLLM_DIST_PORT")
+        if env_port is not None:
+            port = int(env_port)
+        else:
+            port = _find_free_port()
+            logger.info(f"Auto-assigned distributed port: {port}")
+        dist.init_process_group("nccl", f"tcp://localhost:{port}", world_size=self.world_size, rank=rank)
         torch.cuda.set_device(rank)
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.torch_dtype)
