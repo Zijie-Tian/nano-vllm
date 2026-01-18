@@ -7,8 +7,8 @@ import torch
 
 class SparsePolicyType(Enum):
     """Sparse attention policy types."""
-    FULL = auto()   # No sparse attention (load all blocks)
-    QUEST = auto()  # Query-aware Top-K block selection (decode only)
+    FULL = auto()       # No sparse attention (load all blocks)
+    QUEST = auto()      # Query-aware Top-K block selection (decode only)
 
 
 @dataclass

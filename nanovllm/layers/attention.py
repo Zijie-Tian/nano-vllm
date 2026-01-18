@@ -207,8 +207,10 @@ class Attention(nn.Module):
             # Get prefilled CPU blocks (blocks from previous chunks)
             cpu_block_table = kvcache_manager.get_prefilled_cpu_blocks(seq)
 
-            # Apply sparse policy if enabled (Quest returns all blocks for prefill since query=None)
+            # Apply sparse policy if enabled
             sparse_policy = kvcache_manager.sparse_policy
+
+            # === Standard sparse policy (Quest, etc.) ===
             if cpu_block_table and sparse_policy is not None:
                 num_chunks = getattr(context, 'num_chunks', current_chunk_idx + 1)
                 policy_ctx = PolicyContext(

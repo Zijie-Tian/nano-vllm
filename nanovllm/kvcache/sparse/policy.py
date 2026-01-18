@@ -35,8 +35,8 @@ class PolicyContext:
     query: Optional[torch.Tensor]
     """
     Query tensor for current chunk.
-    Shape: [1, num_heads, head_dim] for decode, [1, seq_len, num_heads, head_dim] for prefill.
-    May be None if not available (e.g., some prefill scenarios).
+    Shape: [1, num_heads, head_dim] for decode, [seq_len, num_heads, head_dim] for prefill.
+    Available for both prefill and decode phases.
     """
 
     is_prefill: bool

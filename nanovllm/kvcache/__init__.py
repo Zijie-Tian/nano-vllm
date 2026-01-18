@@ -64,11 +64,16 @@ def create_kvcache_manager(config: "Config") -> KVCacheManager:
     # Create sparse policy from config enum
     # Quest is decode-only: prefill returns all blocks (query=None), decode does Top-K
     sparse_policy_type = getattr(config, 'sparse_policy', SparsePolicyType.FULL)
-    sparse_policy = create_sparse_policy(
-        sparse_policy_type,
-        topk_blocks=getattr(config, 'sparse_topk_blocks', 8),
-        threshold_blocks=getattr(config, 'sparse_threshold_blocks', 4),
-    )
+
+    # Build policy kwargs based on policy type
+    policy_kwargs = {}
+    if sparse_policy_type == SparsePolicyType.QUEST:
+        policy_kwargs = {
+            'topk_blocks': getattr(config, 'sparse_topk_blocks', 8),
+            'threshold_blocks': getattr(config, 'sparse_threshold_blocks', 4),
+        }
+
+    sparse_policy = create_sparse_policy(sparse_policy_type, **policy_kwargs)
 
     return HybridKVCacheManager(
         num_gpu_slots=num_gpu_blocks,
