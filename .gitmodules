@@ -8,4 +8,4 @@
 [submodule "3rdparty/nanovllm"]
 	path = 3rdparty/nanovllm
 	url = https://github.com/Zijie-Tian/nano-vllm.git
-	branch = tzj/vs_offload
+	branch = tzj/minference
