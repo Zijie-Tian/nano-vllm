@@ -2,39 +2,47 @@
 
 ## Do Not Create Unnecessary Documentation
 
-**IMPORTANT**: Do NOT create extra markdown documentation files unless explicitly requested by the user.
+**IMPORTANT**: Do NOT create extra markdown documentation files proactively unless:
+1. User explicitly requests documentation
+2. Refactoring CLAUDE.md to move technical details to docs/ (see `doc-management.md`)
 
 ### What NOT to do:
 
-- ❌ Do NOT create README files proactively
-- ❌ Do NOT create analysis documents (*.md) after completing tasks
-- ❌ Do NOT create tutorial/guide documents
-- ❌ Do NOT create summary documents
+- Do NOT create README files proactively
+- Do NOT create standalone analysis documents after completing tasks
+- Do NOT create summary documents without request
 
 ### What TO do:
 
-- ✅ Only create documentation when user explicitly asks for it
-- ✅ Provide information directly in conversation instead
-- ✅ Update existing documentation if changes require it
-- ✅ Add inline code comments where necessary
+- Provide information directly in conversation by default
+- When user requests documentation, follow `doc-management.md` workflow
+- Update existing docs in `docs/` when code changes affect them
+- Keep CLAUDE.md concise (< 150 lines), move technical details to docs/
 
-### Exceptions:
+### Documentation Locations:
 
-Documentation is acceptable ONLY when:
-1. User explicitly requests "create a README" or "write documentation"
-2. Updating existing documentation to reflect code changes
-3. Adding inline comments/docstrings to code itself
+| Type | Location |
+|------|----------|
+| Operational requirements | CLAUDE.md |
+| Technical details | docs/*.md |
+| Code comments | Inline in source |
 
 ### Examples:
 
-**Bad** (Don't do this):
+**Proactive docs (Don't do)**:
 ```
 User: "Profile the code"
-Assistant: [Creates profiling_results.md after profiling]
+Assistant: [Creates profiling_results.md without being asked]
 ```
 
-**Good** (Do this instead):
+**On-request docs (Do this)**:
 ```
-User: "Profile the code"
-Assistant: [Runs profiling, shows results in conversation]
+User: "Profile the code and document the findings"
+Assistant: [Runs profiling, creates/updates docs/memory_analysis.md]
+```
+
+**Refactoring (Do this)**:
+```
+User: "CLAUDE.md is too long, refactor it"
+Assistant: [Moves technical sections to docs/, updates CLAUDE.md index]
 ```

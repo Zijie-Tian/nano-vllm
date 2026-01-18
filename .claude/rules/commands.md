@@ -1,20 +1,16 @@
 # Commands
 
-## Installation
+## Running (with PYTHONPATH)
 
-```bash
-pip install -e .
-```
-
-## Running
+For multi-instance development, use PYTHONPATH instead of pip install:
 
 ```bash
 # Run example
-python example.py
+PYTHONPATH=/path/to/nano-vllm:$PYTHONPATH python example.py
 
 # Run benchmarks
-python bench.py                    # Standard benchmark
-python bench_offload.py            # CPU offload benchmark
+PYTHONPATH=/path/to/nano-vllm:$PYTHONPATH python bench.py
+PYTHONPATH=/path/to/nano-vllm:$PYTHONPATH python bench_offload.py
 ```
 
 ## Config Defaults
