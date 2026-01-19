@@ -84,7 +84,7 @@ class FullAttentionPolicy(SparsePolicy):
         Returns:
             Attention output [seq_len, num_heads, head_dim]
         """
-        from nanovllm.kvcache.chunked_attention import flash_attn_with_lse, merge_attention_outputs
+        from nanovllm.ops.chunked_attention import flash_attn_with_lse, merge_attention_outputs
 
         logger.debug(f"[DEBUG] FullPolicy.compute_chunked_prefill called, "
                      f"layer={layer_id}, chunk={current_chunk_idx}, num_tokens={num_tokens}")
@@ -222,7 +222,7 @@ class FullAttentionPolicy(SparsePolicy):
         Returns:
             Attention output [batch_size, 1, num_heads, head_dim]
         """
-        from nanovllm.kvcache.chunked_attention import flash_attn_with_lse, merge_attention_outputs
+        from nanovllm.ops.chunked_attention import flash_attn_with_lse, merge_attention_outputs
 
         # q shape: [batch_size, num_heads, head_dim] (single decode token per sequence)
         q_batched = q.unsqueeze(1)  # [batch, 1, heads, dim]
@@ -319,7 +319,7 @@ class FullAttentionPolicy(SparsePolicy):
         Loads one block at a time, computes attention, and merges results.
         Uses load_to_slot_layer / wait_slot_layer / get_kv_for_slot methods.
         """
-        from nanovllm.kvcache.chunked_attention import flash_attn_with_lse, merge_attention_outputs
+        from nanovllm.ops.chunked_attention import flash_attn_with_lse, merge_attention_outputs
 
         num_blocks = len(cpu_block_table)
         if num_blocks == 0:
