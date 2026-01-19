@@ -11,9 +11,26 @@ from nanovllm.ops.chunked_attention import (
     ChunkedPrefillState,
 )
 
+from nanovllm.ops.xattn import (
+    xattn_estimate,
+    flat_group_gemm_fuse_reshape,
+    softmax_fuse_block_sum,
+    find_blocks_chunked,
+    create_causal_mask,
+    compute_sparsity,
+)
+
 __all__ = [
+    # chunked_attention
     "flash_attn_with_lse",
     "merge_attention_outputs",
     "chunked_attention_varlen",
     "ChunkedPrefillState",
+    # xattn
+    "xattn_estimate",
+    "flat_group_gemm_fuse_reshape",
+    "softmax_fuse_block_sum",
+    "find_blocks_chunked",
+    "create_causal_mask",
+    "compute_sparsity",
 ]
