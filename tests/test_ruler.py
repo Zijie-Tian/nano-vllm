@@ -227,6 +227,9 @@ def run_ruler_benchmark(
     enforce_eager: bool = True,
     verbose: bool = True,
     sparse_policy: Optional[str] = None,
+    sparse_threshold: float = 0.9,
+    sparse_samples: int = 128,
+    sparse_block_size: int = 128,
 ) -> Dict:
     """
     Run RULER benchmark on multiple tasks.
@@ -278,6 +281,10 @@ def run_ruler_benchmark(
         from nanovllm.config import SparsePolicyType
         sparse_policy_type = SparsePolicyType[sparse_policy]
         llm_kwargs["sparse_policy"] = sparse_policy_type
+        # XAttention BSA specific parameters
+        if sparse_policy_type == SparsePolicyType.XATTN_BSA:
+            llm_kwargs["sparse_threshold"] = sparse_threshold
+            llm_kwargs["sparse_samples_per_chunk"] = sparse_samples
 
     llm = LLM(model_path, **llm_kwargs)
 
@@ -373,7 +380,14 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", "-q", action="store_true",
                         help="Quiet mode")
     parser.add_argument("--sparse-policy", type=str, default="",
-                        help="Sparse attention policy (FULL, QUEST, MINFERENCE, XATTN)")
+                        help="Sparse attention policy (FULL, QUEST, XATTN_BSA)")
+    # XAttention BSA specific parameters
+    parser.add_argument("--sparse-threshold", type=float, default=0.9,
+                        help="XAttention BSA: cumulative attention threshold (0-1)")
+    parser.add_argument("--sparse-samples", type=int, default=128,
+                        help="XAttention BSA: samples per chunk for estimation")
+    parser.add_argument("--sparse-block-size", type=int, default=128,
+                        help="XAttention BSA: block size for estimation")
 
     args = parser.parse_args()
 
@@ -399,6 +413,9 @@ if __name__ == "__main__":
         enforce_eager=not args.use_cuda_graph,
         verbose=not args.quiet,
         sparse_policy=sparse_policy_str,
+        sparse_threshold=args.sparse_threshold,
+        sparse_samples=args.sparse_samples,
+        sparse_block_size=args.sparse_block_size,
     )
 
     # Exit code

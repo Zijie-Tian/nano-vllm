@@ -3,6 +3,8 @@
 ## Goal
 将 XAttention BSA 策略按照统一接口集成到 nano-vllm 的 sparse policy 框架中，实现模块化设计。
 
+**最终验证目标**: 运行 `tests/test_ruler.py` 测试 32K 数据的 10 个以内的 sample，得到合理结果（不一定全部 PASS，但结果应在预期精度范围内）。
+
 ---
 
 ## 强制要求：使用 Hive-Mind 集群思考

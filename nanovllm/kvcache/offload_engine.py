@@ -869,3 +869,60 @@ class OffloadEngine:
     def wait_prefill_offload(self, layer_id: int) -> None:
         """Wait for a specific layer's prefill offload to complete."""
         self.prefill_offload_events[layer_id].synchronize()
+
+    # ========== XAttention BSA Helper Methods ==========
+
+    def load_block_sample_from_cpu(
+        self,
+        cpu_block_id: int,
+        layer_id: int,
+        num_samples: int,
+    ) -> Tuple[Tensor, Tensor]:
+        """
+        Load sample tokens from a CPU block for XAttention BSA estimation.
+
+        This is used in the estimate phase of XAttention BSA to load a small
+        sample of tokens from each historical chunk for importance estimation.
+
+        Args:
+            cpu_block_id: Source CPU block ID
+            layer_id: Layer index
+            num_samples: Number of tokens to sample
+
+        Returns:
+            (k_sample, v_sample) tensors, shape: [num_samples, kv_heads, head_dim]
+        """
+        # Sample from the beginning of the block
+        k_sample = self.k_cache_cpu[
+            layer_id, cpu_block_id, :num_samples
+        ].clone().cuda()
+        v_sample = self.v_cache_cpu[
+            layer_id, cpu_block_id, :num_samples
+        ].clone().cuda()
+        return k_sample, v_sample
+
+    def load_block_full_from_cpu(
+        self,
+        cpu_block_id: int,
+        layer_id: int,
+    ) -> Tuple[Tensor, Tensor]:
+        """
+        Load full tokens from a CPU block for XAttention BSA computation.
+
+        This is used in the compute phase of XAttention BSA to load the full
+        data for selected important chunks.
+
+        Args:
+            cpu_block_id: Source CPU block ID
+            layer_id: Layer index
+
+        Returns:
+            (k_full, v_full) tensors, shape: [block_size, kv_heads, head_dim]
+        """
+        k_full = self.k_cache_cpu[
+            layer_id, cpu_block_id
+        ].clone().cuda()
+        v_full = self.v_cache_cpu[
+            layer_id, cpu_block_id
+        ].clone().cuda()
+        return k_full, v_full
