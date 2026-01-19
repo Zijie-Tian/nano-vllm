@@ -21,7 +21,7 @@ class PrefillOnlyPolicy(SparsePolicy):
     supports_prefill = True
     supports_decode = False
 
-    def compute_chunked_attention(self, ...):
+    def compute_chunked_prefill(self, ...):
         # 正常实现 prefill 逻辑
         ...
 
@@ -35,7 +35,7 @@ class DecodeOnlyPolicy(SparsePolicy):
     supports_prefill = False
     supports_decode = True
 
-    def compute_chunked_attention(self, ...):
+    def compute_chunked_prefill(self, ...):
         # 不支持 prefill，必须 assert False
         assert False, "DecodeOnlyPolicy does not support prefill phase"
 
@@ -53,7 +53,7 @@ class FullAttentionPolicy(SparsePolicy):
     supports_prefill = True
     supports_decode = True
 
-    def compute_chunked_attention(self, ...):
+    def compute_chunked_prefill(self, ...):
         # 完整实现
 
     def compute_chunked_decode(self, ...):
@@ -85,13 +85,10 @@ if not sparse_policy.supports_decode:
 在 SparsePolicy 的 `compute_chunked_*` 方法中，所有 CPU-GPU 数据传输**必须**通过 `OffloadEngine` 进行，**禁止**直接使用 `torch.Tensor.copy_()` 或 `.to(device)`：
 
 ```python
-# ✅ 正确：使用 OffloadEngine 的方法
+# ✅ 正确：使用 OffloadEngine 的 ring buffer 方法
 offload_engine.load_to_slot_layer(slot, layer_id, cpu_block_id)
 offload_engine.wait_slot_layer(slot)
 k, v = offload_engine.get_kv_for_slot(slot)
-
-# ✅ 正确：使用 cross-layer pipeline
-k, v = offload_engine.get_decode_layer_kv(layer_id, num_blocks)
 
 # ❌ 错误：直接使用 torch 通信
 gpu_tensor.copy_(cpu_tensor)
@@ -102,6 +99,6 @@ gpu_tensor = cpu_tensor.cuda()
 ### 原因
 
 1. **流同步**：OffloadEngine 内部管理 CUDA streams，确保正确的同步
-2. **Pipeline 优化**：OffloadEngine 实现了 ring buffer 和 cross-layer pipeline
+2. **Pipeline 优化**：OffloadEngine 实现了 ring buffer pipeline
 3. **资源管理**：OffloadEngine 管理 GPU buffer slots，避免内存碎片
 4. **一致性**：统一的接口便于调试和维护

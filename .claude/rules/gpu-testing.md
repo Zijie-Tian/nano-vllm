@@ -77,6 +77,45 @@ Claude: Runs `python tests/test_needle.py ...`  # NO! Missing GPU specification!
 
 ---
 
+## Needle Test Requirements (MANDATORY)
+
+When running `test_needle.py`, **ALWAYS** use these settings:
+
+1. **Enable offload**: `--enable-offload` is **REQUIRED**
+2. **Use 32K context**: `--input-len 32768` is **REQUIRED**
+
+### Standard Needle Test Command
+
+```bash
+CUDA_VISIBLE_DEVICES=X PYTHONPATH=/path/to/nano-vllm:$PYTHONPATH \
+    python tests/test_needle.py \
+    --model ~/models/Llama-3.1-8B-Instruct \
+    --enable-offload \
+    --input-len 32768
+```
+
+### Why These Settings?
+
+| Setting | Reason |
+|---------|--------|
+| `--enable-offload` | Tests the CPU offload pipeline which is the main feature being developed |
+| `--input-len 32768` | 32K context properly exercises the chunked prefill/decode paths; 8K is too short to catch many issues |
+
+### Do NOT Use
+
+```bash
+# ❌ Wrong: Missing offload
+python tests/test_needle.py --model ~/models/Llama-3.1-8B-Instruct
+
+# ❌ Wrong: Too short (default 8K)
+python tests/test_needle.py --model ~/models/Llama-3.1-8B-Instruct --enable-offload
+
+# ✅ Correct: Offload + 32K
+python tests/test_needle.py --model ~/models/Llama-3.1-8B-Instruct --enable-offload --input-len 32768
+```
+
+---
+
 ## Combined Checklist
 
 Before running any GPU test:

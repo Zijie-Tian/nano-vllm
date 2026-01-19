@@ -46,7 +46,7 @@ class FullAttentionPolicy(SparsePolicy):
         """Return all blocks - no sparsity."""
         return available_blocks
 
-    def compute_chunked_attention(
+    def compute_chunked_prefill(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -86,7 +86,7 @@ class FullAttentionPolicy(SparsePolicy):
         """
         from nanovllm.kvcache.chunked_attention import flash_attn_with_lse, merge_attention_outputs
 
-        logger.debug(f"[DEBUG] FullPolicy.compute_chunked_attention called, "
+        logger.debug(f"[DEBUG] FullPolicy.compute_chunked_prefill called, "
                      f"layer={layer_id}, chunk={current_chunk_idx}, num_tokens={num_tokens}")
 
         q_batched = q.unsqueeze(0)  # [1, seq_len, num_heads, head_dim]
@@ -256,19 +256,12 @@ class FullAttentionPolicy(SparsePolicy):
         )
         cpu_block_table = self.select_blocks(cpu_block_table, offload_engine, policy_ctx)
 
-        # Use cross-layer pipeline if active (initialized in model_runner)
-        if offload_engine.is_pipeline_active():
-            o_acc, lse_acc = self._decode_with_layer_pipeline(
-                q_batched, cpu_block_table, offload_engine,
-                block_size, last_block_valid_tokens, layer_id, softmax_scale
-            )
-        else:
-            # Fallback to original ring buffer pipeline
-            load_slots = offload_engine.decode_load_slots
-            o_acc, lse_acc = self._decode_ring_buffer_pipeline(
-                q_batched, cpu_block_table, load_slots, offload_engine,
-                block_size, last_block_valid_tokens, layer_id, softmax_scale
-            )
+        # Use ring buffer pipeline for loading prefilled blocks
+        load_slots = offload_engine.decode_load_slots
+        o_acc, lse_acc = self._decode_ring_buffer_pipeline(
+            q_batched, cpu_block_table, load_slots, offload_engine,
+            block_size, last_block_valid_tokens, layer_id, softmax_scale
+        )
 
         # Now attend to accumulated decode tokens from per-layer decode buffer
         # Compute decode position information internally
@@ -383,63 +376,6 @@ class FullAttentionPolicy(SparsePolicy):
                     o_acc, lse_acc = prev_o, prev_lse
                 else:
                     o_acc, lse_acc = merge_attention_outputs(o_acc, lse_acc, prev_o, prev_lse)
-
-        return o_acc, lse_acc
-
-    def _decode_with_layer_pipeline(
-        self,
-        q_batched: torch.Tensor,
-        cpu_block_table: list,
-        offload_engine: "OffloadEngine",
-        block_size: int,
-        last_block_valid_tokens: int,
-        layer_id: int,
-        softmax_scale: float,
-    ):
-        """
-        Decode using cross-layer pipeline for optimized H2D transfer.
-
-        Uses pre-loaded layer buffers instead of loading blocks one by one.
-        The pipeline loads the next layer's data while the current layer
-        computes, achieving transfer/compute overlap.
-        """
-        from nanovllm.kvcache.chunked_attention import flash_attn_with_lse, merge_attention_outputs
-
-        num_blocks = len(cpu_block_table)
-        if num_blocks == 0:
-            return None, None
-
-        compute_stream = offload_engine.compute_stream
-
-        # Get KV from pre-loaded layer buffer (triggers next layer loading)
-        prev_k, prev_v = offload_engine.get_decode_layer_kv(layer_id, num_blocks)
-
-        # prev_k, prev_v shape: [num_blocks, block_size, kv_heads, head_dim]
-        # Reshape to [1, num_blocks * block_size, kv_heads, head_dim]
-        total_tokens = num_blocks * block_size
-
-        # Handle partial last block
-        if last_block_valid_tokens < block_size:
-            # Only use valid tokens from last block
-            actual_tokens = (num_blocks - 1) * block_size + last_block_valid_tokens
-            # Flatten and truncate
-            prev_k_flat = prev_k.reshape(-1, prev_k.shape[-2], prev_k.shape[-1])[:actual_tokens]
-            prev_v_flat = prev_v.reshape(-1, prev_v.shape[-2], prev_v.shape[-1])[:actual_tokens]
-        else:
-            prev_k_flat = prev_k.reshape(-1, prev_k.shape[-2], prev_k.shape[-1])
-            prev_v_flat = prev_v.reshape(-1, prev_v.shape[-2], prev_v.shape[-1])
-
-        # Add batch dimension: [1, total_tokens, kv_heads, head_dim]
-        prev_k_batched = prev_k_flat.unsqueeze(0)
-        prev_v_batched = prev_v_flat.unsqueeze(0)
-
-        # Compute attention on all prefilled blocks at once
-        with torch.cuda.stream(compute_stream):
-            o_acc, lse_acc = flash_attn_with_lse(
-                q_batched, prev_k_batched, prev_v_batched,
-                softmax_scale=softmax_scale,
-                causal=False,
-            )
 
         return o_acc, lse_acc
 

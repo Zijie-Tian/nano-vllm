@@ -192,7 +192,7 @@ class SparsePolicy(ABC):
         pass
 
     @abstractmethod
-    def compute_chunked_attention(
+    def compute_chunked_prefill(
         self,
         q: torch.Tensor,
         k: torch.Tensor,

@@ -174,7 +174,7 @@ class Attention(nn.Module):
         Compute attention with per-layer prefill buffer for async offload.
 
         Simplified design:
-        - All computation logic is delegated to sparse_policy.compute_chunked_attention()
+        - All computation logic is delegated to sparse_policy.compute_chunked_prefill()
         - This method only handles async offload after computation
 
         The policy handles:
@@ -198,11 +198,11 @@ class Attention(nn.Module):
             raise RuntimeError("sparse_policy is required for chunked prefill")
 
         # [DEBUG] Verify execution path
-        logger.debug(f"[DEBUG] Calling sparse_policy.compute_chunked_attention, "
+        logger.debug(f"[DEBUG] Calling sparse_policy.compute_chunked_prefill, "
                      f"policy={sparse_policy}, layer={self.layer_id}, chunk={current_chunk_idx}")
 
         # Delegate all computation to policy (no flash_attn or merge calls here!)
-        final_o = sparse_policy.compute_chunked_attention(
+        final_o = sparse_policy.compute_chunked_prefill(
             q, k, v,
             self.layer_id,
             self.scale,

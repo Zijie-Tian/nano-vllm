@@ -644,12 +644,6 @@ class ModelRunner:
         # Get decode start position for accumulated token tracking
         decode_start_pos = self.kvcache_manager.get_decode_start_pos(seq)
 
-        # Get prefilled CPU blocks for pipeline initialization
-        cpu_block_table = self.kvcache_manager.get_prefilled_cpu_blocks(seq)
-
-        # Start cross-layer pipeline (preloads Layer 0's data)
-        offload_engine.start_decode_pipeline(cpu_block_table)
-
         # Set up context for chunked decode
         set_context(
             is_prefill=False,
@@ -665,9 +659,6 @@ class ModelRunner:
         # Run model forward pass
         logits = self.run_model(input_ids, positions, is_prefill=False)
         reset_context()
-
-        # End cross-layer pipeline
-        offload_engine.end_decode_pipeline()
 
         # Only offload when block is full (pos_in_block == block_size - 1)
         # This avoids unnecessary offloading on every decode step
