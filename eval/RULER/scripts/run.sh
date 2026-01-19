@@ -136,7 +136,7 @@ fi
 
 # NanoVLLM parallel execution settings
 # GPU configuration for parallel execution
-GPU_LIST=${GPU_LIST:-"0,1,2,3,4,5"}  # Comma-separated GPU IDs to use (all 6 GPUs)
+GPU_LIST=${GPU_LIST:-"0,1,2,3"}  # Comma-separated GPU IDs to use (4 GPUs)
 IFS=',' read -ra GPU_ARRAY <<< "$GPU_LIST"
 NUM_GPUS=${#GPU_ARRAY[@]}
 
@@ -185,58 +185,63 @@ for MAX_SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
             ${REMOVE_NEWLINE_TAB}
     done
 
-    # NanoVLLM: parallel execution (1 task per GPU, round-robin)
+    # NanoVLLM: parallel execution with dynamic GPU scheduling
     if [ "$MODEL_FRAMEWORK" == "nanovllm" ]; then
-        echo "NanoVLLM detected: using parallel execution with ${NUM_GPUS} GPUs (${GPU_LIST})"
+        echo "NanoVLLM detected: using dynamic scheduling with ${NUM_GPUS} GPUs (${GPU_LIST})"
         start_time=$(date +%s)
 
         TASK_INDEX=0
         PIDS=()
 
-        for TASK in "${TASKS[@]}"; do
-            GPU_IDX=$((TASK_INDEX % NUM_GPUS))
-            GPU_ID=${GPU_ARRAY[$GPU_IDX]}
-            echo "  Task ${TASK} -> GPU ${GPU_ID}"
+        # Function to clean up completed PIDs
+        cleanup_pids() {
+            local new_pids=()
+            for pid in "${PIDS[@]}"; do
+                if kill -0 $pid 2>/dev/null; then
+                    new_pids+=($pid)
+                fi
+            done
+            PIDS=("${new_pids[@]}")
+        }
 
-            CUDA_VISIBLE_DEVICES=${GPU_ID} python pred/call_api.py \
-                --data_dir ${DATA_DIR} \
-                --save_dir ${PRED_DIR} \
-                --benchmark ${BENCHMARK} \
-                --task ${TASK} \
-                --server_type ${MODEL_FRAMEWORK} \
-                --model_name_or_path ${MODEL_PATH} \
-                --temperature ${TEMPERATURE} \
-                --top_k ${TOP_K} \
-                --top_p ${TOP_P} \
-                --batch_size ${BATCH_SIZE} \
-                ${STOP_WORDS} \
-                ${METRIC} \
-                ${THRESHOLD} \
-                ${STRIDE} \
-                ${AVGPOOL_TOPK} \
-                ${AVGPOOL_TOPP} \
-                ${PRINT_DETAIL} &
+        # Main loop: dynamically schedule tasks as GPUs become available
+        while [ $TASK_INDEX -lt ${#TASKS[@]} ] || [ ${#PIDS[@]} -gt 0 ]; do
+            # Launch new tasks if slots available
+            while [ $TASK_INDEX -lt ${#TASKS[@]} ] && [ ${#PIDS[@]} -lt $NUM_GPUS ]; do
+                TASK=${TASKS[$TASK_INDEX]}
+                GPU_IDX=$((TASK_INDEX % NUM_GPUS))
+                GPU_ID=${GPU_ARRAY[$GPU_IDX]}
+                echo "  [${TASK_INDEX}/${#TASKS[@]}] Task ${TASK} -> GPU ${GPU_ID} (active: ${#PIDS[@]})"
 
-            PIDS+=($!)
-            TASK_INDEX=$((TASK_INDEX + 1))
+                CUDA_VISIBLE_DEVICES=${GPU_ID} python pred/call_api.py \
+                    --data_dir ${DATA_DIR} \
+                    --save_dir ${PRED_DIR} \
+                    --benchmark ${BENCHMARK} \
+                    --task ${TASK} \
+                    --server_type ${MODEL_FRAMEWORK} \
+                    --model_name_or_path ${MODEL_PATH} \
+                    --temperature ${TEMPERATURE} \
+                    --top_k ${TOP_K} \
+                    --top_p ${TOP_P} \
+                    --batch_size ${BATCH_SIZE} \
+                    ${STOP_WORDS} \
+                    ${METRIC} \
+                    ${THRESHOLD} \
+                    ${STRIDE} \
+                    ${AVGPOOL_TOPK} \
+                    ${AVGPOOL_TOPP} \
+                    ${PRINT_DETAIL} &
 
-            # Wait when all GPUs are occupied
-            if [ $((TASK_INDEX % NUM_GPUS)) -eq 0 ]; then
-                echo "  Waiting for batch of ${NUM_GPUS} tasks to complete..."
-                for PID in "${PIDS[@]}"; do
-                    wait $PID
-                done
-                PIDS=()
+                PIDS+=($!)
+                TASK_INDEX=$((TASK_INDEX + 1))
+            done
+
+            # Wait for at least one task to complete, then cleanup
+            if [ ${#PIDS[@]} -gt 0 ]; then
+                wait -n 2>/dev/null || true
+                cleanup_pids
             fi
         done
-
-        # Wait for remaining tasks
-        if [ ${#PIDS[@]} -gt 0 ]; then
-            echo "  Waiting for remaining ${#PIDS[@]} tasks to complete..."
-            for PID in "${PIDS[@]}"; do
-                wait $PID
-            done
-        fi
 
         end_time=$(date +%s)
         time_diff=$((end_time - start_time))
