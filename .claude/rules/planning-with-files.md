@@ -1,5 +1,37 @@
 # Planning with Files Rule
 
+## Git 管理政策
+
+**重要**：Planning 文件已从 Git 管理中排除，不会被提交。
+
+### 已配置的 .gitignore 规则
+
+```gitignore
+# Planning-with-files temporary files
+task_plan.md
+findings.md
+progress.md
+task_plan_*.md
+findings_*.md
+progress_*.md
+```
+
+### 为什么排除这些文件
+
+1. **临时性质**：计划文件是会话级别的临时文件，不应进入版本控制
+2. **避免冲突**：多实例并行开发时，不同任务的计划文件会产生冲突
+3. **保持仓库整洁**：这些文件只对当前任务有用，不需要历史记录
+
+### 如果不小心已经 commit 了
+
+```bash
+# 从 git 中移除（保留本地文件）
+git rm --cached task_plan.md findings.md progress.md
+git commit -m "chore: remove planning files from git tracking"
+```
+
+---
+
 ## 自动清理旧计划文件
 
 **重要**：每次开始新的复杂任务使用 planning-with-files 时，先删除旧的计划文件。
