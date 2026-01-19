@@ -142,8 +142,26 @@ class ModelRunner:
         block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.torch_dtype.itemsize
 
         # Calculate max GPU blocks based on available memory
-        max_gpu_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
-        assert max_gpu_blocks > 0
+        # In CPU offload mode with shared GPU, use actual free memory instead of total * utilization
+        if config.enable_cpu_offload and used > total * 0.5:
+            # GPU is shared with other processes, use actual free memory
+            available_memory = free * 0.9  # Leave 10% buffer
+        else:
+            # Standard calculation for dedicated GPU usage
+            available_memory = total * config.gpu_memory_utilization - used - peak + current
+
+        max_gpu_blocks = int(available_memory) // block_bytes
+
+        if max_gpu_blocks <= 0:
+            raise RuntimeError(
+                f"Insufficient GPU memory for KV cache allocation. "
+                f"Total: {total/1024**3:.2f} GB, "
+                f"Used by other processes: {used/1024**3:.2f} GB, "
+                f"Free: {free/1024**3:.2f} GB, "
+                f"Available: {available_memory/1024**3:.2f} GB, "
+                f"Required per block: {block_bytes/1024**2:.2f} MB. "
+                f"Try waiting for GPU to be available or reduce model size."
+            )
 
         # Determine final GPU blocks: user-specified or auto (max available)
         if config.num_gpu_blocks > 0:

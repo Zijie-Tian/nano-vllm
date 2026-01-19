@@ -23,7 +23,7 @@ rm -f task_plan_*.md findings_*.md progress_*.md
 
 ```bash
 # Step 1: 清理旧计划文件
-rm -f task_plan.md findings.md progress.md task_plan_*.md findings_*.md progress_*.md
+rm -f task_plan.md findings.md progress.md
 
 # Step 2: 启动 planning-with-files 技能
 # 在 Claude 中调用 /planning-with-files 或 Skill tool

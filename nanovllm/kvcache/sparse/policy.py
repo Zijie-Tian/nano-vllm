@@ -7,11 +7,16 @@ from CPU for each query chunk during chunked attention computation.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List, Optional, Any
+from typing import List, Optional, Any, TYPE_CHECKING
 import torch
 
 # Import SparsePolicyType from config to avoid circular imports
 from nanovllm.config import SparsePolicyType
+
+if TYPE_CHECKING:
+    from nanovllm.kvcache.offload_engine import OffloadEngine
+    from nanovllm.kvcache.manager import KVCacheManager
+    from nanovllm.engine.sequence import Sequence
 
 
 @dataclass
@@ -35,8 +40,8 @@ class PolicyContext:
     query: Optional[torch.Tensor]
     """
     Query tensor for current chunk.
-    Shape: [1, num_heads, head_dim] for decode, [1, seq_len, num_heads, head_dim] for prefill.
-    May be None if not available (e.g., some prefill scenarios).
+    Shape: [1, num_heads, head_dim] for decode, [seq_len, num_heads, head_dim] for prefill.
+    Available for both prefill and decode phases.
     """
 
     is_prefill: bool
@@ -107,6 +112,7 @@ class SparsePolicy(ABC):
     def select_blocks(
         self,
         available_blocks: List[int],
+        offload_engine: "OffloadEngine",
         ctx: PolicyContext,
     ) -> List[int]:
         """
@@ -120,6 +126,8 @@ class SparsePolicy(ABC):
             available_blocks: List of CPU block IDs that contain KV cache
                              from previous chunks. These are ordered by
                              their position in the sequence.
+            offload_engine: OffloadEngine for loading KV (some policies need
+                           to load KV to make selection decisions).
             ctx: PolicyContext with information about the current query
                  chunk, layer, phase (prefill/decode), etc.
 
@@ -180,6 +188,48 @@ class SparsePolicy(ABC):
 
         Called when starting a new sequence or clearing state.
         Default implementation does nothing.
+        """
+        pass
+
+    @abstractmethod
+    def compute_chunked_attention(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        layer_id: int,
+        softmax_scale: float,
+        offload_engine: "OffloadEngine",
+        kvcache_manager: "KVCacheManager",
+        current_chunk_idx: int,
+        seq: "Sequence",
+        num_tokens: int,
+    ) -> torch.Tensor:
+        """
+        Compute chunked prefill attention (complete flow).
+
+        This is the main entry point for prefill attention computation.
+        It defines the complete prefill flow:
+        1. Get historical blocks
+        2. Select blocks (call select_blocks)
+        3. Load and compute historical blocks via offload_engine
+        4. Get current chunk KV from offload_engine, compute attention
+        5. Merge all results
+
+        Args:
+            q: [seq_len, num_heads, head_dim] query for current chunk
+            k: [seq_len, num_kv_heads, head_dim] key for current chunk (in prefill buffer)
+            v: [seq_len, num_kv_heads, head_dim] value for current chunk (in prefill buffer)
+            layer_id: transformer layer index
+            softmax_scale: softmax scaling factor
+            offload_engine: OffloadEngine for loading blocks
+            kvcache_manager: KVCacheManager for block management
+            current_chunk_idx: current chunk index
+            seq: Sequence object
+            num_tokens: number of tokens in current chunk
+
+        Returns:
+            [seq_len, num_heads, head_dim] final attention output
         """
         pass
 
