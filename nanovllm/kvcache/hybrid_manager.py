@@ -231,6 +231,9 @@ class HybridKVCacheManager(KVCacheManager):
         seq.num_cached_tokens = 0
         seq.block_table.clear()
 
+        # Clear decode position tracking for this sequence
+        self.clear_decode_tracking(seq)
+
         # Reset OffloadEngine state to prevent request-to-request contamination
         # This clears all KV buffers and pending async events
         if self.offload_engine is not None:

@@ -256,6 +256,7 @@ class OffloadEngine:
         - GPU ring buffer slots (k_cache_gpu, v_cache_gpu)
         - Per-layer decode buffers (decode_k_buffer, decode_v_buffer)
         - Per-layer prefill buffers (prefill_k/v_buffer)
+        - CPU KV cache (k_cache_cpu, v_cache_cpu)
         - All pending async transfer events
         """
         # Clear GPU ring buffer slots
@@ -269,6 +270,11 @@ class OffloadEngine:
         # Clear per-layer prefill buffers
         self.prefill_k_buffer.zero_()
         self.prefill_v_buffer.zero_()
+
+        # Clear CPU cache (critical: prevents cross-request state leakage)
+        # This ensures KV cache from previous requests doesn't contaminate new requests
+        self.k_cache_cpu.zero_()
+        self.v_cache_cpu.zero_()
 
         # Clear all pending async transfer events
         self.pending_events.clear()
