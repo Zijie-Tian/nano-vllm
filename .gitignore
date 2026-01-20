@@ -232,9 +232,9 @@ tests/data/
 .serena/
 
 # Planning-with-files temporary files
-task_plan.md
-findings.md
-progress.md
+# task_plan.md
+# findings.md
+# progress.md
 task_plan_*.md
 findings_*.md
 progress_*.md
