@@ -1,12 +1,54 @@
 # RULER 32K Chunked Offload Accuracy Issue
 
-**Status**: 🟡 IMPROVED (Last Updated: 2026-01-20)
+**Status**: 🟢 ROOT CAUSE IDENTIFIED (Last Updated: 2026-01-20)
 **Branch**: `tzj/minference`
-**Severity**: MEDIUM - 4-slot config improves accuracy but issues remain
+**Severity**: MEDIUM - State leakage between consecutive requests identified
 
 ---
 
-## Problem
+## 🎯 Root Cause Confirmed
+
+**连续请求间的状态泄露 (State Leakage Between Consecutive Requests)**
+
+### 关键证据
+
+| 测试方式 | niah_single_1 通过率 | 说明 |
+|---------|---------------------|------|
+| **批量测试** (同一 LLM 实例连续处理多个请求) | ~80% | 有约 20% 错误 |
+| **单样本测试** (每个请求重新初始化 LLM) | **100%** | 完全正确 |
+
+### 单样本测试完整结果 (2026-01-20)
+
+使用 6 个 GPU 并行测试，每个样本独立执行（重新初始化 LLM）：
+
+| Task | 测试数 | 通过 | 失败 | 通过率 | 失败样本 |
+|------|--------|------|------|--------|----------|
+| niah_single_1 | 100 | 100 | 0 | **100%** | (无) |
+| niah_multikey_1 | ~96 | ~92 | ~4 | **~96%** | 少量 |
+| niah_multikey_2 | 100 | 91 | 9 | **91%** | 2, 12, 19, 50, 66, 85, 86, 89, 98 |
+| niah_multikey_3 | 100 | 91 | 9 | **91%** | 11, 18, 23, 35, 41, 47, 53, 86, 93 |
+
+### 结论
+
+1. **Chunked attention 算法本身正确** - niah_single_1 单样本测试 100% 通过
+2. **Multikey 任务的 ~9% 失败是模型能力问题** - 模型检索到错误的 key-value 对，不是 KV cache 问题
+3. **批量测试的 20% 错误率是状态泄露** - 连续请求间某些状态未正确重置
+
+### 待修复
+
+需要调查以下组件的状态重置机制：
+- [ ] KV cache 清理
+- [ ] Offload engine 状态残留
+- [ ] Ring buffer slot 状态重置
+- [ ] Decode buffer 跨请求隔离
+
+---
+
+## 历史问题记录
+
+以下是原始问题分析，保留作为参考。
+
+### Problem (Original)
 
 When running RULER benchmark with 32K context length using the chunked offload mechanism in `tzj/minference` branch, accuracy degradation is observed compared to the `xattn_stride8` baseline.
 
@@ -565,6 +607,56 @@ def _should_use_chunked_offload(self, seqs, is_prefill):
 
 ---
 
+## Multikey 任务失败分析 (单样本测试)
+
+### 失败样本特征
+
+单样本测试中 multikey 任务的失败**不是**状态泄露，而是**模型检索能力问题**。
+
+#### 错误类型
+
+| 类型 | 示例 | 说明 |
+|------|------|------|
+| **检索错误 key** | Expected `5833597`, Got `8617381` | 返回了上下文中另一个 key 的 value |
+| **UUID 检索错误** | Expected `c73ed342-...`, Got `1d28b88b-...` | 返回了错误 key 对应的 UUID |
+
+#### multikey_2 失败样本详情 (单样本测试)
+
+| Sample | Expected | Got | 分析 |
+|--------|----------|-----|------|
+| 2 | `1535573` | `8651665` | 错误 key |
+| 12 | `4641400` | `9390530` | 错误 key |
+| 19 | `8591874` | `3853628` | 错误 key |
+| 50 | `2318630` | `7780552` | 错误 key |
+| 66 | `1926587` | `9249734` | 错误 key |
+| 85 | `1253265` | `3263480` | 错误 key |
+| 86 | `7772887` | `3762547` | 错误 key |
+| 89 | `2266721` | `5873220` | 错误 key |
+| 98 | (未记录) | (未记录) | - |
+
+#### multikey_3 失败样本详情 (单样本测试)
+
+| Sample | Expected | Got | 分析 |
+|--------|----------|-----|------|
+| 11 | `c73ed342-6523-...` | `1d28b88b-b6a8-...` | 错误 key 的 UUID |
+| 18 | `87b8a762-1d1f-...` | `429a6676-5295-...` | 错误 key 的 UUID |
+| 23 | `ed344bfe-983f-...` | `aec43163-061a-...` | 错误 key 的 UUID |
+| 35 | `ac8a317b-a6bb-...` | `d2f22889-5b72-...` | 错误 key 的 UUID |
+| 41 | `7842feb5-e758-...` | `fc8e724e-418d-...` | 错误 key 的 UUID |
+| 47 | `7c0f7fd2-237e-...` | `5fb71d15-4675-...` | 错误 key 的 UUID |
+| 53 | `bccd56fa-8fba-...` | `373cc0cc-6ab7-...` | 错误 key 的 UUID |
+| 86 | `68c49603-1d17-...` | `aef58e2e-9e99-...` | 错误 key 的 UUID |
+| 93 | `74651292-5664-...` | `4546dd56-fe88-...` | 错误 key 的 UUID |
+
+### 关键发现
+
+1. **格式正确**: 失败样本的输出格式完全正确（7位数字或UUID）
+2. **合法 value**: 输出的是上下文中存在的另一个 key-value 对的 value
+3. **确定性失败**: 同一样本多次测试返回相同的错误值
+4. **模型能力边界**: 这是多 key 检索任务的模型能力上限，~91% 准确率符合预期
+
+---
+
 ## Comparison with Working Baseline
 
 ### xattn_stride8 (Working)
@@ -573,21 +665,40 @@ def _should_use_chunked_offload(self, seqs, is_prefill):
 - **Error Rate**: ~8% (expected RULER baseline)
 - **Samples**: 100 samples per task
 
-### Chunked Offload (Broken)
+### Chunked Offload - 批量测试 (Broken)
 - **Branch**: `tzj/minference`
 - **Method**: Full attention with chunked CPU offload
-- **Error Rate**: 20% (120/600)
+- **Error Rate**: 20% (120/600) - **状态泄露导致**
 - **Samples**: 100 samples per task
+
+### Chunked Offload - 单样本测试 (Working)
+- **Branch**: `tzj/minference`
+- **Method**: Full attention with chunked CPU offload, 每个请求重新初始化 LLM
+- **Error Rate**: 0% (niah_single_1), ~9% (multikey tasks)
+- **Samples**: 100 samples per task
+- **结论**: 算法正确，multikey 失败是模型能力问题
 
 ---
 
-## Next Steps
+## Next Steps (Updated)
 
-1. **Reproduce with 4K context**: Test if issue exists with shorter contexts (fewer chunks)
+### 已完成 ✅
 
-2. **Vary chunk size**: Test with chunk_size=2048, 4096 to see if larger chunks help
+1. ~~**Reproduce with 4K context**~~ - 不再需要，算法已验证正确
+2. ~~**Vary chunk size**~~ - 不再需要，问题不在 chunk 大小
+3. ~~**4-slot 配置测试**~~ - 已完成，有改善但不是根本原因
 
-3. **Disable chunked offload**: Compare with layer-wise offload only (no chunking)
+### 待完成 🔧
+
+1. **定位状态泄露组件**: 调查连续请求间哪些状态未正确重置
+   - KV cache manager 的 `reset()` 或 `clear()` 方法
+   - Offload engine 的 ring buffer slot 状态
+   - Decode buffer 的跨请求隔离
+   - Sparse policy 的内部状态
+
+2. **实现状态重置修复**: 在每个请求完成后正确清理所有状态
+
+3. **验证修复**: 使用批量测试验证修复后准确率恢复到 ~95%+
 
 4. **Add tensor checkpoints**: Log intermediate attention outputs at chunk boundaries
 
