@@ -23,6 +23,15 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 | [`docs/ruler_32k_chunked_offload_issue.md`](docs/ruler_32k_chunked_offload_issue.md) | ⚠️ OPEN ISSUE: 32K chunked offload accuracy problem (20% error rate in RULER) |
 | [`docs/chunked_attention_solutions.md`](docs/chunked_attention_solutions.md) | 🔧 SOLUTIONS: Chunked attention 准确性问题的代码分析和解决方案 |
 
+## Rules Index
+
+| Rule | Purpose |
+|------|---------|
+| [`.claude/rules/multi-gpu-debugging.md`](.claude/rules/multi-gpu-debugging.md) | **Multi-GPU debugging**: GPU allocation (1-2 for validation, rest for exploration), single-task validation policy |
+| [`.claude/rules/gpu-testing.md`](.claude/rules/gpu-testing.md) | GPU type detection, card assignment, needle test requirements |
+| [`.claude/rules/sparse-policy.md`](.claude/rules/sparse-policy.md) | SparsePolicy implementation requirements |
+| [`.claude/rules/planning-with-files.md`](.claude/rules/planning-with-files.md) | Planning file management for complex tasks |
+
 ## GPU Mutex for Multi-Instance Debugging
 
 **IMPORTANT**: When running multiple Claude instances for parallel debugging, different rules apply based on script type:
