@@ -97,13 +97,16 @@ def find_blocks_chunked(
             required_sum = total_sum * threshold
         if causal:
             mask = torch.zeros_like(input_tensor, dtype=torch.bool)
-            mask[:, :, :, 0] = 1
+            # Apply eye matrix FIRST for diagonal (causal boundary)
             mask[:, :, :, current_index : current_index + chunk_num] = (
                 torch.eye(chunk_num, device=mask.device)
                 .unsqueeze(0)
                 .unsqueeze(0)
                 .expand(1, head_num, chunk_num, chunk_num)
             )
+            # Then set K=0 (first block) AFTER eye matrix to ensure it's not overwritten
+            # This is important when current_index=0 where eye matrix would overwrite K=0
+            mask[:, :, :, 0] = 1
             other_values = input_tensor.masked_fill(
                 mask, 0
             )
