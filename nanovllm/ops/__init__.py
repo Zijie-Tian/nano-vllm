@@ -13,6 +13,7 @@ from nanovllm.ops.chunked_attention import (
 
 from nanovllm.ops.xattn import (
     xattn_estimate,
+    xattn_estimate_chunked,
     flat_group_gemm_fuse_reshape,
     softmax_fuse_block_sum,
     find_blocks_chunked,
@@ -28,6 +29,7 @@ __all__ = [
     "ChunkedPrefillState",
     # xattn
     "xattn_estimate",
+    "xattn_estimate_chunked",
     "flat_group_gemm_fuse_reshape",
     "softmax_fuse_block_sum",
     "find_blocks_chunked",
