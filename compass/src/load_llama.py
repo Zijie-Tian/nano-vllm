@@ -40,6 +40,10 @@ try:
     from compass.src.AvgPool import AvgPool_prefill
 except:
     print("AvgPool Prefill Import Fail")
+try:
+    from compass.src.Xattn_chunked import Xattention_chunked_full_prefill
+except:
+    print("Xattn_chunked Prefill Import Fail")
 from compass.src.utils import *
 
 logger = logging.get_logger(__name__)
@@ -186,11 +190,12 @@ def forward_eval(
             if self.fastprefillconfig.metric == "flex":
                 attn_output = Flexprefill_prefill(query_states.transpose(1, 2), key_states.transpose(1, 2), value_states.transpose(1, 2)).transpose(1, 2)
             elif self.fastprefillconfig.metric == "xattn":
+                num_layers = self.config.num_hidden_layers
                 if isinstance(self.fastprefillconfig.threshold, torch.Tensor):
                     threshold = self.fastprefillconfig.threshold[self.layer_idx].to(query_states.device)
-                    attn_output = Xattention_prefill(query_states, key_states, value_states, stride, norm=1, threshold=threshold, use_triton=True, layer_id=self.layer_idx)
+                    attn_output = Xattention_prefill(query_states, key_states, value_states, stride, norm=1, threshold=threshold, use_triton=True, layer_id=self.layer_idx, num_layers=num_layers)
                 else:
-                    attn_output = Xattention_prefill(query_states, key_states, value_states, stride, norm=1, threshold=self.fastprefillconfig.threshold, use_triton=True, layer_id=self.layer_idx)
+                    attn_output = Xattention_prefill(query_states, key_states, value_states, stride, norm=1, threshold=self.fastprefillconfig.threshold, use_triton=True, layer_id=self.layer_idx, num_layers=num_layers)
             elif self.fastprefillconfig.metric == "full":
                 attn_output = Full_prefill(query_states, key_states, value_states,attention_mask=attention_mask)
             elif self.fastprefillconfig.metric == "minfer":
@@ -207,6 +212,18 @@ def forward_eval(
                 top_k = self.fastprefillconfig.top_k
                 top_p = self.fastprefillconfig.top_p
                 attn_output = AvgPool_prefill(query_states, key_states, value_states, top_k=top_k, top_p=top_p)
+            elif self.fastprefillconfig.metric == "xattn_chunked":
+                # XAttention with chunked prefill simulation
+                num_layers = self.config.num_hidden_layers
+                if isinstance(self.fastprefillconfig.threshold, torch.Tensor):
+                    threshold = self.fastprefillconfig.threshold[self.layer_idx].to(query_states.device)
+                else:
+                    threshold = self.fastprefillconfig.threshold
+                attn_output = Xattention_chunked_full_prefill(
+                    query_states, key_states, value_states,
+                    stride=stride, norm=1, threshold=threshold,
+                    use_triton=True, layer_id=self.layer_idx, num_layers=num_layers
+                )
         else:
             # Decode: q_len=1, k_len > 1
             if key_states.device != query_states.device:
@@ -433,11 +450,12 @@ def forward_to_save(
             if self.fastprefillconfig.metric == "flex":
                 attn_output = Flexprefill_prefill(query_states.transpose(1, 2), key_states.transpose(1, 2), value_states.transpose(1, 2)).transpose(1, 2)
             elif self.fastprefillconfig.metric == "xattn":
+                num_layers = self.config.num_hidden_layers
                 if isinstance(self.fastprefillconfig.threshold, torch.Tensor):
                     threshold = self.fastprefillconfig.threshold[self.layer_idx].to(query_states.device)
-                    attn_output = Xattention_prefill(query_states, key_states, value_states, stride, norm=1, threshold=threshold, use_triton=True)
+                    attn_output = Xattention_prefill(query_states, key_states, value_states, stride, norm=1, threshold=threshold, use_triton=True, layer_id=self.layer_idx, num_layers=num_layers)
                 else:
-                    attn_output = Xattention_prefill(query_states, key_states, value_states, stride, norm=1, threshold=self.fastprefillconfig.threshold, use_triton=True)
+                    attn_output = Xattention_prefill(query_states, key_states, value_states, stride, norm=1, threshold=self.fastprefillconfig.threshold, use_triton=True, layer_id=self.layer_idx, num_layers=num_layers)
             elif self.fastprefillconfig.metric == "full":
                 attn_output = Full_prefill(query_states, key_states, value_states,attention_mask=attention_mask)
             elif self.fastprefillconfig.metric == "minfer":

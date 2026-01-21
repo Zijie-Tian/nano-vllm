@@ -1,6 +1,8 @@
 from compass.src.utils import *
 import torch
 import math
+import sys
+import os
 import torch.nn.functional as F
 from compass.src.kernels import (
     flat_group_gemm,
@@ -8,6 +10,26 @@ from compass.src.kernels import (
     flat_group_gemm_fuse_reshape,
 )
 from block_sparse_attn import block_sparse_attn_func
+
+# Module-level density tracker for collecting per-layer density across all layers
+_density_tracker = {}
+
+# Module-level KV save buffer for debugging
+# Enable via environment variable: XATTN_SAVE_KV=1
+_kv_save_enabled = os.environ.get("XATTN_SAVE_KV", "0") == "1"
+_kv_save_buffer = {
+    "min_density": float("inf"),
+    "min_layer": -1,
+    "query": None,
+    "key": None,
+    "value": None,
+    "threshold": None,
+    "stride": None,
+}
+_kv_saved_seqlens = set()  # Track saved seq_lens to save each length once
+
+if _kv_save_enabled:
+    print("[XAttn] KV save enabled via XATTN_SAVE_KV=1", file=sys.stderr, flush=True)
 
 
 def xattn_estimate(
@@ -316,9 +338,22 @@ def Xattention_prefill(
     keep_sink=False,
     keep_recent=False,
     layer_id=None,
+    num_layers=32,
 ):
+    global _kv_save_enabled, _kv_save_buffer, _kv_saved_seqlens
+
     batch_size, num_heads, k_len, head_dim = key_states.shape
     _, _, q_len, _ = query_states.shape
+
+    # Save original QKV to CPU before any processing (will decide later if we need them)
+    if _kv_save_enabled and k_len not in _kv_saved_seqlens:
+        _temp_qkv = {
+            "query": query_states.detach().cpu().clone(),
+            "key": key_states.detach().cpu().clone(),
+            "value": value_states.detach().cpu().clone(),
+        }
+    else:
+        _temp_qkv = None
 
     q_block_num = (q_len + block_size - 1) // block_size
     k_block_num = (k_len + block_size - 1) // block_size
@@ -399,14 +434,62 @@ def Xattention_prefill(
 
     del query_states
 
-    # Calculate and print per-layer density
+    # Calculate density for this layer
     # Causal mask: only lower triangular blocks are valid
     # Total valid blocks = sum(1..k_block_num) * num_heads = k_block_num*(k_block_num+1)/2 * num_heads
     total_causal_blocks = (k_block_num * (k_block_num + 1) / 2) * num_heads
     selected_blocks = approx_simple_mask[:, :, :q_block_num, :k_block_num].sum().item()
     density = selected_blocks / total_causal_blocks
-    layer_str = f"Layer {layer_id:2d}" if layer_id is not None else "Layer ??"
-    print(f"[XAttn] {layer_str} | density: {density:.2%} | selected: {int(selected_blocks)}/{int(total_causal_blocks)} blocks")
+
+    # Track density across layers and print minimum at the last layer
+    global _density_tracker
+    if layer_id is not None:
+        if layer_id == 0:
+            _density_tracker.clear()
+            # Reset save buffer at the start of each forward pass
+            if _kv_save_enabled and k_len not in _kv_saved_seqlens:
+                _kv_save_buffer["min_density"] = float("inf")
+                _kv_save_buffer["min_layer"] = -1
+
+        _density_tracker[layer_id] = density
+
+        # Save QKV if this layer has the smallest density so far
+        if _kv_save_enabled and k_len not in _kv_saved_seqlens and _temp_qkv is not None:
+            if density < _kv_save_buffer["min_density"]:
+                _kv_save_buffer["min_density"] = density
+                _kv_save_buffer["min_layer"] = layer_id
+                _kv_save_buffer["query"] = _temp_qkv["query"]
+                _kv_save_buffer["key"] = _temp_qkv["key"]
+                _kv_save_buffer["value"] = _temp_qkv["value"]
+                _kv_save_buffer["threshold"] = threshold
+                _kv_save_buffer["stride"] = stride
+
+        if layer_id == num_layers - 1:
+            min_density = min(_density_tracker.values())
+            min_layer = min(_density_tracker, key=_density_tracker.get)
+            print(f"[XAttn] Min density: {min_density:.2%} (Layer {min_layer})", file=sys.stderr, flush=True)
+
+            # Save the min density layer's QKV if enabled
+            if _kv_save_enabled and k_len not in _kv_saved_seqlens and _kv_save_buffer["query"] is not None:
+                save_path = "/home/zijie/Code/COMPASS/results/kvcache"
+                os.makedirs(save_path, exist_ok=True)
+                seq_len = _kv_save_buffer["query"].shape[2]
+                save_file = os.path.join(save_path, f"qkv_{seq_len}.pt")
+                torch.save({
+                    "query": _kv_save_buffer["query"],
+                    "key": _kv_save_buffer["key"],
+                    "value": _kv_save_buffer["value"],
+                    "layer_id": _kv_save_buffer["min_layer"],
+                    "density": _kv_save_buffer["min_density"],
+                    "threshold": _kv_save_buffer["threshold"],
+                    "stride": _kv_save_buffer["stride"],
+                }, save_file)
+                print(f"[XAttn] Saved min density layer {_kv_save_buffer['min_layer']} QKV to {save_file}", file=sys.stderr, flush=True)
+                _kv_saved_seqlens.add(k_len)
+                # Clear buffer to free memory
+                _kv_save_buffer["query"] = None
+                _kv_save_buffer["key"] = None
+                _kv_save_buffer["value"] = None
 
     del approx_simple_mask, attn_sums
     return attn_output

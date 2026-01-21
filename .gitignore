@@ -163,3 +163,4 @@ site/
 dmypy.json
 .pyre/
 .claude-flow/daemon.pid
+.claude-flow/daemon.pid
