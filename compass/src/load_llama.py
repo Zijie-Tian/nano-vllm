@@ -188,9 +188,9 @@ def forward_eval(
             elif self.fastprefillconfig.metric == "xattn":
                 if isinstance(self.fastprefillconfig.threshold, torch.Tensor):
                     threshold = self.fastprefillconfig.threshold[self.layer_idx].to(query_states.device)
-                    attn_output = Xattention_prefill(query_states, key_states, value_states, stride, norm=1, threshold=threshold, use_triton=True)
+                    attn_output = Xattention_prefill(query_states, key_states, value_states, stride, norm=1, threshold=threshold, use_triton=True, layer_id=self.layer_idx)
                 else:
-                    attn_output = Xattention_prefill(query_states, key_states, value_states, stride, norm=1, threshold=self.fastprefillconfig.threshold, use_triton=True)
+                    attn_output = Xattention_prefill(query_states, key_states, value_states, stride, norm=1, threshold=self.fastprefillconfig.threshold, use_triton=True, layer_id=self.layer_idx)
             elif self.fastprefillconfig.metric == "full":
                 attn_output = Full_prefill(query_states, key_states, value_states,attention_mask=attention_mask)
             elif self.fastprefillconfig.metric == "minfer":

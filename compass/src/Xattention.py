@@ -315,6 +315,7 @@ def Xattention_prefill(
     chunk_size=None,
     keep_sink=False,
     keep_recent=False,
+    layer_id=None,
 ):
     batch_size, num_heads, k_len, head_dim = key_states.shape
     _, _, q_len, _ = query_states.shape
@@ -397,8 +398,15 @@ def Xattention_prefill(
     ################################
 
     del query_states
-    num_to_compute = (k_block_num + 1) * k_block_num / 2 * num_heads
-    
-    # print(f"approximated prefilling Computation: {approx_simple_mask.sum() / num_to_compute}")
+
+    # Calculate and print per-layer density
+    # Causal mask: only lower triangular blocks are valid
+    # Total valid blocks = sum(1..k_block_num) * num_heads = k_block_num*(k_block_num+1)/2 * num_heads
+    total_causal_blocks = (k_block_num * (k_block_num + 1) / 2) * num_heads
+    selected_blocks = approx_simple_mask[:, :, :q_block_num, :k_block_num].sum().item()
+    density = selected_blocks / total_causal_blocks
+    layer_str = f"Layer {layer_id:2d}" if layer_id is not None else "Layer ??"
+    print(f"[XAttn] {layer_str} | density: {density:.2%} | selected: {int(selected_blocks)}/{int(total_causal_blocks)} blocks")
+
     del approx_simple_mask, attn_sums
     return attn_output
