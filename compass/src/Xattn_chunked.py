@@ -39,6 +39,7 @@ def xattn_estimate_chunked(
     use_triton: bool = True,
     causal: bool = True,
     kdb: int = 1,
+    chunk_size: int = 16384,     # Alignment chunk size (same as standard version)
 ) -> torch.Tensor:
     """
     Estimate attention pattern for a single Q chunk in chunked prefill.
@@ -56,6 +57,7 @@ def xattn_estimate_chunked(
         use_triton: Whether to use Triton kernels
         causal: Whether to apply causal masking
         kdb: Key downsampling factor
+        chunk_size: Alignment chunk size for Triton kernels (default 16384)
 
     Returns:
         attn_sums: Aggregated attention scores per block
@@ -64,26 +66,27 @@ def xattn_estimate_chunked(
     batch_size, num_heads, q_len, head_dim = query_states.shape
     _, _, k_len, _ = key_states.shape
 
+    # Store original lengths for valid region tracking
+    original_q_len = q_len
+    original_k_len = k_len
+
     # Validate inputs
     assert k_len >= q_len, f"K length ({k_len}) must be >= Q length ({q_len})"
     assert q_start_pos + q_len <= k_len, f"Q end position ({q_start_pos + q_len}) exceeds K length ({k_len})"
 
-    # Calculate block counts
+    # Chunked prefill expects external chunking - warn if Q is too large
+    if q_len > chunk_size:
+        import warnings
+        warnings.warn(
+            f"Q length ({q_len}) exceeds chunk_size ({chunk_size}). "
+            f"For chunked prefill, split Q externally and call this function for each chunk.",
+            UserWarning
+        )
+
+    # Calculate block counts (based on original lengths)
     q_block_num = (q_len + block_size - 1) // block_size
     k_block_num = (k_len + block_size - 1) // block_size
     q_start_block = q_start_pos // block_size
-
-    # Pad Q and K to block_size boundaries
-    q_pad = (q_block_num * block_size) - q_len
-    k_pad = (k_block_num * block_size) - k_len
-
-    if q_pad > 0:
-        query_states = F.pad(query_states, (0, 0, 0, q_pad), value=0)
-    if k_pad > 0:
-        key_states = F.pad(key_states, (0, 0, 0, k_pad), value=0)
-
-    padded_q_len = q_block_num * block_size
-    padded_k_len = k_block_num * block_size
 
     # Check Triton compatibility
     if use_triton:
@@ -93,35 +96,70 @@ def xattn_estimate_chunked(
             print(f"Triton requires SM 80+, got SM {props.major}{props.minor}, falling back to PyTorch",
                   file=sys.stderr, flush=True)
 
+    # Pad Q and K based on whether we use Triton or not
+    if use_triton:
+        # For Triton: pad to chunk_size alignment (same as standard version)
+        # This ensures kernel alignment requirements are met
+        padded_q_len = ((q_len + chunk_size - 1) // chunk_size) * chunk_size
+        padded_k_len = ((k_len + chunk_size - 1) // chunk_size) * chunk_size
+    else:
+        # For PyTorch fallback: pad to block_size alignment is sufficient
+        padded_q_len = q_block_num * block_size
+        padded_k_len = k_block_num * block_size
+
+    q_pad = padded_q_len - q_len
+    k_pad = padded_k_len - k_len
+
+    if q_pad > 0:
+        query_states = F.pad(query_states, (0, 0, 0, q_pad), value=0)
+    if k_pad > 0:
+        key_states = F.pad(key_states, (0, 0, 0, k_pad), value=0)
+
     # Reshape dimensions
     reshaped_block_size = block_size // stride
     reshaped_q_len = padded_q_len // stride
     reshaped_k_len = padded_k_len // stride
 
+    # Calculate valid lengths in reshaped space (for masking padding)
+    valid_q_reshaped = (original_q_len + stride - 1) // stride  # Ceiling division
+    valid_k_reshaped = (original_k_len + stride - 1) // stride
+
     if use_triton:
         if kdb != 1:
             raise ValueError("use_triton and kdb cannot be used together")
+
+        # Compute chunk boundaries in reshaped space
+        chunk_start = q_start_block * reshaped_block_size
+        chunk_end = chunk_start + reshaped_q_len  # Padded end for computation
+        real_q_len = chunk_start + valid_q_reshaped  # Valid end for masking padding
 
         # Use Triton kernel for efficient computation
         attn_weights = flat_group_gemm_fuse_reshape(
             query_states,
             key_states,
             stride,
-            q_start_block * reshaped_block_size,  # q_start in reshaped space
-            q_start_block * reshaped_block_size + reshaped_q_len,  # q_end in reshaped space
+            chunk_start,  # q_start in reshaped space
+            chunk_end,    # q_end in reshaped space (padded)
             is_causal=causal,
         )
 
+        # softmax_fuse_block_sum parameters:
+        # - chunk_start/chunk_end: for causal boundary calculation
+        # - real_q_len: for masking Q padding (kernel uses: sum_mask = offs_q < real_q_len)
         attn_sum = softmax_fuse_block_sum(
             attn_weights,
             reshaped_block_size,
             min(4096, reshaped_block_size),
-            q_start_block * reshaped_block_size,
-            q_start_block * reshaped_block_size + reshaped_q_len,
-            reshaped_k_len - (k_pad // stride),
+            chunk_start,
+            chunk_end,
+            real_q_len,
             1.4426950408889634 / math.sqrt(head_dim) / stride / norm,
             is_causal=causal,
         )
+
+        # Extract only the valid block region (attn_sum is based on padded dimensions)
+        # The kernel outputs (B, H, padded_q_blocks, padded_k_blocks), we need (B, H, q_block_num, k_block_num)
+        attn_sum = attn_sum[:, :, :q_block_num, :k_block_num]
     else:
         # PyTorch fallback implementation
         # Reshape K: interleave positions and concatenate head dims

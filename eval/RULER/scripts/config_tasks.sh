@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-NUM_SAMPLES=1  # number of samples per task (set to 1 for debugging)
+NUM_SAMPLES=5  # number of samples per task
 REMOVE_NEWLINE_TAB=false
 STOP_WORDS=""
 
