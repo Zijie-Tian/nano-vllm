@@ -258,8 +258,12 @@ class Attention(nn.Module):
             raise RuntimeError("sparse_policy is required for chunked decode")
 
         # Check if policy supports decode phase
+        # If not, fallback to FullAttentionPolicy (e.g., XAttentionBSAPolicy only supports prefill)
         if not sparse_policy.supports_decode:
-            raise RuntimeError(f"{sparse_policy} does not support decode phase")
+            from nanovllm.kvcache.sparse import FullAttentionPolicy
+            sparse_policy = FullAttentionPolicy()
+            logger.debug(f"[DEBUG] {kvcache_manager.sparse_policy} doesn't support decode, "
+                         f"falling back to FullAttentionPolicy")
 
         # [DEBUG] Verify execution path
         logger.debug(f"[DEBUG] Calling sparse_policy.compute_chunked_decode, "

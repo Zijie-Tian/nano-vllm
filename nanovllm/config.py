@@ -48,7 +48,7 @@ class Config:
     # XAttention BSA specific parameters
     sparse_block_size: int = 128  # Block size for BSA (tokens per block)
     sparse_samples_per_chunk: int = 128  # Samples per chunk for estimation
-    sparse_threshold: float = 0.9  # Cumulative attention threshold (0-1)
+    sparse_threshold: float = 0.95  # Cumulative attention threshold (tau in XAttention)
     sparse_use_triton: bool = True  # Use Triton kernels for estimation
     sparse_stride: int = 8  # Stride for Q/K downsampling
 
