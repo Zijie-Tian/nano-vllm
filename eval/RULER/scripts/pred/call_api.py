@@ -218,12 +218,13 @@ def get_llm(tokens_to_generate):
         from model_wrappers import NanoVLLMModel
 
         # ========== XAttention Integration: Metric to Sparse Policy mapping ==========
+        # Note: nanovllm uses XATTN_BSA (not XATTN) for XAttention Block Sparse Attention
         metric_to_policy = {
             'full': 'FULL',
-            'xattn': 'XATTN',
-            'compass': 'XATTN',  # COMPASS uses XAttention
+            'xattn': 'XATTN_BSA',      # XAttention Block Sparse Attention
+            'compass': 'XATTN_BSA',    # COMPASS uses XAttention BSA
             'minfer': 'MINFERENCE',
-            'avgpool': 'FULL',  # No direct mapping, use FULL
+            'avgpool': 'FULL',         # No direct mapping, use FULL
         }
 
         sparse_policy = metric_to_policy.get(args.metric, 'FULL')
@@ -234,14 +235,14 @@ def get_llm(tokens_to_generate):
             temperature=args.temperature,
             stop=args.stop_words,
             max_new_tokens=tokens_to_generate,
-            # XAttention: sparse_policy parameter
+            # XAttention BSA: sparse_policy parameter
             sparse_policy=sparse_policy,
-            # XAttention: configuration parameters (can be overridden via env vars)
-            xattn_stride=int(os.environ.get('NANOVLLM_XATTN_STRIDE',
+            # XAttention BSA: configuration parameters (use nanovllm config field names)
+            sparse_stride=int(os.environ.get('NANOVLLM_SPARSE_STRIDE',
                 int(args.stride) if hasattr(args, 'stride') and args.stride else 8)),
-            xattn_threshold=float(os.environ.get('NANOVLLM_XATTN_THRESHOLD',
+            sparse_threshold=float(os.environ.get('NANOVLLM_SPARSE_THRESHOLD',
                 float(args.threshold) if hasattr(args, 'threshold') and args.threshold else 0.9)),
-            xattn_chunk_size=int(os.environ.get('NANOVLLM_XATTN_CHUNK_SIZE', 16384)),
+            sparse_chunk_size=int(os.environ.get('NANOVLLM_SPARSE_CHUNK_SIZE', 16384)),
             # NanoVLLM specific settings (can be overridden via env vars)
             max_model_len=int(os.environ.get('NANOVLLM_MAX_MODEL_LEN', 128 * 1024)),
             enable_cpu_offload=os.environ.get('NANOVLLM_CPU_OFFLOAD', 'true').lower() == 'true',

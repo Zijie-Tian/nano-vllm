@@ -146,14 +146,11 @@ class NanoVLLMModel:
         sparse_policy_name = generation_kwargs.pop('sparse_policy', 'FULL')
         sparse_policy = getattr(SparsePolicyType, sparse_policy_name, SparsePolicyType.FULL)
 
-        # Extract XAttention-specific parameters
-        xattn_stride = generation_kwargs.pop('xattn_stride', 8)
-        xattn_threshold = generation_kwargs.pop('xattn_threshold', 0.9)
-        xattn_chunk_size = generation_kwargs.pop('xattn_chunk_size', 16384)
-        xattn_use_triton = generation_kwargs.pop('xattn_use_triton', True)
-        xattn_keep_sink = generation_kwargs.pop('xattn_keep_sink', False)
-        xattn_keep_recent = generation_kwargs.pop('xattn_keep_recent', False)
-        xattn_norm = generation_kwargs.pop('xattn_norm', 1.0)
+        # Extract XAttention BSA parameters (use nanovllm config field names)
+        sparse_stride = generation_kwargs.pop('sparse_stride', 8)
+        sparse_threshold = generation_kwargs.pop('sparse_threshold', 0.9)
+        sparse_chunk_size = generation_kwargs.pop('sparse_chunk_size', 16384)
+        sparse_use_triton = generation_kwargs.pop('sparse_use_triton', True)
 
         # Extract nano-vllm specific configuration
         max_model_len = generation_kwargs.pop('max_model_len', 128 * 1024)
@@ -171,14 +168,11 @@ class NanoVLLMModel:
             "gpu_memory_utilization": gpu_memory_utilization,
             "enforce_eager": enforce_eager,
             "sparse_policy": sparse_policy,  # Use passed sparse_policy instead of hardcoded FULL
-            # XAttention parameters
-            "xattn_stride": xattn_stride,
-            "xattn_threshold": xattn_threshold,
-            "xattn_chunk_size": xattn_chunk_size,
-            "xattn_use_triton": xattn_use_triton,
-            "xattn_keep_sink": xattn_keep_sink,
-            "xattn_keep_recent": xattn_keep_recent,
-            "xattn_norm": xattn_norm,
+            # XAttention BSA parameters (use nanovllm config field names)
+            "sparse_stride": sparse_stride,
+            "sparse_threshold": sparse_threshold,
+            "sparse_chunk_size": sparse_chunk_size,
+            "sparse_use_triton": sparse_use_triton,
         }
 
         if enable_cpu_offload:
