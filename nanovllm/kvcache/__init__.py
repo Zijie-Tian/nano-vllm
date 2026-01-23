@@ -79,6 +79,7 @@ def create_kvcache_manager(config: "Config") -> KVCacheManager:
             'threshold': getattr(config, 'sparse_threshold', 0.9),
             'use_triton': getattr(config, 'sparse_use_triton', True),
             'stride': getattr(config, 'sparse_stride', 8),
+            'chunk_size': getattr(config, 'sparse_chunk_size', 16384),
         }
 
     sparse_policy = create_sparse_policy(sparse_policy_type, **policy_kwargs)

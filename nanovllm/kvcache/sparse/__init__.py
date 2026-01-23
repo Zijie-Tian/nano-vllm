@@ -61,6 +61,9 @@ def create_sparse_policy(policy_type: SparsePolicyType, **kwargs) -> SparsePolic
             block_size=kwargs.get("block_size", 128),
             samples_per_chunk=kwargs.get("samples_per_chunk", 128),
             threshold=kwargs.get("threshold", 0.9),
+            stride=kwargs.get("stride", 8),
+            chunk_size=kwargs.get("chunk_size", 16384),
+            use_triton=kwargs.get("use_triton", True),
         )
 
     else:

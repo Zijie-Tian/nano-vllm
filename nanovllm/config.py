@@ -51,6 +51,7 @@ class Config:
     sparse_threshold: float = 0.95  # Cumulative attention threshold (tau in XAttention)
     sparse_use_triton: bool = True  # Use Triton kernels for estimation
     sparse_stride: int = 8  # Stride for Q/K downsampling
+    sparse_chunk_size: int = 16384  # Triton kernel chunk size for estimation
 
     def __post_init__(self):
         assert os.path.isdir(self.model)
