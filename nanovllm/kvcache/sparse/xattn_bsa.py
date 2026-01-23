@@ -235,8 +235,8 @@ class XAttentionBSAPolicy(SparsePolicy):
             return available_blocks
 
         attn_scores = torch.cat(attn_scores_list, dim=-1)
-        # Store in sparse_metadata for later use in compute_chunked_prefill
-        self.sparse_metadata[layer_id] = attn_scores
+        # Free intermediate list immediately
+        del attn_scores_list
 
         # Step 2: Apply softmax_fuse_block_sum to get block-level attention
         # block_size = reshaped_block_size so each CPU block maps to exactly 1 output block
@@ -319,6 +319,9 @@ class XAttentionBSAPolicy(SparsePolicy):
             chunk_density = len(selected_block_ids) / len(available_blocks)
             logger.debug(f"[XAttn] chunk={ctx.query_chunk_idx}, available={len(available_blocks)}, "
                         f"selected={len(selected_block_ids)}, chunk_density={chunk_density:.1%}")
+
+        # Free intermediate tensors to prevent memory leak
+        del attn_scores, block_sums, mask, mask_per_kv_head, vote_count, vote_ratio, block_selected
 
         return selected_block_ids
 
