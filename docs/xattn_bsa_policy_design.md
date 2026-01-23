@@ -286,6 +286,141 @@ CUDA_VISIBLE_DEVICES=0 python tests/test_ruler.py \
 
 ---
 
+## 性能基准测试
+
+### 128K 上下文对比 (Llama-3.1-8B, A100 80GB)
+
+| Policy | Density | 时间 | 内存峰值 | 准确率 |
+|--------|---------|------|---------|--------|
+| **Full** | 100% | 120.9s | 16.4GB (稳定) | 100% |
+| **XAttn BSA** | ~52% | 152.3s | 19.8GB | 100% |
+
+### Density 变化趋势
+
+| Chunk | Full | XAttn BSA |
+|-------|------|-----------|
+| 10 | 100% | 90% |
+| 30 | 100% | 73% |
+| 60 | 100% | 50% |
+| 100 | 100% | 50% |
+| 126 | 100% | 52% |
+
+**观察**：XAttn BSA 的 density 随 chunks 增加而下降，最终稳定在 ~50%。
+
+### 性能分析
+
+**当前问题**：XAttn BSA 虽然 density 只有 ~52%，但时间反而比 Full 更长（152s vs 121s）。
+
+**原因**：`select_blocks` 需要加载所有 K blocks 来估计 attention scores，导致每个 block 被加载两次：
+1. 估计阶段：加载 K 计算 attention scores
+2. 计算阶段：加载选中的 K/V 进行实际计算
+
+**优化方向**：
+1. 跨层共享估计结果（layer 0 估计，其他层复用）
+2. 采样估计（只用部分 K blocks 估计）
+3. 缓存估计结果避免重复计算
+
+---
+
+## 内存管理
+
+### 内存泄漏问题 (已修复)
+
+**问题**：128K prefill 时 GPU 内存从 16GB 增长到 80GB。
+
+**根因**：
+```python
+# 问题代码：累积存储但从未使用
+self.sparse_metadata[layer_id] = attn_scores
+```
+
+每个 chunk 的每个 layer 都存储 `attn_scores`，导致内存持续增长。
+
+**修复方法**：
+```python
+# 1. 删除无用的 sparse_metadata 存储
+
+# 2. 立即释放中间变量
+del attn_scores_list
+del attn_scores, block_sums, mask, mask_per_kv_head, vote_count, vote_ratio, block_selected
+```
+
+**修复效果**：
+
+| 版本 | 内存增长 | 峰值 |
+|------|---------|------|
+| 修复前 | +64GB | 80GB |
+| **修复后** | +4GB | 19.8GB |
+
+### 内存监控
+
+使用 `gpu-monitor` agent 监控内存：
+
+```bash
+# 启动监控
+# 在 Claude Code 中使用 Task tool 启动 gpu-monitor agent
+
+# 或手动监控
+watch -n 1 'nvidia-smi --query-gpu=memory.used --format=csv,noheader -i 0'
+```
+
+---
+
+## Density 统计 API
+
+### 启用统计
+
+```python
+# 统计自动在 select_blocks 中更新（仅 layer 0）
+# 使用 logger.debug 输出每 chunk 的 density
+```
+
+### 获取统计
+
+```python
+policy = XAttentionBSAPolicy(threshold=0.95)
+
+# 运行 prefill 后...
+
+# 获取统计
+stats = policy.get_density_stats()
+# {
+#     "total_available_blocks": 8001,
+#     "total_selected_blocks": 4160,
+#     "num_chunks": 126,
+#     "overall_density": 0.52
+# }
+
+# 打印统计
+policy.print_density_stats()
+
+# 重置统计
+policy.reset_stats()
+```
+
+### 启用 DEBUG 日志
+
+```python
+# 在 test_ruler.py 中
+os.environ["NANOVLLM_LOG_LEVEL"] = "DEBUG"
+
+# 输出示例：
+# [XAttn] chunk=30, available=30, selected=22, chunk_density=73.3%
+```
+
+---
+
+## 已知问题
+
+| 问题 | 状态 | 说明 |
+|------|------|------|
+| 估计开销过大 | 🟡 待优化 | select_blocks 需要加载所有 K blocks |
+| 时间比 Full 更长 | 🟡 待优化 | 128K 场景 152s vs 121s |
+| 小幅内存增长 | 🟢 可接受 | ~4GB，可能来自 Triton 缓存 |
+| Decode 不支持 | ✅ 设计如此 | 使用 FullAttentionPolicy |
+
+---
+
 ## 相关文档
 
 - [`docs/xattention_algorithm_guide.md`](xattention_algorithm_guide.md): XAttention 算法详解
