@@ -34,6 +34,7 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 | [`.claude/rules/gpu-testing.md`](.claude/rules/gpu-testing.md) | GPU type detection, card assignment, needle test requirements |
 | [`.claude/rules/sparse-policy.md`](.claude/rules/sparse-policy.md) | SparsePolicy implementation requirements |
 | [`.claude/rules/planning-with-files.md`](.claude/rules/planning-with-files.md) | Planning file management for complex tasks |
+| [`.claude/rules/gpu-monitor.md`](.claude/rules/gpu-monitor.md) | **GPU memory monitoring**: 必须使用 gpu-monitor agent，禁止手动 nvidia-smi 循环 |
 
 ## GPU Mutex for Multi-Instance Debugging
 
