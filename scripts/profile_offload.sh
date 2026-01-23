@@ -1,35 +1,93 @@
 #!/bin/bash
 
-# Profile test_attention_offload.py using NVIDIA Nsight Systems
+# Profile test_ruler.py using NVIDIA Nsight Systems
 #
 # Usage:
-#   bash scripts/profile_offload.sh
+#   bash scripts/profile_offload.sh [options]
+#
+# Options:
+#   --dataset DATASET    Task name (default: niah_single_1)
+#   --sample INDEX       Sample index (default: 0)
+#   --gpu GPU_ID         GPU to use (default: 0)
+#   --no-offload         Disable CPU offload
 #
 # Output:
-#   results/nsys/attention_offload_<timestamp>.nsys-rep
+#   results/nsys/ruler_<dataset>_sample<index>_<timestamp>.nsys-rep
 #
-# View results:
-#   nsight-sys results/nsys/attention_offload_<timestamp>.nsys-rep
+# Examples:
+#   bash scripts/profile_offload.sh
+#   bash scripts/profile_offload.sh --dataset niah_single_1 --sample 5
+#   bash scripts/profile_offload.sh --gpu 1 --no-offload
 
 set -e
 
-# Configuration
+# Default configuration
+DATASET="niah_single_1"
+SAMPLE_INDEX="0"
+GPU_ID="0"
+ENABLE_OFFLOAD="--enable-offload"
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --dataset)
+            DATASET="$2"
+            shift 2
+            ;;
+        --sample)
+            SAMPLE_INDEX="$2"
+            shift 2
+            ;;
+        --gpu)
+            GPU_ID="$2"
+            shift 2
+            ;;
+        --no-offload)
+            ENABLE_OFFLOAD=""
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: $0 [options]"
+            echo ""
+            echo "Options:"
+            echo "  --dataset DATASET    Task name (default: niah_single_1)"
+            echo "  --sample INDEX       Sample index (default: 0)"
+            echo "  --gpu GPU_ID         GPU to use (default: 0)"
+            echo "  --no-offload         Disable CPU offload"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+# Path configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 OUTPUT_DIR="$PROJECT_ROOT/results/nsys"
-TEST_SCRIPT="$PROJECT_ROOT/tests/test_attention_offload.py"
+TEST_SCRIPT="$PROJECT_ROOT/tests/test_ruler.py"
 
 # Create output directory if needed
 mkdir -p "$OUTPUT_DIR"
 
 # Generate timestamp for unique filename
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-OUTPUT_FILE="$OUTPUT_DIR/attention_offload_$TIMESTAMP"
+OFFLOAD_SUFFIX=""
+if [ -n "$ENABLE_OFFLOAD" ]; then
+    OFFLOAD_SUFFIX="_offload"
+fi
+OUTPUT_FILE="$OUTPUT_DIR/ruler_${DATASET}_sample${SAMPLE_INDEX}${OFFLOAD_SUFFIX}_${TIMESTAMP}"
 
 echo "============================================================"
 echo "NVIDIA Nsight Systems Profiling"
 echo "============================================================"
 echo "Test script: $TEST_SCRIPT"
+echo "Dataset:     $DATASET"
+echo "Sample:      $SAMPLE_INDEX"
+echo "GPU:         $GPU_ID"
+echo "Offload:     ${ENABLE_OFFLOAD:-disabled}"
 echo "Output file: $OUTPUT_FILE.nsys-rep"
 echo ""
 
@@ -43,13 +101,16 @@ echo ""
 echo "Running nsys profile..."
 echo ""
 
+CUDA_VISIBLE_DEVICES=$GPU_ID PYTHONPATH="$PROJECT_ROOT:$PYTHONPATH" \
 nsys profile \
-    --trace=cuda,nvtx,osrt,cudnn,cublas \
-    --cuda-memory-usage=true \
-    --stats=true \
+    --trace=cuda,nvtx \
     --force-overwrite=true \
     --output="$OUTPUT_FILE" \
-    python "$TEST_SCRIPT"
+    python "$TEST_SCRIPT" \
+        --datasets "$DATASET" \
+        --sample-indices "$SAMPLE_INDEX" \
+        $ENABLE_OFFLOAD \
+        --quiet
 
 echo ""
 echo "============================================================"
