@@ -108,6 +108,34 @@ class SparsePolicy(ABC):
         """
         pass
 
+    def alloc_policy_metadata(
+        self,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        max_seq_len: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> None:
+        """
+        Pre-allocate GPU buffers for policy computation.
+
+        Called by the framework after KV cache allocation, but ONLY for GPU-only
+        mode (not CPU offload mode). Override this to pre-allocate buffers that
+        would otherwise be dynamically allocated during forward pass.
+
+        This is separate from initialize() which is used for CPU offload metadata.
+
+        Args:
+            num_heads: Number of query heads
+            num_kv_heads: Number of KV heads (for GQA)
+            head_dim: Dimension per head
+            max_seq_len: Maximum sequence length (for buffer sizing)
+            dtype: Data type (typically float16/bfloat16)
+            device: Target device (cuda)
+        """
+        pass
+
     @abstractmethod
     def select_blocks(
         self,

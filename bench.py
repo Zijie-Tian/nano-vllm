@@ -56,6 +56,8 @@ def main():
                         help="Sparse policy: full (FullAttention), xattn (XAttention+BSA)")
     parser.add_argument("--enable-policy", action="store_true",
                         help="Enable sparse policy routing (FullAttentionPolicy by default)")
+    parser.add_argument("--gpu-util", type=float, default=0.9,
+                        help="GPU memory utilization (default: 0.9)")
     args = parser.parse_args()
 
     path = os.path.expanduser(args.model)
@@ -78,6 +80,7 @@ def main():
         max_model_len=max_len,
         max_num_batched_tokens=max_len,
         sparse_policy=sparse_policy,
+        gpu_memory_utilization=args.gpu_util,
     )
 
     # Warmup
