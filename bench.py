@@ -41,6 +41,8 @@ def bench_prefill(llm, num_seqs, input_len):
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Benchmark nanovllm GPU performance")
+    parser.add_argument("--model", type=str, default="~/models/Llama-3.1-8B-Instruct",
+                        help="Model path (default: ~/models/Llama-3.1-8B-Instruct)")
     parser.add_argument("--input-len", type=int, default=None, help="Input length in tokens")
     parser.add_argument("--output-len", type=int, default=64, help="Output length for decode benchmark (default: 64)")
     parser.add_argument("--max-len", type=int, default=32*1024, help="Max model length (default: 32K)")
@@ -48,7 +50,7 @@ def main():
     parser.add_argument("--bench-all", action="store_true", help="Run both prefill and decode benchmarks")
     args = parser.parse_args()
 
-    path = os.path.expanduser("~/models/Qwen3-4B-Instruct-2507/")
+    path = os.path.expanduser(args.model)
     max_len = args.max_len
 
     print(f"\n[nanovllm GPU] max_len={max_len}")
