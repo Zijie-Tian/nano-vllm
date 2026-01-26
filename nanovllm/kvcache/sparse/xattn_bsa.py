@@ -189,8 +189,8 @@ class XAttentionBSAPolicy(SparsePolicy):
         reshaped_block_size = block_size // self.stride  # e.g., 1024/8 = 128
 
         for cpu_block_id in available_blocks:
-            # Load K block from CPU to GPU
-            offload_engine.load_to_slot_layer(slot, layer_id, cpu_block_id)
+            # Load K block from CPU to GPU (cpu_block_id is chunk index)
+            offload_engine.load_to_slot_layer(slot, layer_id, cpu_block_id, chunk_idx=cpu_block_id)
             offload_engine.wait_slot_layer(slot)
 
             # Get KV: [1, block_size, num_kv_heads, head_dim]
@@ -382,7 +382,7 @@ class XAttentionBSAPolicy(SparsePolicy):
                 slot = load_slots[0]
                 for block_idx in range(num_blocks):
                     cpu_block_id = cpu_block_table[block_idx]
-                    offload_engine.load_to_slot_layer(slot, layer_id, cpu_block_id)
+                    offload_engine.load_to_slot_layer(slot, layer_id, cpu_block_id, chunk_idx=cpu_block_id)
                     offload_engine.wait_slot_layer(slot)
 
                     with torch.cuda.stream(compute_stream):
@@ -402,7 +402,8 @@ class XAttentionBSAPolicy(SparsePolicy):
                 num_slots = len(load_slots)
                 num_preload = min(num_slots, num_blocks)
                 for i in range(num_preload):
-                    offload_engine.load_to_slot_layer(load_slots[i], layer_id, cpu_block_table[i])
+                    cpu_block_id = cpu_block_table[i]
+                    offload_engine.load_to_slot_layer(load_slots[i], layer_id, cpu_block_id, chunk_idx=cpu_block_id)
 
                 for block_idx in range(num_blocks):
                     current_slot = load_slots[block_idx % num_slots]
@@ -428,7 +429,7 @@ class XAttentionBSAPolicy(SparsePolicy):
                     if next_block_idx < num_blocks:
                         next_slot = load_slots[next_block_idx % num_slots]
                         next_cpu_block_id = cpu_block_table[next_block_idx]
-                        offload_engine.load_to_slot_layer(next_slot, layer_id, next_cpu_block_id)
+                        offload_engine.load_to_slot_layer(next_slot, layer_id, next_cpu_block_id, chunk_idx=next_cpu_block_id)
 
         # Compute attention to current chunk (causal mask)
         with torch.cuda.stream(compute_stream):
