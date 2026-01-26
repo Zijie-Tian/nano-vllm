@@ -9,6 +9,7 @@
 #   --dataset DATASET    Task name (default: niah_single_1)
 #   --sample INDEX       Sample index (default: 0)
 #   --gpu GPU_ID         GPU to use (default: 0)
+#   --num-gpu-blocks N   Number of GPU blocks/slots (default: 4)
 #   --no-offload         Disable CPU offload
 #
 # Output:
@@ -18,6 +19,7 @@
 #   bash scripts/profile_offload.sh
 #   bash scripts/profile_offload.sh --dataset niah_single_1 --sample 5
 #   bash scripts/profile_offload.sh --gpu 1 --no-offload
+#   bash scripts/profile_offload.sh --num-gpu-blocks 8
 
 set -e
 
@@ -25,6 +27,7 @@ set -e
 DATASET="niah_single_1"
 SAMPLE_INDEX="0"
 GPU_ID="0"
+NUM_GPU_BLOCKS="4"
 ENABLE_OFFLOAD="--enable-offload"
 
 # Parse arguments
@@ -46,6 +49,10 @@ while [[ $# -gt 0 ]]; do
             ENABLE_OFFLOAD=""
             shift
             ;;
+        --num-gpu-blocks)
+            NUM_GPU_BLOCKS="$2"
+            shift 2
+            ;;
         -h|--help)
             echo "Usage: $0 [options]"
             echo ""
@@ -54,6 +61,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --sample INDEX       Sample index (default: 0)"
             echo "  --gpu GPU_ID         GPU to use (default: 0)"
             echo "  --no-offload         Disable CPU offload"
+            echo "  --num-gpu-blocks N   Number of GPU blocks/slots (default: 4)"
             exit 0
             ;;
         *)
@@ -76,7 +84,7 @@ mkdir -p "$OUTPUT_DIR"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 OFFLOAD_SUFFIX=""
 if [ -n "$ENABLE_OFFLOAD" ]; then
-    OFFLOAD_SUFFIX="_offload"
+    OFFLOAD_SUFFIX="_offload_${NUM_GPU_BLOCKS}slots"
 fi
 OUTPUT_FILE="$OUTPUT_DIR/ruler_${DATASET}_sample${SAMPLE_INDEX}${OFFLOAD_SUFFIX}_${TIMESTAMP}"
 
@@ -87,6 +95,7 @@ echo "Test script: $TEST_SCRIPT"
 echo "Dataset:     $DATASET"
 echo "Sample:      $SAMPLE_INDEX"
 echo "GPU:         $GPU_ID"
+echo "GPU Blocks:  $NUM_GPU_BLOCKS"
 echo "Offload:     ${ENABLE_OFFLOAD:-disabled}"
 echo "Output file: $OUTPUT_FILE.nsys-rep"
 echo ""
@@ -109,6 +118,7 @@ nsys profile \
     python "$TEST_SCRIPT" \
         --datasets "$DATASET" \
         --sample-indices "$SAMPLE_INDEX" \
+        --num-gpu-blocks "$NUM_GPU_BLOCKS" \
         $ENABLE_OFFLOAD \
         --quiet
 

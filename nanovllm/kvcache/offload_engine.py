@@ -9,6 +9,7 @@ Key design principles for CUDA Graph compatibility:
 
 import torch
 import torch.cuda.nvtx
+import nvtx
 from torch import Tensor
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
@@ -403,7 +404,8 @@ class OffloadEngine:
             nvtx_label = f"H2D: L{layer_id} Chunk{chunk_idx} CPU[{cpu_block_id}]->Slot[{slot_idx}]"
         else:
             nvtx_label = f"H2D: L{layer_id} CPU[{cpu_block_id}]->Slot[{slot_idx}]"
-        torch.cuda.nvtx.range_push(nvtx_label)
+
+        nvtx.push_range(message=nvtx_label, color="blue")
         with torch.cuda.stream(stream):
             # Wait for previous compute on this slot to complete before overwriting
             # This prevents data race: transfer must not start until attention finishes reading
@@ -421,7 +423,7 @@ class OffloadEngine:
                 self.v_cache_cpu[layer_id, cpu_block_id], non_blocking=True
             )
             self.ring_slot_ready[slot_idx].record(stream)
-        torch.cuda.nvtx.range_pop()
+        nvtx.pop_range()
 
     def wait_slot_layer(self, slot_idx: int) -> None:
         """
@@ -478,7 +480,8 @@ class OffloadEngine:
             else:
                 self.sparse_policy.on_decode_offload(cpu_block_id, layer_id, k_cache, valid_tokens)
 
-        torch.cuda.nvtx.range_push(f"D2H: Slot[{slot_idx}]->CPU[L{layer_id},B{cpu_block_id}]")
+        nvtx_label = f"D2H: Slot[{slot_idx}]->CPU[L{layer_id},B{cpu_block_id}]"
+        nvtx.push_range(message=nvtx_label, color="green")
         with torch.cuda.stream(self.transfer_stream_main):
             # Wait for both compute_stream and default stream
             # - compute_stream: for flash attention operations
@@ -494,7 +497,7 @@ class OffloadEngine:
                 self.v_cache_gpu[slot_idx], non_blocking=True
             )
             self.ring_slot_offload_done[slot_idx].record(self.transfer_stream_main)
-        torch.cuda.nvtx.range_pop()
+        nvtx.pop_range()
 
     # ----- KV access methods for ring buffer -----
 
@@ -792,7 +795,8 @@ class OffloadEngine:
         # Use per-layer stream for parallel offloads
         stream = self.prefill_offload_streams[layer_id]
 
-        torch.cuda.nvtx.range_push(f"AsyncPrefillOffload: L{layer_id}->CPU[{cpu_block_id}]")
+        nvtx_label = f"D2H: PrefillBuffer L{layer_id}->CPU[{cpu_block_id}]"
+        nvtx.push_range(message=nvtx_label, color="orange")
         with torch.cuda.stream(stream):
             # Wait for compute to finish writing to prefill buffer
             stream.wait_stream(self.compute_stream)
@@ -807,7 +811,7 @@ class OffloadEngine:
 
             # Record completion event
             self.prefill_offload_events[layer_id].record(stream)
-        torch.cuda.nvtx.range_pop()
+        nvtx.pop_range()
 
     def wait_all_prefill_offloads(self) -> None:
         """Wait for all prefill buffer offloads to complete."""
