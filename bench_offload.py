@@ -69,6 +69,7 @@ def main():
     parser.add_argument("--max-len", type=int, default=32*1024, help="Max model length (default: 32K)")
     parser.add_argument("--bench-decode", action="store_true", help="Run decode benchmark (default: prefill only)")
     parser.add_argument("--bench-all", action="store_true", help="Run both prefill and decode benchmarks")
+    parser.add_argument("--enforce-eager", action="store_true", help="Disable CUDA Graphs (use eager mode)")
     args = parser.parse_args()
 
     path = os.path.expanduser(args.model)
@@ -89,7 +90,7 @@ def main():
 
     llm = LLM(
         path,
-        enforce_eager=False,
+        enforce_eager=args.enforce_eager,
         max_model_len=max_len,
         max_num_batched_tokens=max_len,
         enable_cpu_offload=True,

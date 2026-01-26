@@ -93,6 +93,8 @@ PYTHONPATH=/home/zijie/Code/nano-vllm:$PYTHONPATH python tests/test_needle.py
 
 **Files**: `bench.py` (GPU), `bench_offload.py` (CPU offload), `bench_vllm.py` (comparison)
 
+**Offload Mode Constraint**: When using `enable_cpu_offload=True`, only test with context length ≥ 32K. Shorter contexts don't exercise the chunked offload pipeline properly.
+
 **Common Issues**:
 1. `max_num_batched_tokens < max_model_len`: Set equal for long context
 2. CUDA graph dimension mismatch: Ensure `input_len + output_len <= max_model_len`

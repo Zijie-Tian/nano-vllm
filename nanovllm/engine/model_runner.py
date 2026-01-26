@@ -10,6 +10,7 @@ from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence
 from nanovllm.models import get_model_class
 from nanovllm.layers.sampler import GreedySampler
+from nanovllm.layers.graphed_layers import OffloadGraphManager
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
 from nanovllm.utils.logger import get_logger
@@ -63,6 +64,12 @@ class ModelRunner:
         self.allocate_kv_cache()
         if not self.enforce_eager:
             self.capture_cudagraph()
+
+        # Initialize offload graph manager if CPU offload is enabled
+        self.offload_graph_manager = None
+        if config.enable_cpu_offload and not self.enforce_eager:
+            self.init_offload_graph_manager()
+
         torch.set_default_device("cpu")
         torch.set_default_dtype(default_dtype)
 
@@ -536,7 +543,14 @@ class ModelRunner:
                 break
 
             #> Run model forward
-            logits = self.run_model(input_ids, positions, is_prefill=True)
+            # Use graph-optimized forward if available (chunk_size == block_size), otherwise eager mode
+            if (hasattr(self, 'prefill_graph_manager') and
+                self.prefill_graph_manager is not None and
+                self.prefill_graph_manager.captured and
+                input_ids.shape[0] == self.block_size):
+                logits = self.run_prefill_with_offload_graph(input_ids, positions)
+            else:
+                logits = self.run_model(input_ids, positions, is_prefill=True)
             reset_context()
 
             # Mark block as prefilled
@@ -657,6 +671,7 @@ class ModelRunner:
         )
 
         # Run model forward pass
+        # TODO: Phase 5 decode graph needs shape fix, use eager mode for now
         logits = self.run_model(input_ids, positions, is_prefill=False)
         reset_context()
 
@@ -716,3 +731,151 @@ class ModelRunner:
             block_tables=block_tables,
             outputs=outputs,
         )
+
+    @torch.inference_mode()
+    def init_offload_graph_manager(self):
+        """
+        Initialize and capture CUDA Graphs for offload path (Prefill + Decode).
+
+        Phase 5 Design:
+        - Creates N+2 graphs for both Prefill and Decode
+        - Decode graphs: seq_len=1
+        - Prefill graphs: seq_len=chunk_size (block_size)
+
+        Graph structure per mode:
+        - EmbedGraph: embed_tokens
+        - FirstGraph: input_norm → qkv_proj → rotary
+        - InterGraph[i]: o_proj → post_norm → mlp → input_norm → qkv_proj → rotary (N-1 graphs)
+        - LastGraph: o_proj → post_norm → mlp → final_norm
+        """
+        hf_config = self.config.hf_config
+        num_kv_heads = hf_config.num_key_value_heads // self.world_size
+        head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
+
+        # Create Decode Graph Manager (seq_len=1)
+        self.decode_graph_manager = OffloadGraphManager(
+            model=self.model,
+            seq_len=1,
+            hidden_size=hf_config.hidden_size,
+            num_heads=hf_config.num_attention_heads // self.world_size,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            dtype=hf_config.torch_dtype,
+        )
+        self.decode_graph_manager.capture_all()
+
+        # Create Prefill Graph Manager (seq_len=chunk_size)
+        chunk_size = self.block_size  # chunk_size = block_size = 1024
+        self.prefill_graph_manager = OffloadGraphManager(
+            model=self.model,
+            seq_len=chunk_size,
+            hidden_size=hf_config.hidden_size,
+            num_heads=hf_config.num_attention_heads // self.world_size,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            dtype=hf_config.torch_dtype,
+        )
+        self.prefill_graph_manager.capture_all()
+
+        # Legacy compatibility (for backward compatibility)
+        self.offload_graph_manager = self.decode_graph_manager
+
+        logger.info(
+            f"Offload CUDA Graphs captured: {self.decode_graph_manager.num_graphs} decode graphs + "
+            f"{self.prefill_graph_manager.num_graphs} prefill graphs "
+            f"({self.decode_graph_manager.num_layers} layers)"
+        )
+
+    @torch.inference_mode()
+    def run_model_with_offload_graph(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Run decode with Phase 5 CUDA Graph optimization.
+
+        Graph coverage (~70-80% of computation):
+        - GRAPH_EMBED: embed_tokens
+        - GRAPH_FIRST: input_norm_0 → qkv_proj_0 → rotary_0
+        - GRAPH_INTER_i: o_proj_i → post_norm_i → mlp_i → input_norm_{i+1} → qkv_proj_{i+1} → rotary_{i+1}
+        - GRAPH_LAST: o_proj_{N-1} → post_norm_{N-1} → mlp_{N-1} → final_norm
+
+        EAGER (only attention core with offload):
+        - attn.forward(q, k, v) for each layer
+        """
+        gm = self.decode_graph_manager
+        layers = self.model.model.layers
+        num_layers = len(layers)
+        use_graph = input_ids.shape[0] == 1  # Only use graph for batch=1
+
+        # GRAPH_EMBED: embed_tokens
+        hidden_states = gm.embed_graph(input_ids, use_graph=use_graph)
+
+        # GRAPH_FIRST: input_norm_0 → qkv_proj_0 → rotary_0
+        q, k, v, residual = gm.first_graph(hidden_states, positions, use_graph=use_graph)
+
+        for i in range(num_layers):
+            # EAGER: Attention core only (with offload)
+            # Note: attn.forward already handles store_kvcache internally
+            attn_output = layers[i].self_attn.attn(q, k, v)
+            # attn.forward returns [batch, 1, num_heads, head_dim] for decode
+            # graph expects [seq_len, num_heads, head_dim], so squeeze to [1, heads, dim]
+            if attn_output.dim() == 4:
+                attn_output = attn_output.squeeze(0).squeeze(0).unsqueeze(0)
+
+            if i < num_layers - 1:
+                # GRAPH_INTER_i: o_proj_i → post_norm_i → mlp_i → input_norm_{i+1} → qkv_proj_{i+1} → rotary_{i+1}
+                q, k, v, residual = gm.inter_graphs[i](
+                    attn_output, residual, positions, use_graph=use_graph
+                )
+            else:
+                # GRAPH_LAST: o_proj_{N-1} → post_norm_{N-1} → mlp_{N-1} → final_norm
+                hidden_states = gm.last_graph(attn_output, residual, use_graph=use_graph)
+
+        return self.model.compute_logits(hidden_states)
+
+    @torch.inference_mode()
+    def run_prefill_with_offload_graph(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Run chunked prefill with Phase 5 CUDA Graph optimization.
+
+        Graph coverage (~70-80% of computation):
+        - GRAPH_EMBED: embed_tokens
+        - GRAPH_FIRST: input_norm_0 → qkv_proj_0 → rotary_0
+        - GRAPH_INTER_i: o_proj_i → post_norm_i → mlp_i → input_norm_{i+1} → qkv_proj_{i+1} → rotary_{i+1}
+        - GRAPH_LAST: o_proj_{N-1} → post_norm_{N-1} → mlp_{N-1} → final_norm
+
+        EAGER (only attention core with offload):
+        - attn.forward(q, k, v) for each layer
+        """
+        gm = self.prefill_graph_manager
+        layers = self.model.model.layers
+        num_layers = len(layers)
+        use_graph = input_ids.shape[0] == self.block_size  # Only use graph for chunk_size
+
+        # GRAPH_EMBED: embed_tokens
+        hidden_states = gm.embed_graph(input_ids, use_graph=use_graph)
+
+        # GRAPH_FIRST: input_norm_0 → qkv_proj_0 → rotary_0
+        q, k, v, residual = gm.first_graph(hidden_states, positions, use_graph=use_graph)
+
+        for i in range(num_layers):
+            # EAGER: Attention core only (with offload)
+            # Note: attn.forward already handles store_kvcache internally
+            attn_output = layers[i].self_attn.attn(q, k, v)
+
+            if i < num_layers - 1:
+                # GRAPH_INTER_i: o_proj_i → post_norm_i → mlp_i → input_norm_{i+1} → qkv_proj_{i+1} → rotary_{i+1}
+                q, k, v, residual = gm.inter_graphs[i](
+                    attn_output, residual, positions, use_graph=use_graph
+                )
+            else:
+                # GRAPH_LAST: o_proj_{N-1} → post_norm_{N-1} → mlp_{N-1} → final_norm
+                hidden_states = gm.last_graph(attn_output, residual, use_graph=use_graph)
+
+        return self.model.compute_logits(hidden_states)
