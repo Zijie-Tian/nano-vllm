@@ -66,6 +66,7 @@ def main():
     parser.add_argument("--input-len", type=int, default=None, help="Input length in tokens")
     parser.add_argument("--output-len", type=int, default=64, help="Output length for decode benchmark (default: 64)")
     parser.add_argument("--num-gpu-blocks", type=int, default=4, help="Number of GPU blocks (default: 4)")
+    parser.add_argument("--block-size", type=int, default=1024, help="KV cache block size (default: 1024)")
     parser.add_argument("--max-len", type=int, default=32*1024, help="Max model length (default: 32K)")
     parser.add_argument("--bench-decode", action="store_true", help="Run decode benchmark (default: prefill only)")
     parser.add_argument("--bench-all", action="store_true", help="Run both prefill and decode benchmarks")
@@ -86,7 +87,7 @@ def main():
         sparse_policy = SparsePolicyType.FULL
         print("\n[Full Attention] baseline (no sparse)")
 
-    print(f"[Config] max_len={max_len}, num_gpu_blocks={args.num_gpu_blocks}")
+    print(f"[Config] max_len={max_len}, num_gpu_blocks={args.num_gpu_blocks}, block_size={args.block_size}")
 
     llm = LLM(
         path,
@@ -95,6 +96,7 @@ def main():
         max_num_batched_tokens=max_len,
         enable_cpu_offload=True,
         num_gpu_blocks=args.num_gpu_blocks,
+        kvcache_block_size=args.block_size,
         sparse_policy=sparse_policy,
         # Quest parameters
         sparse_topk_blocks=args.topk,
