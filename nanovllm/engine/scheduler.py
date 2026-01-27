@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence, SequenceStatus
-from nanovllm.utils.observer import Observer
+from nanovllm.utils.observer import InferenceObserver
 
 if TYPE_CHECKING:
     from nanovllm.kvcache import KVCacheManager
@@ -32,8 +32,8 @@ class Scheduler:
         num_seqs = 0
         num_batched_tokens = 0
         while self.waiting and num_seqs < self.max_num_seqs:
-            if Observer.ttft_start == 0:
-                Observer.ttft_start = perf_counter_ns()
+            if InferenceObserver.ttft_start == 0:
+                InferenceObserver.ttft_start = perf_counter_ns()
             seq = self.waiting[0]
 
             # Check if sequence is too large

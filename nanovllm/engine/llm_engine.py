@@ -10,7 +10,7 @@ from nanovllm.sampling_params import SamplingParams
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.scheduler import Scheduler
 from nanovllm.engine.model_runner import ModelRunner
-from nanovllm.utils.observer import Observer
+from nanovllm.utils.observer import InferenceObserver
 
 
 class LLMEngine:
@@ -58,15 +58,18 @@ class LLMEngine:
             print(f"[DEBUG LLMEngine.step] Mode={mode}, active_sequences={len(seqs)}")
 
         if not is_prefill:
-            # The end of the prefill mode. Get TTFT.
-            if Observer.ttft_start != 0:
-                Observer.ttft = perf_counter_ns() - Observer.ttft_start
-                Observer.reset_ttft()
-            # The start of the decode mode. Get TPOT.
-            if Observer.tpot_start != 0:
-                Observer.tpot = perf_counter_ns() - Observer.tpot_start
-            Observer.tpot_start = perf_counter_ns()
+            # Decode mode: calculate TPOT from previous decode step
+            if InferenceObserver.tpot_start != 0:
+                InferenceObserver.tpot = perf_counter_ns() - InferenceObserver.tpot_start
+            InferenceObserver.tpot_start = perf_counter_ns()
+
         token_ids = self.model_runner.call("run", seqs, is_prefill)
+
+        if is_prefill:
+            # Calculate TTFT after prefill completes (including chunked prefill)
+            if InferenceObserver.ttft_start != 0:
+                InferenceObserver.ttft = perf_counter_ns() - InferenceObserver.ttft_start
+                InferenceObserver.reset_ttft()
         self.scheduler.postprocess(seqs, token_ids)
         outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
 
@@ -91,7 +94,7 @@ class LLMEngine:
         log_level = os.environ.get('NANOVLLM_LOG_LEVEL', 'INFO')
         debug_enabled = log_level.upper() == 'DEBUG'
 
-        Observer.complete_reset()
+        InferenceObserver.complete_reset()
         if use_tqdm:
             pbar = tqdm(total=len(prompts), desc="Generating", dynamic_ncols=True)
         if not isinstance(sampling_params, list):
@@ -128,8 +131,8 @@ class LLMEngine:
                 pbar.set_postfix({
                     "Prefill": f"{int(prefill_throughput)}tok/s",
                     "Decode": f"{int(decode_throughput)}tok/s",
-                    "ttft": f"{float(Observer.ttft) / 1e6}ms",
-                    "tpot": f"{float(Observer.tpot) / 1e6}ms",
+                    "ttft": f"{float(InferenceObserver.ttft) / 1e6}ms",
+                    "tpot": f"{float(InferenceObserver.tpot) / 1e6}ms",
                 })
             for seq_id, token_ids in output:
                 outputs[seq_id] = token_ids

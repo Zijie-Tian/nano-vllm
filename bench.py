@@ -2,6 +2,7 @@ import os
 import time
 from random import randint, seed
 from nanovllm import LLM, SamplingParams
+from nanovllm.utils.observer import InferenceObserver
 
 
 def bench_decode(llm, num_seqs, input_len, output_len):
@@ -14,13 +15,17 @@ def bench_decode(llm, num_seqs, input_len, output_len):
     llm.generate(prompt_token_ids, sampling_params, use_tqdm=False)
     t = time.time() - t
 
-    # Calculate metrics
-    prefill_tokens = num_seqs * input_len
+    # Get metrics from InferenceObserver
+    ttft_ms = InferenceObserver.ttft / 1e6
+    tpot_ms = InferenceObserver.tpot / 1e6
+
+    # Calculate throughput from observer metrics
     decode_tokens = num_seqs * output_len
-    decode_throughput = decode_tokens / t
+    decode_throughput = 1000.0 / tpot_ms if tpot_ms > 0 else 0  # tokens/s per sequence
 
     print(f"[Decode] Input: {num_seqs}x{input_len}tok, Output: {decode_tokens}tok, Time: {t:.2f}s")
-    print(f"         Throughput: {decode_throughput:.2f} tok/s (includes prefill overhead)")
+    print(f"         TTFT: {ttft_ms:.2f}ms, TPOT: {tpot_ms:.2f}ms")
+    print(f"         Decode Throughput: {decode_throughput:.2f} tok/s (from observer)")
 
 
 def bench_prefill(llm, num_seqs, input_len):
@@ -33,9 +38,19 @@ def bench_prefill(llm, num_seqs, input_len):
     t = time.time()
     llm.generate(prompt_token_ids, sampling_params, use_tqdm=False)
     t = time.time() - t
+
+    # Get TTFT from InferenceObserver
+    ttft_ms = InferenceObserver.ttft / 1e6
+    ttft_s = ttft_ms / 1000.0
+
     total_input_tokens = num_seqs * input_len
-    throughput = total_input_tokens / t
-    print(f"[Prefill] Input: {total_input_tokens}tok ({num_seqs}x{input_len}), Time: {t:.2f}s, Throughput: {throughput:.2f}tok/s")
+    # Use observer TTFT for accurate prefill throughput
+    throughput_observer = total_input_tokens / ttft_s if ttft_s > 0 else 0
+    throughput_external = total_input_tokens / t
+
+    print(f"[Prefill] Input: {total_input_tokens}tok ({num_seqs}x{input_len})")
+    print(f"          External Time: {t:.2f}s, Throughput: {throughput_external:.2f}tok/s")
+    print(f"          Observer TTFT: {ttft_ms:.2f}ms, Throughput: {throughput_observer:.2f}tok/s")
 
 
 def main():
