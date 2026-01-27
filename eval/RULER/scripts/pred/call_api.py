@@ -249,7 +249,7 @@ def get_llm(tokens_to_generate):
             num_gpu_blocks=int(os.environ.get('NANOVLLM_NUM_GPU_BLOCKS', 2)),
             kvcache_block_size=int(os.environ.get('NANOVLLM_BLOCK_SIZE', 1024)),
             gpu_memory_utilization=float(os.environ.get('NANOVLLM_GPU_UTIL', 0.9)),
-            enforce_eager=os.environ.get('NANOVLLM_ENFORCE_EAGER', 'true').lower() == 'true',
+            enforce_eager=os.environ.get('NANOVLLM_ENFORCE_EAGER', 'false').lower() == 'true',
         )
 
     else:
