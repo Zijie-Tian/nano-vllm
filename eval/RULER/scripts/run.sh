@@ -185,33 +185,60 @@ for MAX_SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
             ${REMOVE_NEWLINE_TAB}
     done
 
-    # NanoVLLM: parallel execution with dynamic GPU scheduling
+    # NanoVLLM: parallel execution with GPU-locked scheduling
     if [ "$MODEL_FRAMEWORK" == "nanovllm" ]; then
-        echo "NanoVLLM detected: using dynamic scheduling with ${NUM_GPUS} GPUs (${GPU_LIST})"
+        echo "NanoVLLM detected: using GPU-locked scheduling with ${NUM_GPUS} GPUs (${GPU_LIST})"
         start_time=$(date +%s)
 
         TASK_INDEX=0
-        PIDS=()
+        # Track PID for each GPU slot: GPU_PIDS[gpu_idx]=pid (0 means free)
+        declare -a GPU_PIDS
+        for ((i=0; i<NUM_GPUS; i++)); do
+            GPU_PIDS[$i]=0
+        done
 
-        # Function to clean up completed PIDs
-        cleanup_pids() {
-            local new_pids=()
-            for pid in "${PIDS[@]}"; do
-                if kill -0 $pid 2>/dev/null; then
-                    new_pids+=($pid)
+        # Function to find a free GPU slot, returns -1 if none available
+        find_free_gpu() {
+            for ((i=0; i<NUM_GPUS; i++)); do
+                local pid=${GPU_PIDS[$i]}
+                if [ "$pid" -eq 0 ]; then
+                    echo $i
+                    return
+                fi
+                # Check if process is still running
+                if ! kill -0 $pid 2>/dev/null; then
+                    GPU_PIDS[$i]=0
+                    echo $i
+                    return
                 fi
             done
-            PIDS=("${new_pids[@]}")
+            echo -1
         }
 
-        # Main loop: dynamically schedule tasks as GPUs become available
-        while [ $TASK_INDEX -lt ${#TASKS[@]} ] || [ ${#PIDS[@]} -gt 0 ]; do
-            # Launch new tasks if slots available
-            while [ $TASK_INDEX -lt ${#TASKS[@]} ] && [ ${#PIDS[@]} -lt $NUM_GPUS ]; do
+        # Function to count active GPUs
+        count_active() {
+            local count=0
+            for ((i=0; i<NUM_GPUS; i++)); do
+                local pid=${GPU_PIDS[$i]}
+                if [ "$pid" -ne 0 ] && kill -0 $pid 2>/dev/null; then
+                    ((count++))
+                fi
+            done
+            echo $count
+        }
+
+        # Main loop: schedule tasks to free GPUs
+        while [ $TASK_INDEX -lt ${#TASKS[@]} ] || [ $(count_active) -gt 0 ]; do
+            # Try to launch tasks on free GPUs
+            while [ $TASK_INDEX -lt ${#TASKS[@]} ]; do
+                FREE_GPU=$(find_free_gpu)
+                if [ "$FREE_GPU" -eq -1 ]; then
+                    break  # No free GPU, wait
+                fi
+
                 TASK=${TASKS[$TASK_INDEX]}
-                GPU_IDX=$((TASK_INDEX % NUM_GPUS))
-                GPU_ID=${GPU_ARRAY[$GPU_IDX]}
-                echo "  [${TASK_INDEX}/${#TASKS[@]}] Task ${TASK} -> GPU ${GPU_ID} (active: ${#PIDS[@]})"
+                GPU_ID=${GPU_ARRAY[$FREE_GPU]}
+                echo "  [${TASK_INDEX}/${#TASKS[@]}] Task ${TASK} -> GPU ${GPU_ID} (slot ${FREE_GPU})"
 
                 CUDA_VISIBLE_DEVICES=${GPU_ID} python pred/call_api.py \
                     --data_dir ${DATA_DIR} \
@@ -232,14 +259,16 @@ for MAX_SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
                     ${AVGPOOL_TOPP} \
                     ${PRINT_DETAIL} &
 
-                PIDS+=($!)
+                GPU_PIDS[$FREE_GPU]=$!
                 TASK_INDEX=$((TASK_INDEX + 1))
+
+                # Small delay to allow GPU initialization
+                sleep 2
             done
 
-            # Wait for at least one task to complete, then cleanup
-            if [ ${#PIDS[@]} -gt 0 ]; then
-                wait -n 2>/dev/null || true
-                cleanup_pids
+            # Wait a bit before checking again
+            if [ $(count_active) -gt 0 ]; then
+                sleep 5
             fi
         done
 
