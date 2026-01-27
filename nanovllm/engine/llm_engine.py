@@ -11,6 +11,7 @@ from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.scheduler import Scheduler
 from nanovllm.engine.model_runner import ModelRunner
 from nanovllm.utils.observer import InferenceObserver
+from nanovllm.utils.memory_observer import MemoryObserver
 
 
 class LLMEngine:
@@ -95,6 +96,7 @@ class LLMEngine:
         debug_enabled = log_level.upper() == 'DEBUG'
 
         InferenceObserver.complete_reset()
+        MemoryObserver.complete_reset()
         if use_tqdm:
             pbar = tqdm(total=len(prompts), desc="Generating", dynamic_ncols=True)
         if not isinstance(sampling_params, list):

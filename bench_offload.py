@@ -3,6 +3,14 @@ import time
 from random import randint, seed
 from nanovllm import LLM, SamplingParams
 from nanovllm.utils.observer import InferenceObserver
+from nanovllm.utils.memory_observer import MemoryObserver
+
+
+def print_memory_stats():
+    """Print MemoryObserver communication statistics"""
+    fmt = MemoryObserver._fmt_bytes
+    print(f"[Memory] Prefill H2D: {fmt(MemoryObserver.prefill_h2d_bytes)}, D2H: {fmt(MemoryObserver.prefill_d2h_bytes)}")
+    print(f"         Decode  H2D: {fmt(MemoryObserver.decode_h2d_bytes)}, D2H: {fmt(MemoryObserver.decode_d2h_bytes)}")
 
 
 def bench_decode(llm, num_seqs, input_len, output_len):
@@ -26,6 +34,7 @@ def bench_decode(llm, num_seqs, input_len, output_len):
     print(f"[Decode] Input: {num_seqs}x{input_len}tok, Output: {decode_tokens}tok, Time: {t:.2f}s")
     print(f"         TTFT: {ttft_ms:.2f}ms, TPOT: {tpot_ms:.2f}ms")
     print(f"         Decode Throughput: {decode_throughput:.2f} tok/s (from observer)")
+    print_memory_stats()
 
 
 def bench_prefill(llm, num_seqs, input_len):
@@ -51,6 +60,7 @@ def bench_prefill(llm, num_seqs, input_len):
     print(f"[Prefill] Input: {total_input_tokens}tok ({num_seqs}x{input_len})")
     print(f"          External Time: {t:.2f}s, Throughput: {throughput_external:.2f}tok/s")
     print(f"          Observer TTFT: {ttft_ms:.2f}ms, Throughput: {throughput_observer:.2f}tok/s")
+    print_memory_stats()
 
 
 def main():
@@ -87,6 +97,9 @@ def main():
 
     path = os.path.expanduser(args.model)
     max_len = args.max_len
+
+    # Enable MemoryObserver for communication stats
+    MemoryObserver._enabled = True
 
     # Setup policy configuration
     if args.enable_quest:

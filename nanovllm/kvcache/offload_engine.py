@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from nanovllm.kvcache.kernels import gathered_copy_kv
 from nanovllm.comm import memcpy_2d_async
 from nanovllm.utils.logger import get_logger
+from nanovllm.utils.memory_observer import MemoryObserver
 
 # Import for type hints only (avoid circular import)
 from typing import TYPE_CHECKING
@@ -376,7 +377,8 @@ class OffloadEngine:
         self.ring_slot_compute_done[slot_idx].record()
 
     def load_to_slot_layer(
-        self, slot_idx: int, layer_id: int, cpu_block_id: int, chunk_idx: int = -1
+        self, slot_idx: int, layer_id: int, cpu_block_id: int, chunk_idx: int = -1,
+        is_prefill: bool = True,
     ) -> None:
         """
         Async load a single CPU block to a ring buffer slot for one layer.
@@ -393,6 +395,7 @@ class OffloadEngine:
             layer_id: Layer index to load (for CPU cache indexing)
             cpu_block_id: Source CPU block ID
             chunk_idx: Optional chunk index for NVTX labeling (-1 means not specified)
+            is_prefill: True if in prefill phase, False if in decode phase (for MemoryObserver)
         """
         logger.debug(f"Ring load: layer={layer_id}, CPU[{cpu_block_id}] -> GPU slot[{slot_idx}]")
 
@@ -424,6 +427,9 @@ class OffloadEngine:
             )
             self.ring_slot_ready[slot_idx].record(stream)
         nvtx.pop_range()
+
+        # Record H2D transfer: K + V = 2 * block_bytes
+        MemoryObserver.record_h2d(2 * self.gpu_block_bytes, is_prefill=is_prefill)
 
     def wait_slot_layer(self, slot_idx: int) -> None:
         """
@@ -498,6 +504,9 @@ class OffloadEngine:
             )
             self.ring_slot_offload_done[slot_idx].record(self.transfer_stream_main)
         nvtx.pop_range()
+
+        # Record D2H transfer: K + V = 2 * block_bytes
+        MemoryObserver.record_d2h(2 * self.gpu_block_bytes, is_prefill=is_prefill)
 
     # ----- KV access methods for ring buffer -----
 
@@ -745,6 +754,10 @@ class OffloadEngine:
         self.prefill_v_buffer[layer_id, :num_tokens].copy_(v)
         torch.cuda.nvtx.range_pop()
 
+        # Record D2D transfer: K + V
+        transfer_bytes = 2 * k.numel() * k.element_size()
+        MemoryObserver.record_d2d(transfer_bytes)
+
     def write_to_decode_buffer(
         self,
         layer_id: int,
@@ -767,6 +780,10 @@ class OffloadEngine:
         self.decode_k_buffer[layer_id, pos_in_block].copy_(k)
         self.decode_v_buffer[layer_id, pos_in_block].copy_(v)
         torch.cuda.nvtx.range_pop()
+
+        # Record D2D transfer: K + V (single token)
+        transfer_bytes = 2 * k.numel() * k.element_size()
+        MemoryObserver.record_d2d(transfer_bytes)
 
     def offload_prefill_buffer_async(
         self,
@@ -813,6 +830,9 @@ class OffloadEngine:
             self.prefill_offload_events[layer_id].record(stream)
         nvtx.pop_range()
 
+        # Record D2H transfer: K + V = 2 * block_bytes
+        MemoryObserver.record_d2h(2 * self.gpu_block_bytes, is_prefill=True)
+
     def wait_all_prefill_offloads(self) -> None:
         """Wait for all prefill buffer offloads to complete."""
         for stream in self.prefill_offload_streams:
@@ -851,6 +871,11 @@ class OffloadEngine:
         v_sample = self.v_cache_cpu[
             layer_id, cpu_block_id, :num_samples
         ].clone().cuda()
+
+        # Record H2D transfer: K + V samples
+        transfer_bytes = 2 * k_sample.numel() * k_sample.element_size()
+        MemoryObserver.record_h2d(transfer_bytes, is_prefill=True)
+
         return k_sample, v_sample
 
     def load_block_full_from_cpu(
@@ -877,4 +902,8 @@ class OffloadEngine:
         v_full = self.v_cache_cpu[
             layer_id, cpu_block_id
         ].clone().cuda()
+
+        # Record H2D transfer: K + V full block
+        MemoryObserver.record_h2d(2 * self.gpu_block_bytes, is_prefill=True)
+
         return k_full, v_full

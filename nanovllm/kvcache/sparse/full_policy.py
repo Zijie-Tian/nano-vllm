@@ -422,7 +422,7 @@ class FullAttentionPolicy(SparsePolicy):
         num_preload = min(num_slots, num_blocks)
         for i in range(num_preload):
             cpu_block_id = cpu_block_table[i]
-            offload_engine.load_to_slot_layer(load_slots[i], layer_id, cpu_block_id, chunk_idx=cpu_block_id)
+            offload_engine.load_to_slot_layer(load_slots[i], layer_id, cpu_block_id, chunk_idx=cpu_block_id, is_prefill=False)
 
         # Phase 2: Process blocks with pipeline
         for block_idx in range(num_blocks):
@@ -456,7 +456,7 @@ class FullAttentionPolicy(SparsePolicy):
             next_block_idx = block_idx + num_slots
             if next_block_idx < num_blocks:
                 next_cpu_block_id = cpu_block_table[next_block_idx]
-                offload_engine.load_to_slot_layer(current_slot, layer_id, next_cpu_block_id, chunk_idx=next_cpu_block_id)
+                offload_engine.load_to_slot_layer(current_slot, layer_id, next_cpu_block_id, chunk_idx=next_cpu_block_id, is_prefill=False)
 
             # Merge with accumulated
             with torch.cuda.stream(compute_stream):
