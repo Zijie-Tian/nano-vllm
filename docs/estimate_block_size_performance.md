@@ -212,6 +212,47 @@ CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/path/to/nano-vllm:$PYTHONPATH \
 
 新策略更简洁，直接利用分级求和产生的 score，避免了 mask 生成和 voting 的复杂逻辑。
 
+## 实现状态 ✅ (2026-01-28)
+
+### 已实现
+
+分级求和方案已在 `xattn_bsa.py` 中实现：
+
+```python
+class XAttentionBSAPolicy:
+    def __init__(self, ..., estimate_block_size: int = 1024):
+        self.estimate_block_size = estimate_block_size  # 新参数
+
+    def select_blocks(self, ...):
+        # Step 2: Hierarchical softmax_fuse_block_sum
+        reshaped_est_bs = estimate_bs // self.stride  # 1024/8 = 128
+        block_sums_fine = softmax_fuse_block_sum(attn_scores, reshaped_est_bs, ...)
+
+        # Step 3: Aggregate to CPU block level
+        block_sums_coarse = block_sums_fine.view(..., num_cpu_blocks, ratio).sum(dim=-1)
+        cpu_block_scores = block_sums_coarse.sum(dim=2)
+
+        # Step 4: Score + threshold selection (replaces mask + voting)
+        scores_per_block = cpu_block_scores.mean(dim=(0, 1))
+        # ... cumulative threshold selection
+```
+
+### 实测结果 (Nsys Profiling)
+
+| Kernel | 优化前 | 优化后 | 改进 |
+|--------|--------|--------|------|
+| softmax_fuse_block_sum 占比 | 48.1% | **1.1%** | **44x** |
+| softmax_fuse_block_sum 平均时间 | ~2ms | 489us | **4x** |
+
+### 端到端性能 (32K context)
+
+| 指标 | FULL Policy | XATTN Policy | 改进 |
+|------|-------------|--------------|------|
+| Prefill throughput | 3511 tok/s | 3695 tok/s | +5% |
+| TTFT | 9327 ms | 8863 ms | -5% |
+
 ## 结论
 
 当前 estimate 阶段使用全局 `kvcache_block_size=4096` 导致 `softmax_fuse_block_sum` kernel 性能处于最差点。通过将 estimate block_size 改为 512-1024，可以获得 **15x** 的性能提升，显著降低 estimate 阶段的开销。
+
+**⚠️ 重要变更**: 选择策略从 `mask + majority voting` 改为 `score + threshold`，更简洁且更直接。

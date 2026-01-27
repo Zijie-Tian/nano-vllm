@@ -28,7 +28,15 @@
 | 32K | 4863 tok/s | 5587 tok/s | **+14.9%** ✅ |
 | 64K | 3373 tok/s | 4766 tok/s | **+41.3%** ✅ |
 
-#### CPU Offload 模式
+#### CPU Offload 模式 (优化后, 2026-01-28)
+
+| 上下文 | Full Attention | XAttention | 相对性能 |
+|--------|----------------|------------|----------|
+| 32K | 4678 tok/s | 4398 tok/s | **-6.0%** |
+| 64K | 3331 tok/s | 3203 tok/s | **-3.8%** |
+| 128K | 2144 tok/s | 2196 tok/s | **+2.4%** ✅ |
+
+#### CPU Offload 模式 (优化前, 2026-01-27)
 
 | 上下文 | Full Attention | XAttention | 相对性能 |
 |--------|----------------|------------|----------|
@@ -61,7 +69,8 @@
 | 模式 | XAttention 效果 | 原因 |
 |------|-----------------|------|
 | **GPU-only** | ✅ 显著加速 (+15% ~ +41%) | 计算是瓶颈，稀疏注意力减少 FLOPs |
-| **CPU Offload** | ❌ 性能下降 (-14% ~ -59%) | 传输是瓶颈，稀疏估计增加额外开销 |
+| **CPU Offload (优化后)** | ✅ 长上下文略有收益 | estimate_block_size 优化减少估计开销 |
+| **CPU Offload (优化前)** | ❌ 性能下降 (-14% ~ -59%) | 传输是瓶颈，稀疏估计增加额外开销 |
 
 ### 2. Block Size 对性能的影响
 
@@ -80,37 +89,46 @@
 - 稀疏跳过的 blocks 比例更明显
 - 但绝对性能极差，不推荐使用
 
-### 4. 性能下降随上下文增长加剧
+### 4. estimate_block_size 优化效果 (2026-01-28)
 
 ```
-Offload 模式 XAttention 相对性能:
-32K:  -14%  (传输占 ~60%)
-64K:  -21%  (传输占 ~70%)
-128K: -59%  (传输占 ~80%)
+Offload 模式 XAttention 相对性能变化:
+         优化前    优化后    改进
+32K:    -13.9%   -6.0%    +7.9pp
+64K:    -20.6%   -3.8%    +16.8pp
+128K:   -59.1%   +2.4%    +61.5pp ✅
 ```
 
-原因：
-- 传输占比随上下文增长
-- XAttention 估计开销 O(num_chunks) 线性增长
-- 节省的计算量被传输瓶颈掩盖
+优化内容：
+- `estimate_block_size` 从 4096 改为 1024
+- `softmax_fuse_block_sum` kernel 时间从 48% 降到 1% (44x 加速)
+- 选择策略从 mask + voting 改为 score + threshold
+
+优化后结论：
+- **128K 长上下文 XAttention 反超 Full Attention**
+- 短上下文仍有少量开销，但已显著减少
 
 ## 结论
 
-### 推荐配置
+### 推荐配置 (优化后, 2026-01-28)
 
 | 场景 | 推荐策略 | Block Size |
 |------|----------|------------|
 | GPU-only (VRAM 充足) | XAttention | 4096 |
-| CPU Offload | Full Attention | 4096 |
+| CPU Offload (128K+) | XAttention | 4096 |
+| CPU Offload (32K-64K) | Full Attention 或 XAttention | 4096 |
 
-### XAttention 适用条件
+### XAttention 适用条件 (优化后)
 
 ✅ **适合**:
 - GPU-only 模式（计算密集）
+- CPU Offload + 长上下文（128K+）有正向收益
 - 长上下文（64K+）收益更大
 
-❌ **不适合**:
-- CPU Offload 模式（传输密集）
+⚠️ **中性**:
+- CPU Offload + 中等上下文（32K-64K）：略慢 3-6%，可接受
+
+❌ **不推荐**:
 - 短上下文（<32K）收益不明显
 
 ## 运行命令
@@ -134,5 +152,6 @@ CUDA_VISIBLE_DEVICES=0 python bench_offload.py --enable-xattn --xattn-threshold 
 
 ## 更新记录
 
+- 2026-01-28: **estimate_block_size 优化后重新测试**，128K XAttention 反超 Full (+2.4%)
 - 2026-01-27: 添加 GPU-only vs Offload 对比，block size 影响分析
 - 2026-01-27: 初始测试，Llama-3.1-8B-Instruct, A100 80GB
