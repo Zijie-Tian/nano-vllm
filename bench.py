@@ -58,6 +58,8 @@ def main():
                         help="Enable sparse policy routing (FullAttentionPolicy by default)")
     parser.add_argument("--gpu-util", type=float, default=0.9,
                         help="GPU memory utilization (default: 0.9)")
+    parser.add_argument("--block-size", type=int, default=1024,
+                        help="KV cache block size (default: 1024)")
     parser.add_argument("--enforce-eager", action="store_true",
                         help="Disable CUDA graphs (default: False)")
     args = parser.parse_args()
@@ -83,6 +85,7 @@ def main():
         max_num_batched_tokens=max_len,
         sparse_policy=sparse_policy,
         gpu_memory_utilization=args.gpu_util,
+        kvcache_block_size=args.block_size,
     )
 
     # Warmup
