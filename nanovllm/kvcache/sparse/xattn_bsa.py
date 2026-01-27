@@ -458,12 +458,13 @@ class XAttentionBSAPolicy(SparsePolicy):
 
         with nvtx.range("xattn_estimate_gemm"):
             for cpu_block_id in available_blocks:
-                # Load K block from CPU to GPU (cpu_block_id is chunk index)
-                offload_engine.load_to_slot_layer(slot, layer_id, cpu_block_id, chunk_idx=cpu_block_id)
+                # Load only K from CPU to GPU (V not needed for estimate)
+                # This saves 50% communication in the estimate phase
+                offload_engine.load_k_only_to_slot_layer(slot, layer_id, cpu_block_id, chunk_idx=cpu_block_id)
                 offload_engine.wait_slot_layer(slot)
 
-                # Get KV: [1, block_size, num_kv_heads, head_dim]
-                k_block, _ = offload_engine.get_kv_for_slot(slot)
+                # Get K only: [1, block_size, num_kv_heads, head_dim]
+                k_block = offload_engine.get_k_for_slot(slot)
 
                 # Convert K to [batch, heads, k_len, head_dim]
                 # k_block: [1, block_size, num_kv_heads, head_dim] -> [1, num_kv_heads, block_size, head_dim]
