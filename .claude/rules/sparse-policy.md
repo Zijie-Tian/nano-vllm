@@ -1,5 +1,39 @@
 # Sparse Policy 代码规范
 
+## Policy 不能为 None (CRITICAL)
+
+**强制规则**: `sparse_policy` 参数**永远不能为 None**，必须至少为 `FullAttentionPolicy`。
+
+```python
+# ❌ 错误：允许 None
+sparse_policy = getattr(config, 'sparse_policy', None)
+
+# ✅ 正确：显式处理 None，默认使用 FULL
+sparse_policy_type = getattr(config, 'sparse_policy', None)
+if sparse_policy_type is None:
+    sparse_policy_type = SparsePolicyType.FULL
+```
+
+**原因**:
+1. 统一的 API：所有代码路径都通过 policy 进行 attention 计算
+2. 避免空指针：消除 `policy.xxx` 调用时的 None 检查
+3. 简化逻辑：不需要 `if policy is not None` 的分支
+
+**唯一例外：Warmup 阶段**
+
+在 `model_runner.warmup_model()` 期间，kvcache_manager 还未分配。此时 `attention.py` 使用 flash_attn fallback：
+
+```python
+# attention.py 中的 warmup 处理
+if context.kvcache_manager is None:
+    # Warmup phase: use flash_attn directly
+    return flash_attn_varlen_func(...) if context.is_prefill else flash_attn_with_kvcache(...)
+```
+
+这是唯一允许 kvcache_manager 为 None 的情况。正式推理时，policy 必须存在。
+
+---
+
 ## 基类要求 (MANDATORY)
 
 每个 `SparsePolicy` 子类 **必须** 遵守以下要求：

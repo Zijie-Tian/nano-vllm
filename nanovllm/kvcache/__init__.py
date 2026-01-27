@@ -25,7 +25,7 @@ def create_kvcache_manager(config: "Config") -> KVCacheManager:
     Factory function to create the appropriate KV cache manager.
 
     Decision logic:
-    1. If enable_cpu_offload=False: use GPUOnlyManager
+    1. If enable_cpu_offload=False: use GPUOnlyManager (optionally with sparse policy)
     2. If enable_cpu_offload=True but all blocks fit in GPU: use GPUOnlyManager
     3. If enable_cpu_offload=True and need CPU blocks: use HybridKVCacheManager
 
@@ -37,9 +37,44 @@ def create_kvcache_manager(config: "Config") -> KVCacheManager:
     """
     if not getattr(config, 'enable_cpu_offload', False):
         # Default: pure GPU mode
+        # Check if sparse policy is requested for GPU-only mode
+        from nanovllm.config import SparsePolicyType
+        sparse_policy_type = getattr(config, 'sparse_policy', None)
+        # Handle None case - use FULL as default
+        if sparse_policy_type is None:
+            sparse_policy_type = SparsePolicyType.FULL
+
+        sparse_policy = None
+        if sparse_policy_type != SparsePolicyType.FULL:
+            # Create sparse policy for GPU-only mode
+            from nanovllm.kvcache.sparse import create_sparse_policy
+
+            policy_kwargs = {}
+            if sparse_policy_type == SparsePolicyType.QUEST:
+                policy_kwargs = {
+                    'topk_blocks': getattr(config, 'sparse_topk_blocks', 8),
+                    'threshold_blocks': getattr(config, 'sparse_threshold_blocks', 4),
+                }
+            elif sparse_policy_type == SparsePolicyType.XATTN_BSA:
+                policy_kwargs = {
+                    'block_size': getattr(config, 'sparse_block_size', 128),
+                    'samples_per_chunk': getattr(config, 'sparse_samples_per_chunk', 128),
+                    'threshold': getattr(config, 'sparse_threshold', 0.9),
+                    'use_triton': getattr(config, 'sparse_use_triton', True),
+                    'stride': getattr(config, 'sparse_stride', 8),
+                    'chunk_size': getattr(config, 'sparse_chunk_size', 16384),
+                }
+
+            sparse_policy = create_sparse_policy(sparse_policy_type, **policy_kwargs)
+        else:
+            # FULL policy for GPU-only mode - always create for consistent API
+            from nanovllm.kvcache.sparse import FullAttentionPolicy
+            sparse_policy = FullAttentionPolicy()
+
         return GPUOnlyManager(
             num_blocks=config.num_kvcache_blocks,
             block_size=config.kvcache_block_size,
+            sparse_policy=sparse_policy,
         )
 
     # CPU offload is enabled

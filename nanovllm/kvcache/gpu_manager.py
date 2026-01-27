@@ -7,12 +7,15 @@ the KVCacheManager interface.
 """
 
 from collections import deque
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional, TYPE_CHECKING
 import torch
 from torch import Tensor
 
 from nanovllm.engine.sequence import Sequence
 from nanovllm.kvcache.base_manager import KVCacheManager
+
+if TYPE_CHECKING:
+    from nanovllm.kvcache.sparse.policy import SparsePolicy
 
 
 class Block:
@@ -50,16 +53,27 @@ class GPUOnlyManager(KVCacheManager):
     all data stays on GPU at fixed addresses.
     """
 
-    def __init__(self, num_blocks: int, block_size: int):
+    def __init__(
+        self,
+        num_blocks: int,
+        block_size: int,
+        sparse_policy: Optional["SparsePolicy"] = None,
+    ):
         """
         Initialize GPU-only manager.
 
         Args:
             num_blocks: Total number of blocks to manage
             block_size: Tokens per block (default 256)
+            sparse_policy: Optional sparse attention policy for GPU-only mode
         """
         self._block_size = block_size
         self._num_blocks = num_blocks
+
+        # Sparse policy for GPU-only mode (optional)
+        self.sparse_policy = sparse_policy
+        # No offload engine in GPU-only mode
+        self.offload_engine = None
 
         # Block metadata
         self.blocks: List[Block] = [Block(i) for i in range(num_blocks)]

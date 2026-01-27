@@ -40,24 +40,49 @@ def bench_prefill(llm, num_seqs, input_len):
 
 def main():
     import argparse
+    from nanovllm.config import SparsePolicyType
+
     parser = argparse.ArgumentParser(description="Benchmark nanovllm GPU performance")
+    parser.add_argument("--model", type=str, default="~/models/Llama-3.1-8B-Instruct",
+                        help="Model path (default: ~/models/Llama-3.1-8B-Instruct)")
     parser.add_argument("--input-len", type=int, default=None, help="Input length in tokens")
     parser.add_argument("--output-len", type=int, default=64, help="Output length for decode benchmark (default: 64)")
     parser.add_argument("--max-len", type=int, default=32*1024, help="Max model length (default: 32K)")
     parser.add_argument("--bench-decode", action="store_true", help="Run decode benchmark (default: prefill only)")
     parser.add_argument("--bench-all", action="store_true", help="Run both prefill and decode benchmarks")
+    # Sparse policy option (GPU-only mode now supports policy routing)
+    parser.add_argument("--policy", type=str, default=None,
+                        choices=["full", "xattn"],
+                        help="Sparse policy: full (FullAttention), xattn (XAttention+BSA)")
+    parser.add_argument("--enable-policy", action="store_true",
+                        help="Enable sparse policy routing (FullAttentionPolicy by default)")
+    parser.add_argument("--gpu-util", type=float, default=0.9,
+                        help="GPU memory utilization (default: 0.9)")
+    parser.add_argument("--enforce-eager", action="store_true",
+                        help="Disable CUDA graphs (default: False)")
     args = parser.parse_args()
 
-    path = os.path.expanduser("~/models/Qwen3-4B-Instruct-2507/")
+    path = os.path.expanduser(args.model)
     max_len = args.max_len
 
-    print(f"\n[nanovllm GPU] max_len={max_len}")
+    # Configure sparse policy
+    if args.policy == "xattn":
+        sparse_policy = SparsePolicyType.XATTN_BSA
+        print(f"\n[nanovllm GPU + XAttention BSA] max_len={max_len}")
+    elif args.policy == "full" or args.enable_policy:
+        sparse_policy = SparsePolicyType.FULL
+        print(f"\n[nanovllm GPU + Policy] sparse_policy=FULL, max_len={max_len}")
+    else:
+        sparse_policy = None
+        print(f"\n[nanovllm GPU] max_len={max_len}")
 
     llm = LLM(
         path,
-        enforce_eager=False,
+        enforce_eager=args.enforce_eager,
         max_model_len=max_len,
         max_num_batched_tokens=max_len,
+        sparse_policy=sparse_policy,
+        gpu_memory_utilization=args.gpu_util,
     )
 
     # Warmup
