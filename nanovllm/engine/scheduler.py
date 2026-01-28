@@ -15,7 +15,9 @@ class Scheduler:
     def __init__(self, config: Config, kvcache_manager: "KVCacheManager"):
         self.max_num_seqs = config.max_num_seqs
         self.max_num_batched_tokens = config.max_num_batched_tokens
-        self.eos = config.eos
+        # Convert EOS to set for efficient lookup (supports single int or list)
+        eos = config.eos
+        self.eos_set = set(eos) if isinstance(eos, list) else {eos}
         self.kvcache_manager = kvcache_manager
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
@@ -94,7 +96,7 @@ class Scheduler:
     def postprocess(self, seqs: list[Sequence], token_ids: list[int]) -> list[bool]:
         for seq, token_id in zip(seqs, token_ids):
             seq.append_token(token_id)
-            if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
+            if (not seq.ignore_eos and token_id in self.eos_set) or seq.num_completion_tokens == seq.max_tokens:
                 seq.status = SequenceStatus.FINISHED
                 self.kvcache_manager.deallocate(seq)
                 self.running.remove(seq)

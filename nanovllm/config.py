@@ -22,7 +22,7 @@ class Config:
     tensor_parallel_size: int = 1
     enforce_eager: bool = False
     hf_config: AutoConfig | None = None
-    eos: int = -1
+    eos: int | list[int] = -1  # Single EOS token or list of EOS tokens (e.g., GLM-4)
     kvcache_block_size: int = 1024
     num_kvcache_blocks: int = -1
     dtype: str | None = None  # "float16", "bfloat16", or None (use model default)

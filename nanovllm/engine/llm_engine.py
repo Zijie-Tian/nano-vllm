@@ -31,7 +31,13 @@ class LLMEngine:
             self.events.append(event)
         self.model_runner = ModelRunner(config, 0, self.events)
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True, trust_remote_code=True)
-        config.eos = self.tokenizer.eos_token_id
+        # Get EOS token(s) from config (may be int or list, e.g., GLM-4 uses list)
+        # Prefer hf_config.eos_token_id which contains full list, fallback to tokenizer
+        eos_from_config = getattr(config.hf_config, 'eos_token_id', None)
+        if eos_from_config is not None:
+            config.eos = eos_from_config
+        else:
+            config.eos = self.tokenizer.eos_token_id
         # Set Sequence.block_size to match the KV cache block size
         Sequence.block_size = config.kvcache_block_size
         self.scheduler = Scheduler(config, self.model_runner.kvcache_manager)
