@@ -171,7 +171,11 @@ for MAX_SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
     mkdir -p ${DATA_DIR}
     mkdir -p ${PRED_DIR}
 
-    # Prepare data for all tasks first
+    # Prepare data for all tasks in parallel
+    echo "Preparing data for ${#TASKS[@]} tasks in parallel..."
+    declare -a DATA_PIDS
+    declare -a DATA_TASKS
+
     for TASK in "${TASKS[@]}"; do
         python data/prepare.py \
             --save_dir ${DATA_DIR} \
@@ -182,8 +186,34 @@ for MAX_SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
             --max_seq_length ${MAX_SEQ_LENGTH} \
             --model_template_type ${MODEL_TEMPLATE_TYPE} \
             --num_samples ${NUM_SAMPLES} \
-            ${REMOVE_NEWLINE_TAB}
+            ${REMOVE_NEWLINE_TAB} &
+        DATA_PIDS+=($!)
+        DATA_TASKS+=("$TASK")
     done
+
+    # Wait for all data preparation processes and check for failures
+    DATA_FAILED=0
+    for i in "${!DATA_PIDS[@]}"; do
+        pid=${DATA_PIDS[$i]}
+        task=${DATA_TASKS[$i]}
+        if ! wait $pid; then
+            echo "ERROR: Data preparation failed for task: $task (PID: $pid)"
+            DATA_FAILED=1
+        fi
+    done
+
+    if [ $DATA_FAILED -eq 1 ]; then
+        echo "ERROR: One or more data preparation tasks failed. Exiting."
+        exit 1
+    fi
+    echo "All data preparation tasks completed successfully."
+
+    # ============================================================
+    # DEBUG: Skip model inference, only test data generation
+    # ============================================================
+    echo "DEBUG MODE: Skipping model inference and evaluation"
+    continue
+    # ============================================================
 
     # NanoVLLM: parallel execution with GPU-locked scheduling
     if [ "$MODEL_FRAMEWORK" == "nanovllm" ]; then
