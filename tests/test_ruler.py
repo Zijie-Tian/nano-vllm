@@ -108,7 +108,7 @@ DEFAULT_MODEL = os.path.expanduser("~/models/Llama-3.1-8B-Instruct")
 # Note: max_model_len must be > max_input_len to leave room for output tokens
 # 64k benchmark has inputs up to 65536 tokens, so we need 65536 + 128 = 65664
 DEFAULT_MAX_MODEL_LEN = 65664
-DEFAULT_MAX_NEW_TOKENS = 128  # Larger for multi-value tasks
+DEFAULT_MAX_NEW_TOKENS = 16  # Sufficient for NIAH single-value answers
 
 # Task categories for evaluation
 NIAH_TASKS = ["niah_single_1", "niah_single_2", "niah_single_3",
@@ -323,7 +323,7 @@ def run_ruler_benchmark(
     max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
     enable_cpu_offload: bool = False,
     num_gpu_blocks: int = 4,
-    block_size: int = 1024,
+    block_size: int = 4096,
     num_kv_buffers: int = 4,
     gpu_utilization: float = 0.9,
     enforce_eager: bool = True,
@@ -528,8 +528,8 @@ if __name__ == "__main__":
                         help="Enable CPU offload mode")
     parser.add_argument("--num-gpu-blocks", type=int, default=4,
                         help="Number of GPU blocks for CPU offload (default: 4)")
-    parser.add_argument("--block-size", type=int, default=1024,
-                        help="KV cache block size (default: 1024)")
+    parser.add_argument("--block-size", type=int, default=4096,
+                        help="KV cache block size (default: 4096)")
     parser.add_argument("--num-kv-buffers", type=int, default=4,
                         help="Number of KV buffers for ring buffer (default: 4)")
     parser.add_argument("--gpu-utilization", type=float, default=0.9,
