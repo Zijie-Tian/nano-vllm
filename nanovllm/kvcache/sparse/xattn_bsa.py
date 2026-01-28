@@ -652,7 +652,11 @@ class XAttentionBSAPolicy(SparsePolicy):
         Returns:
             Attention output [seq_len, num_heads, head_dim]
         """
-        from nanovllm.ops.chunked_attention import flash_attn_with_lse, merge_attention_outputs
+        # Use FlashInfer-based implementations (more optimized)
+        from nanovllm.ops.chunked_attention import (
+            flash_attn_with_lse_flashinfer as flash_attn_with_lse,
+            merge_attention_outputs_flashinfer as merge_attention_outputs,
+        )
 
         q_batched = q.unsqueeze(0)  # [1, seq_len, num_heads, head_dim]
         o_acc = None
