@@ -19,9 +19,9 @@ SEQ_LENGTHS=(
     # 4096
     # 8192
     # 16384
-    # 32768
+    32768   # debug mode: only 32k
     # 65536
-    131072
+    # 131072
 )
 
 MODEL_SELECT() {
@@ -45,6 +45,33 @@ MODEL_SELECT() {
             MODEL_PATH="${MODEL_DIR}/Llama-3.1-8B-Instruct"
             MODEL_TEMPLATE_TYPE="meta-llama3"
             MODEL_FRAMEWORK="nanovllm"
+            ;;
+        # GLM-4-9B-Chat-1M (NanoVLLM backend)
+        glm4-9b-nanovllm)
+            MODEL_PATH="${MODEL_DIR}/GLM-4-9B-Chat-1M"
+            MODEL_TEMPLATE_TYPE="glm4"
+            MODEL_FRAMEWORK="nanovllm"
+            # GLM-4 uses HuggingFace tokenizer (not SentencePiece)
+            TOKENIZER_PATH="${MODEL_DIR}/GLM-4-9B-Chat-1M"
+            TOKENIZER_TYPE="hf"
+            ;;
+        # Qwen2.5-7B-Instruct-1M (NanoVLLM backend)
+        qwen2.5-7b-1m-nanovllm)
+            MODEL_PATH="${MODEL_DIR}/Qwen2.5-7B-Instruct-1M"
+            MODEL_TEMPLATE_TYPE="qwen"
+            MODEL_FRAMEWORK="nanovllm"
+            # Qwen2.5 uses HuggingFace tokenizer
+            TOKENIZER_PATH="${MODEL_DIR}/Qwen2.5-7B-Instruct-1M"
+            TOKENIZER_TYPE="hf"
+            ;;
+        # Qwen2.5-7B-Instruct (standard version, NanoVLLM backend)
+        qwen2.5-7b-nanovllm)
+            MODEL_PATH="${MODEL_DIR}/Qwen2.5-7B-Instruct"
+            MODEL_TEMPLATE_TYPE="qwen"
+            MODEL_FRAMEWORK="nanovllm"
+            # Qwen2.5 uses HuggingFace tokenizer
+            TOKENIZER_PATH="${MODEL_DIR}/Qwen2.5-7B-Instruct"
+            TOKENIZER_TYPE="hf"
             ;;
     esac
 

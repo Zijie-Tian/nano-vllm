@@ -159,6 +159,8 @@ class NanoVLLMModel:
         kvcache_block_size = generation_kwargs.pop('kvcache_block_size', 1024)
         gpu_memory_utilization = generation_kwargs.pop('gpu_memory_utilization', 0.9)
         enforce_eager = generation_kwargs.pop('enforce_eager', False)  # Default: enable CUDA graph
+        # dtype: required for models with float32 default (e.g., Qwen2.5)
+        dtype = generation_kwargs.pop('dtype', None)
 
         # Build LLM kwargs with sparse_policy support
         llm_kwargs = {
@@ -174,6 +176,10 @@ class NanoVLLMModel:
             "sparse_chunk_size": sparse_chunk_size,
             "sparse_use_triton": sparse_use_triton,
         }
+
+        # Add dtype if specified (required for some models like Qwen2.5)
+        if dtype:
+            llm_kwargs["dtype"] = dtype
 
         if enable_cpu_offload:
             llm_kwargs["enable_cpu_offload"] = True

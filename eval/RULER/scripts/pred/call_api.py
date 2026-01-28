@@ -247,9 +247,11 @@ def get_llm(tokens_to_generate):
             max_model_len=int(os.environ.get('NANOVLLM_MAX_MODEL_LEN', 128 * 1024)),
             enable_cpu_offload=os.environ.get('NANOVLLM_CPU_OFFLOAD', 'true').lower() == 'true',
             num_gpu_blocks=int(os.environ.get('NANOVLLM_NUM_GPU_BLOCKS', 2)),
-            kvcache_block_size=int(os.environ.get('NANOVLLM_BLOCK_SIZE', 1024)),
+            kvcache_block_size=int(os.environ.get('NANOVLLM_BLOCK_SIZE', 4096)),
             gpu_memory_utilization=float(os.environ.get('NANOVLLM_GPU_UTIL', 0.9)),
             enforce_eager=os.environ.get('NANOVLLM_ENFORCE_EAGER', 'false').lower() == 'true',
+            # dtype: bfloat16 recommended for GLM-4 and Qwen2.5 models
+            dtype=os.environ.get('NANOVLLM_DTYPE', 'bfloat16'),
         )
 
     else:

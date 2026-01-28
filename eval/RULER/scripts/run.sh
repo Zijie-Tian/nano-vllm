@@ -136,7 +136,7 @@ fi
 
 # NanoVLLM parallel execution settings
 # GPU configuration for parallel execution
-GPU_LIST=${GPU_LIST:-"0,1,2,3"}  # Comma-separated GPU IDs to use (4 GPUs)
+GPU_LIST=${GPU_LIST:-"0"}  # Comma-separated GPU IDs to use (debug mode: single GPU)
 IFS=',' read -ra GPU_ARRAY <<< "$GPU_LIST"
 NUM_GPUS=${#GPU_ARRAY[@]}
 

@@ -30,6 +30,12 @@ Templates = {
     'Phi3': "<|user|>\n{task_template}<|end|>\n<|assistant|>\n",
 
     'meta-llama3': "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{task_template}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",
-    
+
     'jamba': "<|startoftext|><|bom|><|system|> <|eom|><|bom|><|user|> {task_template}<|eom|><|bom|><|assistant|>",
+
+    # Qwen2.5 chat template (im_start/im_end format)
+    'qwen': "<|im_start|>user\n{task_template}<|im_end|>\n<|im_start|>assistant\n",
+
+    # GLM-4 chat template (gMASK format)
+    'glm4': "[gMASK]<sop><|user|>\n{task_template}<|assistant|>\n",
 }
