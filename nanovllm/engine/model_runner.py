@@ -30,6 +30,18 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
+def get_num_kv_heads(hf_config) -> int:
+    """Get number of KV heads from config (handles GLM-4's multi_query_group_num)."""
+    return getattr(hf_config, 'num_key_value_heads',
+                   getattr(hf_config, 'multi_query_group_num', hf_config.num_attention_heads))
+
+
+def get_head_dim(hf_config) -> int:
+    """Get head dimension from config (handles GLM-4's kv_channels)."""
+    return getattr(hf_config, "head_dim",
+                   getattr(hf_config, "kv_channels", hf_config.hidden_size // hf_config.num_attention_heads))
+
+
 class ModelRunner:
 
     def __init__(self, config: Config, rank: int, event: Event | list[Event]):
@@ -144,8 +156,8 @@ class ModelRunner:
         used = total - free
         peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
-        num_kv_heads = hf_config.num_key_value_heads // self.world_size
-        head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
+        num_kv_heads = get_num_kv_heads(hf_config) // self.world_size
+        head_dim = get_head_dim(hf_config)
         block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.torch_dtype.itemsize
 
         # Calculate max GPU blocks based on available memory
@@ -787,8 +799,8 @@ class ModelRunner:
         - LastGraph: o_proj → post_norm → mlp → final_norm
         """
         hf_config = self.config.hf_config
-        num_kv_heads = hf_config.num_key_value_heads // self.world_size
-        head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
+        num_kv_heads = get_num_kv_heads(hf_config) // self.world_size
+        head_dim = get_head_dim(hf_config)
 
         # Create Decode Graph Manager (seq_len=1)
         self.decode_graph_manager = OffloadGraphManager(
