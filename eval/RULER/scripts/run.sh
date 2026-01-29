@@ -211,8 +211,8 @@ for MAX_SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
     # ============================================================
     # DEBUG: Skip model inference, only test data generation
     # ============================================================
-    echo "DEBUG MODE: Skipping model inference and evaluation"
-    continue
+    # echo "DEBUG MODE: Skipping model inference and evaluation"
+    # continue
     # ============================================================
 
     # NanoVLLM: parallel execution with GPU-locked scheduling
@@ -281,6 +281,7 @@ for MAX_SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
                     --top_k ${TOP_K} \
                     --top_p ${TOP_P} \
                     --batch_size ${BATCH_SIZE} \
+                    --num_samples ${NUM_SAMPLES} \
                     ${STOP_WORDS} \
                     ${METRIC} \
                     ${THRESHOLD} \
@@ -321,6 +322,7 @@ for MAX_SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
                 --top_k ${TOP_K} \
                 --top_p ${TOP_P} \
                 --batch_size ${BATCH_SIZE} \
+                --num_samples ${NUM_SAMPLES} \
                 ${STOP_WORDS} \
                 ${METRIC} \
                 ${THRESHOLD} \

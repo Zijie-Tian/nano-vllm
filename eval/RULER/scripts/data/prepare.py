@@ -103,7 +103,7 @@ def main():
     if os.path.exists(save_file):
         with open(save_file, "r") as f:
             data = f.readlines()
-        if len(data) == args.num_samples: file_exists = True
+        if len(data) >= args.num_samples: file_exists = True
 
     if not file_exists:
         try:

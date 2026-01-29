@@ -71,6 +71,7 @@ parser.add_argument("--task", type=str, required=True, help='Options: tasks in b
 parser.add_argument("--subset", type=str, default='validation', help='Options: validation or test')
 parser.add_argument("--chunk_idx", type=int, default=0, help='index of current split chunk')
 parser.add_argument("--chunk_amount", type=int, default=1, help='size of split chunk')
+parser.add_argument("--num_samples", type=int, default=None, help='Maximum number of samples to test (default: all)')
 
 # Server
 parser.add_argument("--server_type", default='nemo', action=ServerAction, choices=SERVER_TYPES)
@@ -249,7 +250,7 @@ def get_llm(tokens_to_generate):
             num_gpu_blocks=int(os.environ.get('NANOVLLM_NUM_GPU_BLOCKS', 2)),
             kvcache_block_size=int(os.environ.get('NANOVLLM_BLOCK_SIZE', 4096)),
             gpu_memory_utilization=float(os.environ.get('NANOVLLM_GPU_UTIL', 0.9)),
-            enforce_eager=os.environ.get('NANOVLLM_ENFORCE_EAGER', 'false').lower() == 'true',
+            enforce_eager=os.environ.get('NANOVLLM_ENFORCE_EAGER', 'true').lower() == 'true',
             # dtype: bfloat16 recommended for GLM-4 and Qwen2.5 models
             dtype=os.environ.get('NANOVLLM_DTYPE', 'bfloat16'),
         )
@@ -297,6 +298,10 @@ def main():
         data = [sample for sample in read_manifest(task_file) if sample['index'] not in pred_index]
     else:
         data = read_manifest(task_file)
+
+    # Limit number of samples if specified
+    if args.num_samples is not None:
+        data = data[:args.num_samples]
 
     # Load api
     llm = get_llm(config['tokens_to_generate'])

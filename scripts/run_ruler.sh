@@ -35,6 +35,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "${SCRIPT_DIR}")"
 MODEL_DIR="${MODEL_DIR:-/home/zijie/models}"
 
+# GPU configuration (support both GPULIST and GPU_LIST)
+export GPU_LIST="${GPULIST:-${GPU_LIST:-0,1,2,3}}"
+
 # Set PYTHONPATH (nanovllm from 3rdparty takes priority over system version)
 export PYTHONPATH="${PROJECT_DIR}/3rdparty/nanovllm:${PROJECT_DIR}:${PYTHONPATH}"
 
@@ -50,6 +53,7 @@ echo "Model Dir:    $MODEL_DIR"
 echo "Model:        $MODEL_NAME"
 echo "Benchmark:    $BENCHMARK"
 echo "Metric:       $METRIC"
+echo "GPU List:     $GPU_LIST"
 # Extract stride from EXTRA_ARGS for display
 if [[ "$EXTRA_ARGS" == *"--stride"* ]]; then
     STRIDE_VALUE=$(echo "$EXTRA_ARGS" | grep -o -- '--stride [0-9]*' | awk '{print $2}')

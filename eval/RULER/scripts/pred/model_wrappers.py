@@ -158,7 +158,7 @@ class NanoVLLMModel:
         num_gpu_blocks = generation_kwargs.pop('num_gpu_blocks', 2)
         kvcache_block_size = generation_kwargs.pop('kvcache_block_size', 1024)
         gpu_memory_utilization = generation_kwargs.pop('gpu_memory_utilization', 0.9)
-        enforce_eager = generation_kwargs.pop('enforce_eager', False)  # Default: enable CUDA graph
+        enforce_eager = generation_kwargs.pop('enforce_eager', True)  # Default: disable CUDA graph to avoid OOM
         # dtype: required for models with float32 default (e.g., Qwen2.5)
         dtype = generation_kwargs.pop('dtype', None)
 
