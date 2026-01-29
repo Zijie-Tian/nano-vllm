@@ -33,6 +33,8 @@ NUM_GPU_BLOCKS="4"
 BLOCK_SIZE="4096"
 GPU_UTIL="0.9"
 ENABLE_OFFLOAD="--enable-offload"
+MODEL=""
+DATA_DIR_OVERRIDE=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -71,6 +73,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --block-size)
             BLOCK_SIZE="$2"
+            shift 2
+            ;;
+        --model)
+            MODEL="$2"
+            shift 2
+            ;;
+        --data-dir)
+            DATA_DIR_OVERRIDE="$2"
             shift 2
             ;;
         -h|--help)
@@ -113,10 +123,24 @@ case "$CTX_LEN" in
     128k)
         MAX_MODEL_LEN=144000
         ;;
+    256k)
+        MAX_MODEL_LEN=288000
+        ;;
+    512k)
+        MAX_MODEL_LEN=576000
+        ;;
+    1m)
+        MAX_MODEL_LEN=1100000
+        ;;
     *)
         MAX_MODEL_LEN=72000
         ;;
 esac
+
+# Override DATA_DIR if specified
+if [ -n "$DATA_DIR_OVERRIDE" ]; then
+    DATA_DIR="$DATA_DIR_OVERRIDE"
+fi
 
 # Create output directory if needed
 mkdir -p "$OUTPUT_DIR"
@@ -172,6 +196,12 @@ if [ -n "$POLICY_ENUM" ] && [ "$POLICY_ENUM" != "full" ]; then
     SPARSE_POLICY_ARG="--sparse-policy $POLICY_ENUM"
 fi
 
+# Build model argument
+MODEL_ARG=""
+if [ -n "$MODEL" ]; then
+    MODEL_ARG="--model $MODEL"
+fi
+
 # Run nsys profile and capture exit code
 CUDA_VISIBLE_DEVICES=$GPU_ID PYTHONPATH="$PROJECT_ROOT:$PYTHONPATH" \
 nsys profile \
@@ -188,6 +218,7 @@ nsys profile \
         --gpu-utilization "$GPU_UTIL" \
         $ENABLE_OFFLOAD \
         $SPARSE_POLICY_ARG \
+        $MODEL_ARG \
         --quiet
 EXIT_CODE=$?
 
