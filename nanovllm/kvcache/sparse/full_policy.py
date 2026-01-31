@@ -47,6 +47,8 @@ class FullAttentionPolicy(SparsePolicy):
         available_blocks: List[int],
         offload_engine: "OffloadEngine",
         ctx: PolicyContext,
+        q: torch.Tensor,
+        k: torch.Tensor,
     ) -> List[int]:
         """Return all blocks - no sparsity."""
         # Update statistics (only for layer 0 to avoid overcounting)

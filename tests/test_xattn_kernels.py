@@ -41,9 +41,9 @@ K = torch.zeros(1, 1, kv_len, head_dim, dtype=torch.bfloat16).cuda()
 
 for i in range(q_len):
     if i % 2 == 0:
-        Q[0, 0, i, :] = 1
+        Q[0, 0, i, :] = 1 * (i // stride + 1)
     else:
-        Q[0, 0, i, :] = 2
+        Q[0, 0, i, :] = 2 * (i // stride + 1)
 
 for i in range(kv_len):
     if i % 2 == 0:
@@ -74,8 +74,11 @@ for k_chunk_idx in range(num_k_chunks):
         Q, K_chunk, stride,
         chunk_start=0,
         chunk_end=q_reshaped_len,
-        is_causal=False
+        is_causal=True 
     )
+    
+    __import__('pdb').set_trace()
+    
     attn_scores_list.append(attn_chunk)
 
 # 拼接所有 K chunks 的结果

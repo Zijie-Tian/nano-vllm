@@ -229,16 +229,16 @@ class ModelRunner:
 
             # GPU-only mode: pre-allocate policy metadata buffers
             # This avoids dynamic GPU memory allocation during forward pass
-            if not config.enable_cpu_offload:
-                num_heads = hf_config.num_attention_heads // self.world_size
-                self.kvcache_manager.sparse_policy.alloc_policy_metadata(
-                    num_heads=num_heads,
-                    num_kv_heads=num_kv_heads,
-                    head_dim=head_dim,
-                    max_seq_len=config.max_model_len,
-                    dtype=hf_config.torch_dtype,
-                    device=torch.device("cuda"),
-                )
+            # if not config.enable_cpu_offload:
+            num_heads = hf_config.num_attention_heads // self.world_size
+            self.kvcache_manager.sparse_policy.alloc_policy_metadata(
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                max_seq_len=config.max_model_len,
+                dtype=hf_config.torch_dtype,
+                device=torch.device("cuda"),
+            )
 
             # Log policy info (handle both enum and None cases)
             policy_name = config.sparse_policy.name if config.sparse_policy is not None else "FULL"

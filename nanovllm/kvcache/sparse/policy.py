@@ -142,6 +142,8 @@ class SparsePolicy(ABC):
         available_blocks: List[int],
         offload_engine: "OffloadEngine",
         ctx: PolicyContext,
+        q: torch.Tensor,
+        k: torch.Tensor,
     ) -> List[int]:
         """
         Select which KV blocks to load for the current query chunk.
@@ -158,6 +160,8 @@ class SparsePolicy(ABC):
                            to load KV to make selection decisions).
             ctx: PolicyContext with information about the current query
                  chunk, layer, phase (prefill/decode), etc.
+            q: Query tensor [seq_len, num_heads, head_dim] for current chunk
+            k: Key tensor [seq_len, num_kv_heads, head_dim] for current chunk
 
         Returns:
             List of block IDs to load (must be a subset of available_blocks).
