@@ -18,6 +18,50 @@ softmax(x_i) = exp(x_i) / Σ_j exp(x_j)
 
 通过将 softmax 计算拆分为三个阶段，实现正确的 KV chunking：
 
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        三阶段 Pipeline                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌─────────────┐   ┌─────────────┐   ┌─────────────┐           │
+│  │ KV Chunk 0  │   │ KV Chunk 1  │   │ KV Chunk N  │           │
+│  │ attn_scores │   │ attn_scores │   │ attn_scores │           │
+│  └──────┬──────┘   └──────┬──────┘   └──────┬──────┘           │
+│         │                 │                 │                   │
+│         ▼                 ▼                 ▼                   │
+│  ┌─────────────────────────────────────────────────┐           │
+│  │     阶段 1: softmax_compute_partial_stats       │           │
+│  │     计算每个 chunk 的 (m_partial, l_partial)    │           │
+│  └─────────────────────────────────────────────────┘           │
+│         │                 │                 │                   │
+│         ▼                 ▼                 ▼                   │
+│      (m_0, l_0)       (m_1, l_1)       (m_N, l_N)              │
+│         │                 │                 │                   │
+│         └────────────────┬┴─────────────────┘                   │
+│                          ▼                                      │
+│  ┌─────────────────────────────────────────────────┐           │
+│  │         阶段 2: merge_softmax_stats             │           │
+│  │         Host 端合并 → (m_global, l_global)      │           │
+│  └─────────────────────────────────────────────────┘           │
+│                          │                                      │
+│         ┌────────────────┼────────────────┐                     │
+│         ▼                ▼                ▼                     │
+│  ┌─────────────────────────────────────────────────┐           │
+│  │    阶段 3: softmax_normalize_and_block_sum      │           │
+│  │    使用全局 stats 归一化并计算 block sums        │           │
+│  └─────────────────────────────────────────────────┘           │
+│         │                │                │                     │
+│         ▼                ▼                ▼                     │
+│    block_sums_0    block_sums_1    block_sums_N                │
+│         │                │                │                     │
+│         └────────────────┴────────────────┘                     │
+│                          │                                      │
+│                          ▼                                      │
+│                 torch.cat → final mask                          │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
 ### 阶段 1: `softmax_compute_partial_stats`
 
 计算每个 KV chunk 的 partial statistics：
@@ -99,6 +143,115 @@ softmax(x_i) = exp(x_i - m_global) / l_global  # 正确!
 1. **`softmax_partial_stats_kernel`**: 通过 `kv_offset` 参数确定当前 KV chunk 在完整序列中的位置，正确计算 causal boundary
 
 2. **`softmax_normalize_block_sum_kernel`**: 同样使用 `kv_offset`，对 causal boundary 之后的位置输出 0
+
+## 存储开销分析
+
+### 符号定义
+
+| 符号 | 含义 | 典型值 |
+|------|------|--------|
+| S | seq_len | 64K |
+| B | batch_size | 1 |
+| H | num_heads | 32 |
+| D | head_dim | 128 |
+| T | stride | 4-8 |
+| C | chunk_size | 16K |
+| n | num_kv_chunks = ceil(S/C) | 4 |
+
+### 原始方式 (无 KV chunking)
+
+**attn_weights 峰值内存**:
+```
+[B, H, S/T, S/T] × 4 bytes = B × H × (S/T)² × 4
+
+例: S=64K, T=4, B=1, H=32
+= 1 × 32 × 16384² × 4 = 32 GB
+```
+
+### KV Chunking 方式的额外存储
+
+#### 1. Partial Stats (每个 KV chunk)
+
+```
+m_partial: [B, H, C/T] × 4 bytes
+l_partial: [B, H, C/T] × 4 bytes
+
+单个 chunk = 2 × B × H × (C/T) × 4
+           = 2 × 1 × 32 × 4096 × 4 = 1 MB
+```
+
+#### 2. Global Stats
+
+```
+m_global: [B, H, S/T] × 4 bytes
+l_global: [B, H, S/T] × 4 bytes
+
+= 2 × B × H × (S/T) × 4
+= 2 × 1 × 32 × 16384 × 4 = 4 MB
+```
+
+#### 3. 总额外开销
+
+```
+total_extra = n × partial_stats + global_stats
+            = 4 × 1MB + 4MB = 8 MB
+```
+
+### 存储开销随 seqlen 变化
+
+| seqlen | num_chunks | 原始 attn_weights | 额外 stats | 比例 |
+|--------|------------|-------------------|------------|------|
+| 16K | 1 | 2 GB | 2 MB | 0.1% |
+| 32K | 2 | 8 GB | 4 MB | 0.05% |
+| 64K | 4 | 32 GB | 8 MB | 0.025% |
+| 128K | 8 | 128 GB | 16 MB | 0.012% |
+
+### 复杂度分析
+
+| 存储组件 | 复杂度 | 说明 |
+|----------|--------|------|
+| 原始 attn_weights | O(S²) | 二次增长 |
+| Partial/Global stats | O(S) | 线性增长 |
+| **相对开销** | O(1/S) | **随 seqlen 递减** |
+
+### 峰值显存优化
+
+KV chunking 的主要收益是**峰值显存**从 O(S²) 降到 O(S×C)：
+
+```
+原始: O(B × H × (S/T)²)           # 完整 attn_weights
+KV chunking: O(B × H × (S/T) × (C/T))  # 一次只处理一个 chunk
+```
+
+以 S=128K, C=16K 为例：
+- 原始峰值: ~128 GB
+- KV chunking 峰值: ~16 GB (降低 **8 倍**)
+
+## 支持不同 Q/KV Chunk Size
+
+三阶段 pipeline 支持 Q 和 KV 使用不同的 chunk size：
+
+```python
+q_chunk_size = 8192   # Q 分块大小
+kv_chunk_size = 16384 # KV 分块大小
+
+for q_chunk_idx in range(q_chunk_num):
+    Q_chunk = Q[:, :, q_start:q_end, :]  # [B, H, q_chunk_size, D]
+
+    for kv_chunk_idx in range(kv_chunk_num):
+        K_chunk = K[:, :, kv_start:kv_end, :]  # [B, H, kv_chunk_size, D]
+        # ... 三阶段处理
+```
+
+### 测试验证结果
+
+| Config | seq_len | Q chunks | KV chunks | density | 对齐 |
+|--------|---------|----------|-----------|---------|------|
+| Q=16K, KV=16K | 64891 | 4 | 4 | 0.1117 | ✓ 100% |
+| Q=8K, KV=16K | 64891 | 8 | 4 | 0.1112 | ✓ 100% |
+| Q=16K, KV=8K | 64891 | 4 | 8 | 0.1117 | ✓ 100% |
+| Q=8K, KV=8K | 64891 | 8 | 8 | 0.1112 | ✓ 100% |
+| Q=4K, KV=16K | 64891 | 16 | 4 | 0.1109 | ✓ 100% |
 
 ## API 参考
 
@@ -213,23 +366,35 @@ for q_chunk_idx in range(q_chunk_num):
 |------|---------|-----------------|
 | Kernel 数量 | 1 | 2 (stats + normalize) |
 | Raw scores 读取次数 | 2 | 2 |
-| 额外内存 | 0 | O(batch × heads × q_len × 2) for (m, l) |
+| 额外内存 | 0 | O(B × H × S/T × 2) for (m, l) |
 | Host 计算 | 无 | merge stats (轻量) |
-| **峰值显存** | O(q_len × k_full_len) | **O(q_len × k_chunk_len)** |
+| **峰值显存** | O(S²) | **O(S × C)** |
 
-## 验证
+## 验证测试
 
-测试脚本 `tests/test_xattn_estimate_alignment.py` 验证了 KV chunking 实现与原始 `xattn_estimate` API 的一致性：
+### 批量测试结果
+
+测试脚本 `tests/test_xattn_kv_chunking_batch.py` 验证了不同 seqlen 下的一致性：
 
 ```
-| 方法 | density | 与 API 差异 | Mask 差异 |
-|------|---------|-------------|-----------|
-| xattn_estimate API | 0.159023 | - | - |
-| KV chunking | 0.159023 | 0.000000 | 0.0044% |
+| seq_len | stride | threshold | kv_chunks | density_api | density_kv | diff     | mask_diff | status |
+|---------|--------|-----------|-----------|-------------|------------|----------|-----------|--------|
+|    3688 |      4 |      0.90 |         1 |    0.383405 |   0.383405 | 0.000000 |   0.0000% |   PASS |
+|    7888 |      4 |      0.90 |         1 |    0.290611 |   0.290611 | 0.000000 |   0.0000% |   PASS |
+|   15685 |      4 |      0.90 |         1 |    0.197724 |   0.197724 | 0.000000 |   0.0000% |   PASS |
+|   32485 |      4 |      0.90 |         2 |    0.159023 |   0.159023 | 0.000000 |   0.0000% |   PASS |
+|   64891 |      4 |      0.90 |         4 |    0.111656 |   0.111656 | 0.000000 |   0.0000% |   PASS |
 ```
+
+### 关键结论
+
+1. **数学等价性**: density_diff = 0.000000 对于所有测试
+2. **Mask 完全对齐**: mask_diff = 0.0000% 对于所有测试
+3. **支持任意 Q/KV chunk size 组合**
 
 ## 相关文件
 
 - `nanovllm/ops/xattn.py`: Kernel 实现
-- `tests/test_xattn_estimate_alignment.py`: 验证测试
+- `tests/test_xattn_estimate_alignment.py`: 单文件验证测试
+- `tests/test_xattn_kv_chunking_batch.py`: 批量验证测试
 - `docs/xattn_kernels_guide.md`: 原始 kernel 文档
