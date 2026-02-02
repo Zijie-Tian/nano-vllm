@@ -41,6 +41,7 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 | [`docs/xattn_density_alignment_analysis.md`](docs/xattn_density_alignment_analysis.md) | 📊 ANALYSIS: GPU-only vs Offload 模式 density 对齐分析，chunked softmax 边界效应，5-7% 差异根因 |
 | [`docs/xattn_kv_chunking_density_test.md`](docs/xattn_kv_chunking_density_test.md) | 🧪 TEST: XAttention KV chunking density 验证，threshold=1.0 对齐，threshold<1.0 差异 10-13% |
 | [`docs/gpuonly_density_alignment_test.md`](docs/gpuonly_density_alignment_test.md) | ✅ TEST: Density 对齐验证 (GPU-only + Offload, 4K-64K)，xattn_estimate vs KV chunking 完全一致 |
+| [`docs/xattn_memory_benchmark.md`](docs/xattn_memory_benchmark.md) | 📊 BENCH: XAttention 内存基准测试，Qwen3-0.6B 32K 在 24GB 显存可行 (gpu-util=0.28) |
 
 ## Rules Index
 
