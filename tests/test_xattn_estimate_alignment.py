@@ -10,13 +10,23 @@ Test: 验证 xattn_estimate 与 KV chunking kernels 的一致性
   2. merge_softmax_stats: Host 端合并所有 chunks 的 stats
   3. softmax_normalize_and_block_sum: 使用全局 stats 归一化
 
+支持两种数据格式:
+  1. offload 模式保存: {"query", "key", "stride", "threshold", "density", "layer_id"}
+  2. GPU-only 模式保存: {"Q", "K", "chunk_size", "block_size", "stride", "threshold", "mask", "attn_sums", ...}
+
 Usage:
+    # 使用 offload 模式数据
     CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/home/zijie/Code/nano-vllm:$PYTHONPATH \
         python tests/test_xattn_estimate_alignment.py
+
+    # 使用 GPU-only 模式数据
+    CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/home/zijie/Code/nano-vllm:$PYTHONPATH \
+        python tests/test_xattn_estimate_alignment.py --gpuonly
 """
 import sys
 sys.path.insert(0, "/home/zijie/Code/nano-vllm")
 
+import argparse
 import torch
 import math
 from nanovllm.ops.xattn import (
@@ -29,12 +39,21 @@ from nanovllm.ops.xattn import (
 )
 
 # ============================================================
+# 命令行参数
+# ============================================================
+parser = argparse.ArgumentParser()
+parser.add_argument("--gpuonly", action="store_true", help="使用 GPU-only 模式保存的数据")
+parser.add_argument("--data-file", type=str, default=None, help="数据文件路径")
+parser.add_argument("--chunk-size", type=int, default=None, help="覆盖 CHUNK_SIZE (用于测试不同分块大小)")
+args = parser.parse_args()
+
+# ============================================================
 # 参数配置
 # ============================================================
-DATA_FILE = "/home/zijie/Code/nano-vllm/results/kvcache/qkv_32485.pt"
-BSA_BLOCK_SIZE = 128
-CHUNK_SIZE = 16384  # xattn_estimate 默认值
-USE_SAVED_PARAMS = True  # 设为 False 则使用默认值
+if args.gpuonly:
+    DATA_FILE = args.data_file or "/home/zijie/Code/nano-vllm/results/mask_alignment/gpuonly_layer0.pt"
+else:
+    DATA_FILE = args.data_file or "/home/zijie/Code/nano-vllm/results/kvcache/qkv_32485.pt"
 
 device = "cuda"
 
@@ -46,23 +65,54 @@ print("Step 1: 加载真实 KV cache 数据")
 print("=" * 60)
 
 data = torch.load(DATA_FILE, map_location="cpu")
-Q = data["query"].to(device)  # [1, 32, seq_len, 128]
-K = data["key"].to(device)    # [1, 32, seq_len, 128]
+
+# 检测数据格式并加载
+if "Q" in data:
+    # GPU-only 模式保存的格式
+    print(f"[INFO] 检测到 GPU-only 模式数据格式")
+    Q = data["Q"].to(device)
+    K = data["K"].to(device)
+    BSA_BLOCK_SIZE = data.get("block_size", 128)
+    CHUNK_SIZE = data.get("chunk_size", 4096)
+    STRIDE = data.get("stride", 8)
+    THRESHOLD = data.get("threshold", 0.9)
+    if isinstance(THRESHOLD, torch.Tensor):
+        THRESHOLD = THRESHOLD.item()
+    # GPU-only 模式保存了 mask 和 attn_sums，可以用于验证
+    saved_mask = data.get("mask", None)
+    saved_attn_sums = data.get("attn_sums", None)
+    saved_density = None  # GPU-only 模式没有保存 density
+    layer_id = 0  # GPU-only 只保存 layer 0
+else:
+    # offload 模式保存的格式
+    print(f"[INFO] 检测到 offload 模式数据格式")
+    Q = data["query"].to(device)
+    K = data["key"].to(device)
+    BSA_BLOCK_SIZE = 128
+    CHUNK_SIZE = 4096
+    STRIDE = data["stride"]
+    THRESHOLD = data["threshold"]
+    if isinstance(THRESHOLD, torch.Tensor):
+        THRESHOLD = THRESHOLD[0].item()
+    saved_mask = None
+    saved_attn_sums = None
+    saved_density = data.get("density", None)
+    layer_id = data.get("layer_id", 0)
 
 batch_size, num_heads, seq_len, head_dim = Q.shape
 
-# 从保存的数据中读取参数
-if USE_SAVED_PARAMS:
-    STRIDE = data["stride"]
-    THRESHOLD = data["threshold"][0].item() if isinstance(data["threshold"], torch.Tensor) else data["threshold"]
-else:
-    STRIDE = 8
-    THRESHOLD = 0.9
+# 命令行覆盖 CHUNK_SIZE
+if args.chunk_size is not None:
+    CHUNK_SIZE = args.chunk_size
+    print(f"[INFO] 使用命令行指定的 CHUNK_SIZE={CHUNK_SIZE}")
 
 print(f"Q shape: {Q.shape}")
 print(f"K shape: {K.shape}")
-print(f"Data layer_id: {data['layer_id']}, saved density: {data['density']:.4f}")
-print(f"使用参数: STRIDE={STRIDE}, THRESHOLD={THRESHOLD}, CHUNK_SIZE={CHUNK_SIZE}")
+if saved_density is not None:
+    print(f"Data layer_id: {layer_id}, saved density: {saved_density:.4f}")
+else:
+    print(f"Data layer_id: {layer_id}")
+print(f"使用参数: STRIDE={STRIDE}, THRESHOLD={THRESHOLD}, CHUNK_SIZE={CHUNK_SIZE}, BSA_BLOCK_SIZE={BSA_BLOCK_SIZE}")
 print()
 
 # ============================================================
@@ -259,7 +309,57 @@ print(f"| xattn_estimate API | {density_api:.6f} | - | - |")
 print(f"| KV chunking | {density_kv:.6f} | {abs(density_api - density_kv):.6f} | {100*mask_diff/mask_total:.4f}% |")
 print()
 
-if abs(density_api - density_kv) < 1e-6 and mask_diff / mask_total < 0.001:
+passed = abs(density_api - density_kv) < 1e-6 and mask_diff / mask_total < 0.001
+
+# ============================================================
+# Step 5: 与 GPU-only 保存的数据对比 (如果有)
+# ============================================================
+if saved_mask is not None or saved_attn_sums is not None:
+    print("=" * 60)
+    print("Step 5: 与 GPU-only 保存的数据对比")
+    print("=" * 60)
+    print()
+
+    if saved_mask is not None:
+        saved_mask_gpu = saved_mask.to(device)
+        # 比较 mask
+        mask_saved_diff = (mask_api_valid != saved_mask_gpu).sum().item()
+        mask_saved_total = saved_mask_gpu.numel()
+        print(f"| xattn_estimate vs GPU-only saved mask | 差异 blocks: {mask_saved_diff} / {mask_saved_total} ({100*mask_saved_diff/mask_saved_total:.4f}%) |")
+
+        if mask_saved_diff == 0:
+            print("✅ mask 与 GPU-only 保存完全一致")
+        else:
+            print("❌ mask 与 GPU-only 保存存在差异")
+            passed = False
+
+    if saved_attn_sums is not None:
+        saved_attn_sums_gpu = saved_attn_sums.to(device)
+        # 需要从 xattn_estimate 获取 attn_sums
+        # 重新调用一次获取 attn_sums
+        attn_sums_check, _ = xattn_estimate(
+            Q, K,
+            block_size=BSA_BLOCK_SIZE,
+            stride=STRIDE,
+            threshold=THRESHOLD,
+            chunk_size=CHUNK_SIZE,
+            causal=True,
+        )
+        attn_sums_check_valid = attn_sums_check[:, :, :q_blocks, :k_blocks]
+
+        max_diff = (attn_sums_check_valid - saved_attn_sums_gpu).abs().max().item()
+        mean_diff = (attn_sums_check_valid - saved_attn_sums_gpu).abs().mean().item()
+        print(f"| xattn_estimate vs GPU-only saved attn_sums | max diff: {max_diff:.6e}, mean diff: {mean_diff:.6e} |")
+
+        if max_diff < 1e-5:
+            print("✅ attn_sums 与 GPU-only 保存一致")
+        else:
+            print("❌ attn_sums 与 GPU-only 保存存在差异")
+            passed = False
+
+    print()
+
+if passed:
     print("test_xattn_estimate_alignment: PASSED")
 else:
     print("test_xattn_estimate_alignment: FAILED")
