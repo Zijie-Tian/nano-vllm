@@ -26,6 +26,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Global storage for mask debugging
+_DEBUG_SAVE_MASK = True  # Set to True to save masks for comparison
+_DEBUG_MASK_STORAGE = {}
+
 # Check BSA availability
 try:
     from block_sparse_attn import block_sparse_attn_func
@@ -146,11 +150,22 @@ class XAttentionBSAPolicy(SparsePolicy):
         # Stores the indices of selected CPU blocks in available_blocks
         self._selected_cpu_indices: List[int] = []
         self._bsa_per_cpu: int = 0  # BSA blocks per CPU block
-        
-        #> Debug: store all K cache and density counts
-        self._debug_k_full: torch.Tensor | None = None
-        self._debug_selected: int = 0  # 累积的 selected blocks
-        self._debug_total: int = 0     # 累积的 total blocks
+
+        # =====================================================================
+        # Pre-allocated buffers for 3-stage KV chunking (offload mode)
+        # =====================================================================
+        # Partial softmax stats: m (max) and l (exp sum) for each KV chunk
+        # Shape: [max_kv_chunks, batch, heads, q_reshaped_len]
+        self._m_partial_buffer: torch.Tensor | None = None
+        self._l_partial_buffer: torch.Tensor | None = None
+
+        # Block sums buffer: normalized attention sums for all K blocks
+        # Shape: [batch, heads, max_q_bsa_blocks, max_k_bsa_blocks]
+        self._block_sums_buffer: torch.Tensor | None = None
+
+        # Configuration for KV chunking
+        self._max_kv_chunks: int = 0
+        self._cpu_block_size: int = 0  # Tokens per CPU block (set at runtime)
 
     def alloc_policy_metadata(
         self,
@@ -189,6 +204,37 @@ class XAttentionBSAPolicy(SparsePolicy):
         mask_memory_mb = num_heads * max_q_bsa_blocks * max_k_bsa_blocks / (1024 * 1024)
         logger.info(f"[XAttn] Pre-allocated mask buffer: shape={mask_shape}, memory={mask_memory_mb:.1f} MB")
 
+        # =====================================================================
+        # Pre-allocate buffers for 3-stage KV chunking (offload mode)
+        # =====================================================================
+        # Calculate max KV chunks: historical blocks + current chunk
+        # Use cpu_block_size as KV chunk granularity (will be set at runtime)
+        # For now, estimate based on chunk_size (actual cpu_block_size may differ)
+        estimated_cpu_block_size = 4096  # Default, will be overwritten
+        max_kv_chunks = (max_seq_len // estimated_cpu_block_size) + 1  # +1 for current chunk
+
+        # Q reshaped length for one chunk
+        q_reshaped_len = self.chunk_size // self.stride
+        kv_chunk_reshaped_len = estimated_cpu_block_size // self.stride
+
+        # Partial stats buffers: [max_kv_chunks, batch=1, heads, q_reshaped_len]
+        m_partial_shape = (max_kv_chunks, 1, num_heads, q_reshaped_len)
+        self._m_partial_buffer = torch.empty(m_partial_shape, dtype=torch.float32, device=device)
+        self._l_partial_buffer = torch.empty(m_partial_shape, dtype=torch.float32, device=device)
+
+        # Block sums buffer: [batch=1, heads, max_q_bsa_blocks, max_k_bsa_blocks]
+        block_sums_shape = (1, num_heads, max_q_bsa_blocks, max_k_bsa_blocks)
+        self._block_sums_buffer = torch.empty(block_sums_shape, dtype=dtype, device=device)
+
+        self._max_kv_chunks = max_kv_chunks
+
+        # Memory calculation
+        m_l_memory_mb = 2 * max_kv_chunks * num_heads * q_reshaped_len * 4 / (1024 * 1024)
+        block_sums_memory_mb = num_heads * max_q_bsa_blocks * max_k_bsa_blocks * dtype.itemsize / (1024 * 1024)
+        logger.info(f"[XAttn] Pre-allocated KV chunking buffers: "
+                   f"m/l shape={m_partial_shape} ({m_l_memory_mb:.1f} MB), "
+                   f"block_sums shape={block_sums_shape} ({block_sums_memory_mb:.1f} MB)")
+
         # Only allocate GQA expansion buffers if GQA (num_heads != num_kv_heads)
         if num_heads == num_kv_heads:
             logger.info(f"[XAttn] No GQA expansion needed (num_heads == num_kv_heads = {num_heads})")
@@ -203,11 +249,6 @@ class XAttentionBSAPolicy(SparsePolicy):
 
         memory_mb = 2 * num_heads * max_seq_len * head_dim * dtype.itemsize / (1024 * 1024)
         logger.info(f"[XAttn] Pre-allocated GQA buffers: shape={shape}, memory={memory_mb:.1f} MB")
-        
-        #DEBUG : buffer for save all K cache
-        self._debug_k_full = torch.empty((1, num_heads, max_seq_len, head_dim), dtype=dtype, device=device)
-        self._debug_selected = 0
-        self._debug_total = 0
 
     # =========================================================================
     # GPU-only methods (non-chunked)
@@ -348,7 +389,7 @@ class XAttentionBSAPolicy(SparsePolicy):
 
         # Estimate block importance and get sparse mask
         with nvtx.range("xattn_estimate"):
-            _, mask = xattn_estimate(
+            attn_sums, mask = xattn_estimate(
                 Q, K_exp,
                 chunk_size=self.chunk_size,
                 block_size=self.BSA_BLOCK_SIZE,
@@ -357,6 +398,26 @@ class XAttentionBSAPolicy(SparsePolicy):
                 use_triton=self.use_triton,
                 causal=True,
             )
+
+        # Debug: Save mask and attention sums for comparison
+        if _DEBUG_SAVE_MASK and layer_id == 0:
+            import os
+            valid_q_blocks = (q_len + self.BSA_BLOCK_SIZE - 1) // self.BSA_BLOCK_SIZE
+            valid_k_blocks = (k_len + self.BSA_BLOCK_SIZE - 1) // self.BSA_BLOCK_SIZE
+            mask_valid = mask[:, :, :valid_q_blocks, :valid_k_blocks]
+            attn_sums_valid = attn_sums[:, :, :valid_q_blocks, :valid_k_blocks]
+            save_dir = "/home/zijie/Code/nano-vllm/results/mask_alignment"
+            os.makedirs(save_dir, exist_ok=True)
+            save_path = f"{save_dir}/gpuonly_layer{layer_id}.pt"
+            torch.save({
+                "mask": mask_valid.clone().cpu(),
+                "attn_sums": attn_sums_valid.clone().cpu(),
+                "q_len": q_len,
+                "k_len": k_len,
+                "valid_q_blocks": valid_q_blocks,
+                "valid_k_blocks": valid_k_blocks,
+            }, save_path)
+            logger.info(f"[DEBUG] Saved mask to {save_path}, shape={mask_valid.shape}")
 
         # Compute block counts
         q_block_num = (q_len + self.BSA_BLOCK_SIZE - 1) // self.BSA_BLOCK_SIZE
@@ -446,22 +507,25 @@ class XAttentionBSAPolicy(SparsePolicy):
         k: torch.Tensor,
     ) -> List[int]:
         """
-        Compute attention scores for all available blocks using flat_group_gemm,
-        then use softmax_fuse_block_sum and find_blocks_chunked to select important blocks.
+        Select important blocks using 3-stage KV chunking algorithm.
 
-        This method aligns with GPU-only xattn_estimate_chunked:
-        1. Loads each K block from CPU (historical blocks)
-        2. Gets current chunk K from prefill buffer
-        3. Concatenates [historical K, current chunk K] for correct softmax normalization
-        4. Uses causal=True with correct chunk_start for position-aware masking
-        5. Only selects from historical blocks (current chunk is always full attention)
+        This method implements the same algorithm as tests/test_xattn_estimate_alignment.py:
+        1. For each KV chunk: compute attention scores and partial softmax stats
+        2. Merge all partial stats to get global m and l
+        3. For each KV chunk: normalize with global stats and compute block sums
+        4. Use find_blocks_chunked to select important blocks
+
+        This approach:
+        - Uses O(S×C) peak memory instead of O(S²)
+        - Produces identical density to GPU-only xattn_estimate
+        - Supports ultra-long contexts
 
         Args:
             available_blocks: List of CPU block IDs (historical blocks only)
             offload_engine: OffloadEngine for loading blocks
             ctx: PolicyContext with metadata
             q: Query tensor [seq_len, num_heads, head_dim] for current chunk
-            k: Key tensor [seq_len, num_kv_heads, head_dim] for current chunk (used for estimation)
+            k: Key tensor [seq_len, num_kv_heads, head_dim] for current chunk
 
         Returns:
             Selected block IDs based on attention threshold
@@ -469,28 +533,42 @@ class XAttentionBSAPolicy(SparsePolicy):
         if q is None:
             return available_blocks
 
-        from nanovllm.ops.xattn import flat_group_gemm_fuse_reshape, softmax_fuse_block_sum, find_blocks_chunked
+        # CRITICAL: Wait for all previous prefill offloads to complete before loading from CPU
+        # This ensures that the K data we load from k_cache_cpu is actually valid.
+        # Without this sync, we may load stale/uninitialized data because the async offload
+        # from the previous chunk hasn't finished yet.
+        if available_blocks and offload_engine is not None:
+            offload_engine.wait_all_prefill_offloads()
+
+        from nanovllm.ops.xattn import (
+            flat_group_gemm_fuse_reshape,
+            softmax_compute_partial_stats,
+            softmax_normalize_and_block_sum,
+            merge_softmax_stats,
+            find_blocks_chunked,
+        )
         import math
 
         layer_id = ctx.layer_id
-        # Use passed q parameter instead of ctx.query
 
         # Set DensityObserver mode on first layer
         if layer_id == 0:
             DensityObserver.set_mode("offload")
 
+        # ================================================================
+        # Step 0: Setup parameters
+        # ================================================================
         # Convert Q to [batch, heads, seq_len, head_dim]
-        # q: [seq_len, num_heads, head_dim] -> [1, num_heads, seq_len, head_dim]
-        Q = q.unsqueeze(0).transpose(1, 2)  # [1, num_heads, seq_len, head_dim]
+        Q = q.unsqueeze(0).transpose(1, 2)  # [1, num_heads, q_len, head_dim]
 
         num_heads = Q.shape[1]
         head_dim = Q.shape[3]
         q_len = Q.shape[2]
 
-        # flat_group_gemm requires q_len to be divisible by stride * BLOCK_M (typically 8 * 128 = 1024)
-        # Pad Q if necessary
+        # Alignment requirements
         BLOCK_M = 128  # Triton block size
-        alignment = self.stride * BLOCK_M
+        alignment = self.stride * BLOCK_M  # 8 * 128 = 1024
+
         if q_len < alignment:
             # Q too short, skip estimation and return all blocks
             logger.debug(f"[XAttn] select_blocks: q_len={q_len} < alignment={alignment}, skipping estimation")
@@ -498,298 +576,321 @@ class XAttentionBSAPolicy(SparsePolicy):
 
         # Pad Q to alignment
         padded_q_len = ((q_len + alignment - 1) // alignment) * alignment
-        if padded_q_len != q_len:
-            pad_size = padded_q_len - q_len
-            Q = torch.nn.functional.pad(Q, (0, 0, 0, pad_size), value=0)
+        q_pad_size = padded_q_len - q_len
+        if q_pad_size > 0:
+            Q = torch.nn.functional.pad(Q, (0, 0, 0, q_pad_size), value=0)
 
-        q_reshaped_len = padded_q_len // self.stride
+        # Get CPU block size from context
+        cpu_block_size = ctx.block_size  # e.g., 4096 tokens per CPU block
+        self._cpu_block_size = cpu_block_size
 
-        # Get block size from context
-        block_size = ctx.block_size  # tokens per CPU block (e.g., 4096)
-        reshaped_block_size = block_size // self.stride  # e.g., 4096/8 = 512
-
-        # ============================================================
-        # Step 1: Compute chunk_start and related parameters
-        # ============================================================
-        # chunk_start = Q's global position in reshaped space
-        # Q starts at position: num_historical_blocks * block_size
+        # KV chunk parameters (use CPU block as KV chunk unit)
         num_historical_blocks = len(available_blocks)
-        historical_k_len = num_historical_blocks * block_size
-        chunk_start = historical_k_len // self.stride  # Q's position in reshaped space
+        historical_k_len = num_historical_blocks * cpu_block_size
+        total_k_len = historical_k_len + q_len  # Include current chunk
+
+        # Reshaped dimensions
+        reshaped_block_size = self.BSA_BLOCK_SIZE // self.stride  # 128/8 = 16
+        q_reshaped_len = padded_q_len // self.stride
+        kv_chunk_reshaped = cpu_block_size // self.stride
+
+        # BSA blocks per CPU block
+        bsa_per_cpu = cpu_block_size // self.BSA_BLOCK_SIZE  # 4096/128 = 32
+
+        # Global K position parameters
+        # Q在全局K序列中的位置 (按照 test_xattn_estimate_alignment.py 的逻辑)
+        # 对于 chunked softmax，我们需要计算 Q 在整个序列中的 BSA block 偏移
+        # k_block_num = total BSA blocks (padded), q_block_num = Q's BSA blocks (padded)
+        padded_total_k_len = ((total_k_len + alignment - 1) // alignment) * alignment
+        k_block_num = padded_total_k_len // self.BSA_BLOCK_SIZE
+        q_block_num = padded_q_len // self.BSA_BLOCK_SIZE
+        chunk_start = (k_block_num - q_block_num) * reshaped_block_size  # Q 在 reshaped 空间的起始
         chunk_end = chunk_start + q_reshaped_len
 
-        # For valid Q length tracking (excluding padding)
-        valid_q_reshaped = (q_len + self.stride - 1) // self.stride
-        real_q_len = chunk_start + valid_q_reshaped
+        # real_q_len: 用于 softmax 归一化的有效 Q 长度
+        k_reshaped_seq_len = padded_total_k_len // self.stride
+        k_reshaped_num_to_pad = (padded_total_k_len - total_k_len) // self.stride
 
-        # ============================================================
-        # Step 2: Pipeline load historical K blocks and compute attn_scores
-        # ============================================================
-        # Key design: Load each block, compute immediately, then release
-        # This avoids storing all K in GPU memory at once (offload-friendly)
-        slot = 0
-        attn_scores_list = []
-        BLOCK_N = 128
-        k_alignment = self.stride * BLOCK_N
+        # Softmax scale
+        norm = 1.0
+        scale = 1.4426950408889634 / math.sqrt(head_dim) / self.stride / norm
+        segment_size = min(4096, reshaped_block_size)
 
-        with nvtx.range("xattn_estimate_historical"):
-            for cpu_block_id in available_blocks:
-                # Load only K from CPU to GPU (V not needed for estimate)
+        # ================================================================
+        # Step 1: First pass - compute partial stats for all KV chunks
+        # ================================================================
+        m_chunks = []
+        l_chunks = []
+        num_kv_chunks = num_historical_blocks + 1  # +1 for current chunk
+
+        with nvtx.range("xattn_estimate_pass1"):
+            slot = 0
+
+            # Process historical blocks (from CPU)
+            for kv_chunk_idx, cpu_block_id in enumerate(available_blocks):
+                # Load K from CPU
                 offload_engine.load_k_only_to_slot_layer(slot, layer_id, cpu_block_id, chunk_idx=cpu_block_id)
                 offload_engine.wait_slot_layer(slot)
 
-                # Get K only: [1, block_size, num_kv_heads, head_dim]
-                k_block = offload_engine.get_k_for_slot(slot)
-
-                # Convert K to [batch, heads, k_len, head_dim]
+                k_block = offload_engine.get_k_for_slot(slot)  # [1, block_size, num_kv_heads, head_dim]
                 K_chunk = k_block.transpose(1, 2)  # [1, num_kv_heads, block_size, head_dim]
-                
-                # Handle GQA: expand K heads to match Q heads
+
+                # GQA expansion
                 num_kv_heads = K_chunk.shape[1]
                 if num_heads != num_kv_heads:
                     num_groups = num_heads // num_kv_heads
                     K_chunk = K_chunk.repeat_interleave(num_groups, dim=1)
-                                
-                #> DEBUG: save all K cache
-                start_pos = cpu_block_id * block_size
-                self._debug_k_full[:, :, start_pos:start_pos + block_size, :].copy_(K_chunk)
-                
-                # # Pad K if necessary
-                # k_len = K_chunk.shape[2]
-                # if k_len < k_alignment:
-                #     pad_size = k_alignment - k_len
-                #     K_chunk = torch.nn.functional.pad(K_chunk, (0, 0, 0, pad_size), value=0)
 
-                # # Compute attention scores for this historical block
-                # # Historical blocks: all positions < Q, so Q always sees them (full attention)
-                # # Use LOCAL chunk_start=0 to match test_xattn_k_chunked.py behavior
-                # attn_chunk = flat_group_gemm_fuse_reshape(
-                #     Q, K_chunk, self.stride,
-                #     chunk_start=0,  # Local: same as test
-                #     chunk_end=q_reshaped_len,
-                #     is_causal=False,  # Historical K: all visible to Q
-                # )
-                # attn_scores_list.append(attn_chunk)
+                # KV offset in reshaped space
+                kv_offset_reshaped = kv_chunk_idx * kv_chunk_reshaped
 
-                # Mark slot as done for reuse
+                # Compute raw attention scores
+                attn_weights_kv = flat_group_gemm_fuse_reshape(
+                    Q, K_chunk, self.stride,
+                    chunk_start=chunk_start,
+                    chunk_end=chunk_end,
+                    is_causal=False,  # K 不完整，不能在这里用 causal
+                )
+
+                # Compute partial stats (带 causal mask)
+                m_partial, l_partial = softmax_compute_partial_stats(
+                    attn_weights_kv,
+                    reshaped_block_size,
+                    segment_size,
+                    scale,
+                    chunk_start=chunk_start,
+                    kv_offset=kv_offset_reshaped,
+                    is_causal=True,
+                )
+                m_chunks.append(m_partial)
+                l_chunks.append(l_partial)
+
                 offload_engine.record_slot_compute_done(slot)
-        
-        num_kv_heads = k.shape[1]
-        if num_heads != num_kv_heads:
-            num_groups = num_heads // num_kv_heads
-        k_repeated = k.repeat_interleave(num_groups, dim=1).unsqueeze(0).transpose(1, 2)  # [1, num_heads, historical_k_len, head_dim]
-        
-        self._debug_k_full[:, :, historical_k_len:historical_k_len + q_len, :].copy_(k_repeated)
+                del attn_weights_kv
 
-        # ============================================================
-        # DEBUG: 累积 selected/total counts (仅 layer 0)
-        # 使用完整 K 调用 xattn_estimate，与 GPU-only 逻辑一致
-        # ============================================================
-        if layer_id == 0:
-            from nanovllm.ops.xattn import xattn_estimate
+            # Process current chunk K (already on GPU)
+            # k: [seq_len, num_kv_heads, head_dim] -> [1, num_kv_heads, seq_len, head_dim]
+            K_current = k.unsqueeze(0).transpose(1, 2)
 
-            total_k_len = historical_k_len + q_len
-            K_full = self._debug_k_full[:, :, :total_k_len, :]
-
-            # 用当前 Q chunk 和累积的 K 调用 xattn_estimate
-            # 设置 chunk_size 为 q_len 的最小对齐值 (stride * BLOCK_M = 8 * 128 = 1024)
-            alignment = self.stride * 128
-            aligned_chunk_size = ((q_len + alignment - 1) // alignment) * alignment
-            # DEBUG: 使用固定 threshold 测试
-            _, mask_chunk = xattn_estimate(
-                Q[:, :, :q_len, :],  # 当前 Q chunk
-                K_full,              # 累积的 K
-                block_size=self.BSA_BLOCK_SIZE,
-                stride=self.stride,
-                threshold=self.threshold,  # DEBUG: 使用传入的 threshold
-                chunk_size=aligned_chunk_size,  # 对齐的 chunk_size
-                causal=True,
-            )
-
-            # 计算有效的 block 数量（排除 padding）
-            valid_q_blocks = (q_len + self.BSA_BLOCK_SIZE - 1) // self.BSA_BLOCK_SIZE
-            valid_k_blocks = (total_k_len + self.BSA_BLOCK_SIZE - 1) // self.BSA_BLOCK_SIZE
-
-            # 裁剪 mask 到有效区域
-            mask_valid = mask_chunk[:, :, :valid_q_blocks, :valid_k_blocks]
-
-            # 计算当前 chunk 的 selected/total (考虑 causal，考虑 Q 偏移量)
-            q_blocks = valid_q_blocks
-            k_blocks = valid_k_blocks
-            # Q 从位置 (k_blocks - q_blocks) 开始，所以 Q block i 实际位置是 i + offset
-            # Q block i (实际位置 i+offset) 可以看到 K block 0 到 i+offset
-            q_offset_blocks = k_blocks - q_blocks
-            indices = torch.arange(k_blocks, device=mask_valid.device).unsqueeze(0)  # [1, k_blocks]
-            q_indices = torch.arange(q_blocks, device=mask_valid.device).unsqueeze(1)  # [q_blocks, 1]
-            causal_mask = indices <= (q_indices + q_offset_blocks)  # [q_blocks, k_blocks]
-            chunk_total = causal_mask.sum().item() * mask_valid.shape[0] * mask_valid.shape[1]
-            chunk_selected = (mask_valid & causal_mask.unsqueeze(0).unsqueeze(0)).sum().item()
-
-            # 累积
-            self._debug_selected += chunk_selected
-            self._debug_total += chunk_total
-
-            # 打印当前累积的 density
-            if self._debug_total > 0:
-                density = self._debug_selected / self._debug_total
-                logger.info(f"[DEBUG Offload Layer0] 累积 density: {density:.4f} "
-                           f"(selected={self._debug_selected}, total={self._debug_total}, k_len={total_k_len}, "
-                           f"mask_shape={mask_chunk.shape}, q_offset={q_offset_blocks})")
-
-            # DEBUG: 跳过正常 offload 逻辑，直接返回所有 blocks
-            return available_blocks
-        else:
-            # DEBUG: 非 Layer 0 也跳过正常 offload 逻辑
-            return available_blocks
-
-        # ============================================================
-        # Step 3: Get current chunk K and compute its attn_scores
-        # ============================================================
-        with nvtx.range("xattn_estimate_current"):
-            # Current chunk K is in prefill buffer (already on GPU)
-            k_curr, _ = offload_engine.get_prefill_buffer_slice(layer_id, q_len)
-            # k_curr: [1, q_len, num_kv_heads, head_dim] -> [1, num_kv_heads, q_len, head_dim]
-            K_current = k_curr.transpose(1, 2)
-
-            # Handle GQA for current chunk K
+            # GQA expansion for current chunk
             num_kv_heads = K_current.shape[1]
             if num_heads != num_kv_heads:
                 num_groups = num_heads // num_kv_heads
                 K_current = K_current.repeat_interleave(num_groups, dim=1)
 
-            # Pad current K if necessary
+            # Pad current K to alignment
             curr_k_len = K_current.shape[2]
-            padded_curr_k_len = ((curr_k_len + k_alignment - 1) // k_alignment) * k_alignment
+            padded_curr_k_len = ((curr_k_len + alignment - 1) // alignment) * alignment
             if padded_curr_k_len != curr_k_len:
-                pad_size = padded_curr_k_len - curr_k_len
-                K_current = torch.nn.functional.pad(K_current, (0, 0, 0, pad_size), value=0)
+                K_current = torch.nn.functional.pad(K_current, (0, 0, 0, padded_curr_k_len - curr_k_len), value=0)
+
+            # KV offset for current chunk
+            kv_offset_current = num_historical_blocks * kv_chunk_reshaped
 
             # Compute attention scores for current chunk
-            # IMPORTANT: Use LOCAL coordinates (0 to q_reshaped_len) for current chunk!
-            # Because K_current only contains current chunk K (not full sequence),
-            # block_n in kernel starts from 0. Using global chunk_start would cause
-            # incorrect causal mask (Q would see K blocks it shouldn't).
-            attn_current = flat_group_gemm_fuse_reshape(
+            attn_weights_curr = flat_group_gemm_fuse_reshape(
                 Q, K_current, self.stride,
-                chunk_start=0,  # Local: Q starts at 0 relative to K_current
-                chunk_end=q_reshaped_len,  # Local: Q ends at q_reshaped_len
-                is_causal=True,  # Current chunk: apply causal mask
-            )
-            attn_scores_list.append(attn_current)
-            del K_current
-
-        # ============================================================
-        # Step 4: Concatenate all attn_scores
-        # ============================================================
-        if not attn_scores_list:
-            return available_blocks
-
-        attn_scores = torch.cat(attn_scores_list, dim=-1)
-        del attn_scores_list
-
-        # Calculate padded K length for later use
-        padded_k_len = historical_k_len + padded_curr_k_len
-
-        # ============================================================
-        # Step 5: Apply softmax_fuse_block_sum with causal=True
-        # ============================================================
-        cpu_block_size = block_size  # e.g., 4096
-        bsa_per_cpu = cpu_block_size // self.BSA_BLOCK_SIZE  # e.g., 4096/128 = 32
-
-        # Use BSA_BLOCK_SIZE for block aggregation (aligned with GPU-only)
-        reshaped_bsa_bs = self.BSA_BLOCK_SIZE // self.stride  # e.g., 128/8 = 16
-        norm = 1.0
-        scale = 1.4426950408889634 / math.sqrt(head_dim) / self.stride / norm
-        segment_size = min(4096, reshaped_bsa_bs)
-
-        with nvtx.range("xattn_estimate_softmax"):
-            block_sums = softmax_fuse_block_sum(
-                attn_scores,
-                reshaped_bsa_bs,
-                segment_size,
                 chunk_start=chunk_start,
                 chunk_end=chunk_end,
-                real_q_len=real_q_len,
-                scale=scale,
-                is_causal=True,  # Causal for consistent with GPU-only
+                is_causal=False,
             )
-        # block_sums shape: [batch, heads, q_bsa_blocks, total_k_bsa_blocks]
 
-        # ============================================================
-        # Step 6: Use find_blocks_chunked to generate BSA-level mask
-        # ============================================================
-        # Calculate BSA block indices
-        q_bsa_blocks = (padded_q_len + self.BSA_BLOCK_SIZE - 1) // self.BSA_BLOCK_SIZE
-        total_k_bsa_blocks = (padded_k_len + self.BSA_BLOCK_SIZE - 1) // self.BSA_BLOCK_SIZE
-        historical_k_bsa_blocks = num_historical_blocks * bsa_per_cpu
+            # Compute partial stats for current chunk
+            m_partial_curr, l_partial_curr = softmax_compute_partial_stats(
+                attn_weights_curr,
+                reshaped_block_size,
+                segment_size,
+                scale,
+                chunk_start=chunk_start,
+                kv_offset=kv_offset_current,
+                is_causal=True,
+            )
+            m_chunks.append(m_partial_curr)
+            l_chunks.append(l_partial_curr)
+            del attn_weights_curr
 
-        # current_index for find_blocks_chunked: Q's block offset
-        q_start_bsa_block = historical_k_bsa_blocks  # Q starts after historical K
+        # ================================================================
+        # Step 2: Merge all partial stats
+        # ================================================================
+        with nvtx.range("xattn_estimate_merge"):
+            m_global, l_global = merge_softmax_stats(m_chunks, l_chunks)
+        del m_chunks, l_chunks
+
+        # ================================================================
+        # Step 3: Second pass - normalize and compute block sums
+        # ================================================================
+        attn_sum_per_kv = []
+
+        with nvtx.range("xattn_estimate_pass2"):
+            slot = 0
+
+            # Process historical blocks again
+            for kv_chunk_idx, cpu_block_id in enumerate(available_blocks):
+                offload_engine.load_k_only_to_slot_layer(slot, layer_id, cpu_block_id, chunk_idx=cpu_block_id)
+                offload_engine.wait_slot_layer(slot)
+
+                k_block = offload_engine.get_k_for_slot(slot)
+                K_chunk = k_block.transpose(1, 2)
+
+                num_kv_heads = K_chunk.shape[1]
+                if num_heads != num_kv_heads:
+                    num_groups = num_heads // num_kv_heads
+                    K_chunk = K_chunk.repeat_interleave(num_groups, dim=1)
+
+                kv_offset_reshaped = kv_chunk_idx * kv_chunk_reshaped
+
+                # Recompute attention scores (trade-off: compute vs memory)
+                attn_weights_kv = flat_group_gemm_fuse_reshape(
+                    Q, K_chunk, self.stride,
+                    chunk_start=chunk_start,
+                    chunk_end=chunk_end,
+                    is_causal=False,
+                )
+
+                # Normalize with global stats and compute block sums
+                block_sum_kv = softmax_normalize_and_block_sum(
+                    attn_weights_kv,
+                    m_global,
+                    l_global,
+                    reshaped_block_size,
+                    segment_size,
+                    chunk_start=chunk_start,
+                    real_q_len=k_reshaped_seq_len - k_reshaped_num_to_pad,
+                    scale=scale,
+                    kv_offset=kv_offset_reshaped,
+                    is_causal=True,
+                )
+                attn_sum_per_kv.append(block_sum_kv)
+
+                offload_engine.record_slot_compute_done(slot)
+                del attn_weights_kv
+
+            # Process current chunk
+            # Recompute attention scores for current chunk
+            attn_weights_curr = flat_group_gemm_fuse_reshape(
+                Q, K_current, self.stride,
+                chunk_start=chunk_start,
+                chunk_end=chunk_end,
+                is_causal=False,
+            )
+
+            block_sum_curr = softmax_normalize_and_block_sum(
+                attn_weights_curr,
+                m_global,
+                l_global,
+                reshaped_block_size,
+                segment_size,
+                chunk_start=chunk_start,
+                real_q_len=k_reshaped_seq_len - k_reshaped_num_to_pad,
+                scale=scale,
+                kv_offset=kv_offset_current,
+                is_causal=True,
+            )
+            attn_sum_per_kv.append(block_sum_curr)
+            del attn_weights_curr, K_current
+
+        # ================================================================
+        # Step 4: Concatenate block sums and select blocks
+        # ================================================================
+        attn_sum_concat = torch.cat(attn_sum_per_kv, dim=-1)
+        del attn_sum_per_kv, m_global, l_global
+
+        # Calculate q_block offset for find_blocks_chunked
+        # This is the number of BSA blocks before Q in the full sequence
+        num_blocks_per_chunk = q_reshaped_len // reshaped_block_size
+        current_index = k_block_num - q_block_num  # Q starts at this BSA block index
 
         with nvtx.range("xattn_find_blocks"):
-            # 对于历史 K 的选择，使用 causal=False 因为历史 K 都在当前 Q 之前
-            # current_index=0 避免超出 block_sums 的 K 维度
             mask = find_blocks_chunked(
-                block_sums,
-                current_index=0,
+                attn_sum_concat,
+                current_index=current_index,
                 threshold=self.threshold,
                 num_to_choose=None,
                 decoding=False,
-                mode="both",
-                causal=False,
+                mode="prefill",
+                causal=True,
             )
-        # mask shape: [batch, heads, q_bsa_blocks, total_k_bsa_blocks]
 
-        # ============================================================
-        # Step 7: Extract mask portions and record density
-        # ============================================================
+        # Apply causal mask post-processing (same as xattn.py lines 1300-1306)
+        mask[:, :, -q_block_num:, -q_block_num:] = torch.where(
+            torch.tril(torch.ones(q_block_num, q_block_num, dtype=torch.bool, device=mask.device), diagonal=0),
+            mask[:, :, -q_block_num:, -q_block_num:],
+            False,
+        )
+
+        # ================================================================
+        # Step 5: Record density (only on layer 0)
+        # ================================================================
+        if layer_id == 0:
+            # Trim mask to valid region
+            valid_q_blocks = (q_len + self.BSA_BLOCK_SIZE - 1) // self.BSA_BLOCK_SIZE
+            valid_k_blocks = (total_k_len + self.BSA_BLOCK_SIZE - 1) // self.BSA_BLOCK_SIZE
+            mask_valid = mask[:, :, :valid_q_blocks, :valid_k_blocks]
+            attn_sums_valid = attn_sum_concat[:, :, :valid_q_blocks, :valid_k_blocks]
+
+            # Compute causal mask for density calculation
+            q_offset_blocks = valid_k_blocks - valid_q_blocks
+            indices = torch.arange(valid_k_blocks, device=mask.device).unsqueeze(0)
+            q_indices = torch.arange(valid_q_blocks, device=mask.device).unsqueeze(1)
+            causal_mask = indices <= (q_indices + q_offset_blocks)
+
+            chunk_total = causal_mask.sum().item() * mask_valid.shape[0] * mask_valid.shape[1]
+            chunk_selected = (mask_valid & causal_mask.unsqueeze(0).unsqueeze(0)).sum().item()
+
+            DensityObserver.record_counts(layer_id, chunk_selected, chunk_total)
+            logger.info(f"[XAttn Offload] Layer0 chunk: q_len={q_len}, k_len={total_k_len}, "
+                       f"valid_q_blocks={valid_q_blocks}, valid_k_blocks={valid_k_blocks}, "
+                       f"q_offset={q_offset_blocks}, selected={chunk_selected}, total={chunk_total}, "
+                       f"density={chunk_selected/chunk_total:.4f}")
+
+            # Debug: Save mask and attention sums for comparison
+            if _DEBUG_SAVE_MASK:
+                import os
+                chunk_idx = ctx.query_chunk_idx if ctx else 0
+                save_dir = "/home/zijie/Code/nano-vllm/results/mask_alignment"
+                os.makedirs(save_dir, exist_ok=True)
+                save_path = f"{save_dir}/offload_layer{layer_id}_chunk{chunk_idx}.pt"
+                torch.save({
+                    "mask": mask_valid.clone().cpu(),
+                    "attn_sums": attn_sums_valid.clone().cpu(),
+                    "q_len": q_len,
+                    "k_len": total_k_len,
+                    "valid_q_blocks": valid_q_blocks,
+                    "valid_k_blocks": valid_k_blocks,
+                    "current_index": current_index,
+                    "chunk_start": chunk_start,
+                }, save_path)
+                logger.info(f"[DEBUG] Saved mask to {save_path}")
+
+        del attn_sum_concat
+
+        # ================================================================
+        # Step 6: Extract historical mask and aggregate to CPU blocks
+        # ================================================================
         B, H, Q_bsa, K_bsa_total = mask.shape
+        historical_k_bsa = num_historical_blocks * bsa_per_cpu
 
-        # Calculate valid Q blocks (excluding padding)
-        valid_q_bsa = (q_len + self.BSA_BLOCK_SIZE - 1) // self.BSA_BLOCK_SIZE
-        valid_curr_k_bsa = (curr_k_len + self.BSA_BLOCK_SIZE - 1) // self.BSA_BLOCK_SIZE
-
-        # 7a: Record historical blocks density (暂时禁用，使用 DEBUG 输出代替)
-        # if historical_k_bsa_blocks > 0:
-        #     ... DensityObserver.record_counts ...
-
-        # 7b: Record current chunk density (暂时禁用)
-        # if valid_curr_k_bsa > 0:
-        #     ... DensityObserver.record_counts ...
-
-        # Step 7.5: Save historical mask to pre-allocated buffer for compute_chunked_prefill
-        # Use full Q_bsa (padded) for buffer, not valid_q_bsa
-        mask_historical_full = mask[:, :, :, :historical_k_bsa_blocks]
-        if self._prefill_mask_buffer is not None:
-            # Only save historical portion of mask
-            self._prefill_mask_buffer[:, :, :Q_bsa, :historical_k_bsa_blocks].copy_(mask_historical_full)
+        # Save mask to buffer for compute_chunked_prefill (if needed later)
+        if self._prefill_mask_buffer is not None and historical_k_bsa > 0:
+            self._prefill_mask_buffer[:, :, :Q_bsa, :historical_k_bsa].copy_(
+                mask[:, :, :, :historical_k_bsa]
+            )
             self._current_mask_q_bsa = Q_bsa
-            self._current_mask_k_bsa = historical_k_bsa_blocks
+            self._current_mask_k_bsa = historical_k_bsa
 
-        # ============================================================
-        # Step 8: Aggregate mask to CPU block level (union of heads)
-        # ============================================================
-        # Only aggregate historical blocks (current chunk is always full attention)
-        num_cpu_blocks = num_historical_blocks
+        # Aggregate to CPU block level (union across heads, Q blocks, BSA blocks per CPU)
+        if num_historical_blocks == 0:
+            return []
 
-        with nvtx.range("xattn_aggregate_mask"):
-            # Reshape historical mask: [B, H, Q_bsa, historical_k_bsa] -> [B, H, Q_bsa, num_cpu, bsa_per_cpu]
-            # Use full Q_bsa (not valid_q_bsa) for aggregation
-            mask_per_cpu = mask_historical_full.view(B, H, Q_bsa, num_cpu_blocks, bsa_per_cpu)
+        mask_historical = mask[:, :, :, :historical_k_bsa]
+        mask_per_cpu = mask_historical.view(B, H, Q_bsa, num_historical_blocks, bsa_per_cpu)
+        cpu_needed = mask_per_cpu.any(dim=-1).any(dim=2).any(dim=1)  # [B, num_cpu]
 
-            # Union across: bsa_per_cpu, Q_bsa, heads -> [B, num_cpu]
-            cpu_needed = mask_per_cpu.any(dim=-1).any(dim=2).any(dim=1)  # [B, num_cpu]
+        selected_indices = cpu_needed[0].nonzero().squeeze(-1).tolist()
+        if isinstance(selected_indices, int):
+            selected_indices = [selected_indices]
 
-            # Get selected indices
-            selected_indices = cpu_needed[0].nonzero().squeeze(-1).tolist()
-            if isinstance(selected_indices, int):
-                selected_indices = [selected_indices]
-
-        # Handle empty available_blocks case (first chunk)
-        if available_blocks:
-            selected_block_ids = [available_blocks[i] for i in selected_indices]
-        else:
-            selected_block_ids = []
+        selected_block_ids = [available_blocks[i] for i in selected_indices]
 
         # Always include first block (sink) and last block for safety
         if available_blocks and available_blocks[0] not in selected_block_ids:
@@ -797,7 +898,7 @@ class XAttentionBSAPolicy(SparsePolicy):
         if available_blocks and available_blocks[-1] not in selected_block_ids:
             selected_block_ids.append(available_blocks[-1])
 
-        # Record communication density (CPU block granularity) - only if there are historical blocks
+        # Record communication density
         if available_blocks:
             DensityObserver.record_comm_density(
                 layer_id,
@@ -815,9 +916,6 @@ class XAttentionBSAPolicy(SparsePolicy):
             chunk_density = len(selected_block_ids) / len(available_blocks)
             logger.debug(f"[XAttn] chunk={ctx.query_chunk_idx}, available={len(available_blocks)}, "
                         f"selected={len(selected_block_ids)}, chunk_density={chunk_density:.1%}")
-
-        # Free intermediate tensors to prevent memory leak
-        del attn_scores, block_sums, mask, mask_historical_full
 
         return selected_block_ids
 
