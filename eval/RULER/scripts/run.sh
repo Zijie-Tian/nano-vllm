@@ -143,6 +143,9 @@ NUM_GPUS=${#GPU_ARRAY[@]}
 # Start client (prepare data / call model API / obtain final metrics)
 total_time=0
 for MAX_SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
+    # Set max_model_len for nanovllm to 1M (covers all test lengths)
+    export NANOVLLM_MAX_MODEL_LEN=1048576
+
     SETTINGS_INFO=""
     if [[ -n ${METRIC} ]]; then SETTINGS_INFO+="${METRIC#--metric }_"; fi
     # For avgpool: use topp or topk instead of stride
