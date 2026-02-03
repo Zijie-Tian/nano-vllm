@@ -33,56 +33,74 @@ MODEL_SELECT() {
     MODEL_DIR=$2
     ENGINE_DIR=$3
 
+    # Reset variables for each call
+    TOKENIZER_PATH=""
+    TOKENIZER_TYPE=""
+    NANOVLLM_CPU_OFFLOAD=""
+
     case $MODEL_NAME in
         llama3.1-8b-chat)
             MODEL_PATH="${MODEL_DIR}/Llama-3.1-8B-Instruct"
             MODEL_TEMPLATE_TYPE="meta-llama3"
             MODEL_FRAMEWORK="hf"
             ;;
-        # NanoVLLM models (with CPU offload support)
+        # NanoVLLM models
+        # NANOVLLM_CPU_OFFLOAD: true=use CPU offload (for large models), false=GPU only (for small models)
         qwen3-0.6b-nanovllm)
             MODEL_PATH="${MODEL_DIR}/Qwen3-0.6B"
             MODEL_TEMPLATE_TYPE="qwen"
             MODEL_FRAMEWORK="nanovllm"
             TOKENIZER_PATH="${MODEL_DIR}/Qwen3-0.6B"
             TOKENIZER_TYPE="hf"
+            NANOVLLM_CPU_OFFLOAD="false"  # Small model, GPU only (24GB sufficient for 32K)
+            ;;
+        qwen3-0.6b-xattn-nanovllm)
+            # XAttention variant: use with --metric xattn for sparse attention testing
+            MODEL_PATH="${MODEL_DIR}/Qwen3-0.6B"
+            MODEL_TEMPLATE_TYPE="qwen"
+            MODEL_FRAMEWORK="nanovllm"
+            TOKENIZER_PATH="${MODEL_DIR}/Qwen3-0.6B"
+            TOKENIZER_TYPE="hf"
+            NANOVLLM_CPU_OFFLOAD="false"  # Small model, GPU only
             ;;
         qwen3-4b-nanovllm)
             MODEL_PATH="${MODEL_DIR}/Qwen3-4B-Instruct-2507"
             MODEL_TEMPLATE_TYPE="qwen"
             MODEL_FRAMEWORK="nanovllm"
+            NANOVLLM_CPU_OFFLOAD="true"  # Medium model, use offload for long context
             ;;
         llama3.1-8b-nanovllm)
             MODEL_PATH="${MODEL_DIR}/Llama-3.1-8B-Instruct"
             MODEL_TEMPLATE_TYPE="meta-llama3"
             MODEL_FRAMEWORK="nanovllm"
+            NANOVLLM_CPU_OFFLOAD="true"  # Large model, use offload
             ;;
         # GLM-4-9B-Chat-1M (NanoVLLM backend)
         glm4-9b-nanovllm)
             MODEL_PATH="${MODEL_DIR}/GLM-4-9B-Chat-1M"
             MODEL_TEMPLATE_TYPE="glm4"
             MODEL_FRAMEWORK="nanovllm"
-            # GLM-4 uses HuggingFace tokenizer (not SentencePiece)
             TOKENIZER_PATH="${MODEL_DIR}/GLM-4-9B-Chat-1M"
             TOKENIZER_TYPE="hf"
+            NANOVLLM_CPU_OFFLOAD="true"  # Large model, use offload
             ;;
         # Qwen2.5-7B-Instruct-1M (NanoVLLM backend)
         qwen2.5-7b-1m-nanovllm)
             MODEL_PATH="${MODEL_DIR}/Qwen2.5-7B-Instruct-1M"
             MODEL_TEMPLATE_TYPE="qwen"
             MODEL_FRAMEWORK="nanovllm"
-            # Qwen2.5 uses HuggingFace tokenizer
             TOKENIZER_PATH="${MODEL_DIR}/Qwen2.5-7B-Instruct-1M"
             TOKENIZER_TYPE="hf"
+            NANOVLLM_CPU_OFFLOAD="true"  # Large model, use offload
             ;;
         # Qwen2.5-7B-Instruct (standard version, NanoVLLM backend)
         qwen2.5-7b-nanovllm)
             MODEL_PATH="${MODEL_DIR}/Qwen2.5-7B-Instruct"
             MODEL_TEMPLATE_TYPE="qwen"
             MODEL_FRAMEWORK="nanovllm"
-            # Qwen2.5 uses HuggingFace tokenizer
             TOKENIZER_PATH="${MODEL_DIR}/Qwen2.5-7B-Instruct"
             TOKENIZER_TYPE="hf"
+            NANOVLLM_CPU_OFFLOAD="true"  # Large model, use offload
             ;;
     esac
 
@@ -97,6 +115,10 @@ MODEL_SELECT() {
         fi
     fi
 
+    # Default NANOVLLM_CPU_OFFLOAD to true if not set (for backward compatibility)
+    if [ -z "${NANOVLLM_CPU_OFFLOAD}" ]; then
+        NANOVLLM_CPU_OFFLOAD="true"
+    fi
 
-    echo "$MODEL_PATH:$MODEL_TEMPLATE_TYPE:$MODEL_FRAMEWORK:$TOKENIZER_PATH:$TOKENIZER_TYPE:$OPENAI_API_KEY:$GEMINI_API_KEY:$AZURE_ID:$AZURE_SECRET:$AZURE_ENDPOINT"
+    echo "$MODEL_PATH:$MODEL_TEMPLATE_TYPE:$MODEL_FRAMEWORK:$TOKENIZER_PATH:$TOKENIZER_TYPE:$OPENAI_API_KEY:$GEMINI_API_KEY:$AZURE_ID:$AZURE_SECRET:$AZURE_ENDPOINT:$NANOVLLM_CPU_OFFLOAD"
 }
