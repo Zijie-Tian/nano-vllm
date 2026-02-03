@@ -40,6 +40,13 @@ MODEL_SELECT() {
             MODEL_FRAMEWORK="hf"
             ;;
         # NanoVLLM models (with CPU offload support)
+        qwen3-0.6b-nanovllm)
+            MODEL_PATH="${MODEL_DIR}/Qwen3-0.6B"
+            MODEL_TEMPLATE_TYPE="qwen"
+            MODEL_FRAMEWORK="nanovllm"
+            TOKENIZER_PATH="${MODEL_DIR}/Qwen3-0.6B"
+            TOKENIZER_TYPE="hf"
+            ;;
         qwen3-4b-nanovllm)
             MODEL_PATH="${MODEL_DIR}/Qwen3-4B-Instruct-2507"
             MODEL_TEMPLATE_TYPE="qwen"
