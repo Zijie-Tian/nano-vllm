@@ -116,13 +116,15 @@ class SparsePolicy(ABC):
         max_seq_len: int,
         dtype: torch.dtype,
         device: torch.device,
+        enable_cpu_offload: bool = False,
     ) -> None:
         """
         Pre-allocate GPU buffers for policy computation.
 
-        Called by the framework after KV cache allocation, but ONLY for GPU-only
-        mode (not CPU offload mode). Override this to pre-allocate buffers that
-        would otherwise be dynamically allocated during forward pass.
+        Called by the framework after KV cache allocation. Implementations should
+        use enable_cpu_offload to decide which buffers to allocate:
+        - Offload mode: allocate chunked prefill buffers (mask, KV chunking stats)
+        - GPU-only mode: additionally allocate GQA expansion buffers
 
         This is separate from initialize() which is used for CPU offload metadata.
 
@@ -133,6 +135,7 @@ class SparsePolicy(ABC):
             max_seq_len: Maximum sequence length (for buffer sizing)
             dtype: Data type (typically float16/bfloat16)
             device: Target device (cuda)
+            enable_cpu_offload: Whether CPU offload is enabled
         """
         pass
 

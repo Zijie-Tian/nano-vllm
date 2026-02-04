@@ -175,6 +175,7 @@ class XAttentionBSAPolicy(SparsePolicy):
         max_seq_len: int,
         dtype: torch.dtype,
         device: torch.device,
+        enable_cpu_offload: bool = False,
     ) -> None:
         """
         Pre-allocate GQA expansion buffers for GPU-only mode.
@@ -235,7 +236,14 @@ class XAttentionBSAPolicy(SparsePolicy):
                    f"m/l shape={m_partial_shape} ({m_l_memory_mb:.1f} MB), "
                    f"block_sums shape={block_sums_shape} ({block_sums_memory_mb:.1f} MB)")
 
-        # Only allocate GQA expansion buffers if GQA (num_heads != num_kv_heads)
+        # Skip GQA buffers in offload mode
+        # Chunked prefill uses compute_chunked_prefill() which handles GQA inline
+        if enable_cpu_offload:
+            logger.info("[XAttn] Offload mode: skipping GQA expansion buffers (saves ~16GB for 1M seq)")
+            return
+
+        # GPU-only mode: pre-allocate GQA buffers for compute_prefill()
+        # Only allocate if GQA (num_heads != num_kv_heads)
         if num_heads == num_kv_heads:
             logger.info(f"[XAttn] No GQA expansion needed (num_heads == num_kv_heads = {num_heads})")
             return

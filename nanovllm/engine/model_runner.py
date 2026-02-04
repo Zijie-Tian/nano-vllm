@@ -227,9 +227,9 @@ class ModelRunner:
                 device=torch.device("cuda"),
             )
 
-            # GPU-only mode: pre-allocate policy metadata buffers
-            # This avoids dynamic GPU memory allocation during forward pass
-            # if not config.enable_cpu_offload:
+            # Pre-allocate policy metadata buffers
+            # - Offload mode: allocate chunked prefill buffers (mask, KV chunking stats)
+            # - GPU-only mode: additionally allocate GQA expansion buffers
             num_heads = hf_config.num_attention_heads // self.world_size
             self.kvcache_manager.sparse_policy.alloc_policy_metadata(
                 num_heads=num_heads,
@@ -238,6 +238,7 @@ class ModelRunner:
                 max_seq_len=config.max_model_len,
                 dtype=hf_config.torch_dtype,
                 device=torch.device("cuda"),
+                enable_cpu_offload=config.enable_cpu_offload,
             )
 
             # Log policy info (handle both enum and None cases)

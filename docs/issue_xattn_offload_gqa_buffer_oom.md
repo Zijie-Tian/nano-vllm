@@ -167,3 +167,43 @@ GPULIST=0 ./scripts/run_ruler.sh glm4-9b-xattn-nanovllm synthetic xattn --task n
 ## 优先级
 
 **High** - 阻塞 9B+ 模型在 24GB 显存 GPU 上使用 XAttention + Offload 模式
+
+---
+
+## 修复状态
+
+**✅ 已修复** (2026-02-05)
+
+### 修复内容
+
+采用方案 1，在 offload 模式下跳过 GQA buffer 分配：
+
+1. `nanovllm/kvcache/sparse/policy.py`: 基类添加 `enable_cpu_offload` 参数
+2. `nanovllm/kvcache/sparse/xattn_bsa.py`: 实现 offload 模式检查，跳过 GQA buffer
+3. `nanovllm/engine/model_runner.py`: 传入 `enable_cpu_offload` 参数
+
+### 验证结果
+
+```bash
+# 64K offload 测试
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/home/zijie/Code/nano-vllm:$PYTHONPATH \
+    python tests/test_ruler.py \
+    --model ~/models/Llama-3.1-8B-Instruct \
+    --data-dir tests/data/ruler_64k \
+    --datasets niah_single_1 \
+    --num-samples 1 \
+    --max-model-len 72000 \
+    --enable-offload \
+    --sparse-policy XATTN_BSA
+```
+
+- ✅ 日志显示: `[XAttn] Offload mode: skipping GQA expansion buffers`
+- ✅ 测试通过: 100% 准确率
+- ✅ 内存节省: ~16 GB (for 1M max_seq_len)
+
+### 内存对比
+
+| 配置 | 修复前 | 修复后 |
+|------|--------|--------|
+| max_model_len=72K | +1.1 GB | 0 GB |
+| max_model_len=1M | +16 GB | 0 GB |
