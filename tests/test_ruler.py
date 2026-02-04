@@ -386,8 +386,11 @@ def run_ruler_benchmark(
     if sparse_policy and sparse_policy.upper() == "XATTN_BSA":
         DensityObserver.enable()
         DensityObserver.complete_reset()
+        # Set mode for correct density interpretation
+        DensityObserver.set_mode("offload" if enable_cpu_offload else "gpu_only")
         if not json_output:
-            print("[DensityObserver] Enabled for XAttention BSA")
+            mode_str = "offload" if enable_cpu_offload else "gpu_only"
+            print(f"[DensityObserver] Enabled for XAttention BSA (mode: {mode_str})")
 
     # LLM initialization kwargs
     llm_kwargs = {

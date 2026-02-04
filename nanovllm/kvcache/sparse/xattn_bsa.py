@@ -905,6 +905,15 @@ class XAttentionBSAPolicy(SparsePolicy):
             self._stats_total_selected_blocks += len(selected_block_ids)
             self._stats_num_chunks += 1
 
+            # Record communication density to DensityObserver
+            # Comm density = selected_cpu_blocks / available_cpu_blocks
+            # This is different from compute density (BSA block granularity)
+            DensityObserver.record_comm_density(
+                layer_id=layer_id,
+                selected_cpu_blocks=len(selected_block_ids),
+                total_cpu_blocks=len(available_blocks),
+            )
+
             # Log per-chunk density
             chunk_density = len(selected_block_ids) / len(available_blocks)
             logger.debug(f"[XAttn] chunk={ctx.query_chunk_idx}, available={len(available_blocks)}, "

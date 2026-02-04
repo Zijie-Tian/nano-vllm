@@ -267,13 +267,30 @@ class DensityObserver(Observer):
         return sum(all_densities) / len(all_densities)
 
     @classmethod
+    def get_per_layer_comm_density(cls) -> Dict[int, float]:
+        """
+        获取每层的 communication density (CPU block 粒度)。
+
+        Returns:
+            Dict[layer_id, avg_comm_density]
+        """
+        result = {}
+        for layer_id, densities in cls._layer_comm_densities.items():
+            if densities:
+                result[layer_id] = sum(densities) / len(densities)
+        return result
+
+    @classmethod
     def get_summary(cls) -> dict:
         """返回统计摘要"""
         per_layer = cls.get_per_layer_density()
+        per_layer_comm = cls.get_per_layer_comm_density()
         return {
             "mode": cls._mode,
-            "overall_density": cls.get_overall_density(),
-            "per_layer_density": per_layer,
+            "overall_compute_density": cls.get_overall_density(),
+            "overall_comm_density": cls.get_overall_comm_density(),
+            "per_layer_compute_density": per_layer,
+            "per_layer_comm_density": per_layer_comm,
             "num_layers": len(per_layer),
             "last_mask_shape": {
                 "q_blocks": cls._last_q_blocks,
@@ -301,7 +318,9 @@ class DensityObserver(Observer):
         print(f"[DensityObserver] Mode: {cls._mode}")
         print(f"  Compute density: {overall:.4f} (min: {min_density:.4f} @ layer {min_layer})")
         if overall_comm > 0:
-            print(f"  Comm density: {overall_comm:.4f}")
+            # Offload mode: show both densities with explanation
+            print(f"  Comm density:    {overall_comm:.4f} (CPU block granularity)")
+            print(f"  Savings ratio:   {1 - overall_comm:.1%} H2D transfer reduction")
         print(f"  Num layers: {len(per_layer)}")
         # 输出 layer 0 的 density 用于对比
         if 0 in per_layer:
