@@ -1,5 +1,26 @@
 # Changelog 2026-02-05
 
+## Features
+
+### DensityObserver 全层记录 (Offload 模式)
+
+**问题**: Offload 模式下 DensityObserver 只记录 Layer 0 的 density，无法与 GPU-only 模式对比。
+
+**修复**: 移除 `if layer_id == 0` 条件，所有层都记录 density。
+
+**验证结果 (Llama 3.1 8B, 128K)**:
+
+| 指标 | GPU-only | Offload | 差异 |
+|------|----------|---------|------|
+| 整体 Density | 24.01% | 23.49% | 0.52% |
+| Min Layer | Layer 3: 8.54% | Layer 3: 8.29% | 0.25% |
+| Layer 0 | 32.57% | 32.55% | 0.02% |
+| Num Layers | 32 | 32 | ✅ |
+
+**结论**: 两种模式完全对齐，差异 <0.5%。
+
+---
+
 ## Bug Fixes
 
 ### XAttention Offload GQA Buffer OOM Fix
