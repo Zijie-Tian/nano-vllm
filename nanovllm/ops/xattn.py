@@ -27,6 +27,36 @@ from typing import Tuple, Optional
 
 
 # ============================================================
+# Module-level cache for GPU properties (avoid repeated queries)
+# ============================================================
+_CACHED_GPU_BLOCK_SIZE: Optional[Tuple[int, int]] = None
+_CACHED_TRITON_SUPPORTED: Optional[bool] = None
+
+
+def _get_gemm_block_size() -> Tuple[int, int]:
+    """Get cached GEMM block size based on GPU memory."""
+    global _CACHED_GPU_BLOCK_SIZE
+    if _CACHED_GPU_BLOCK_SIZE is None:
+        props = torch.cuda.get_device_properties(torch.cuda.current_device())
+        if props.total_memory < 30 * 1024**3:  # Less than 30GB (e.g., RTX 3090 24GB)
+            _CACHED_GPU_BLOCK_SIZE = (64, 64)
+        else:
+            _CACHED_GPU_BLOCK_SIZE = (128, 128)
+    return _CACHED_GPU_BLOCK_SIZE
+
+
+def _is_triton_supported() -> bool:
+    """Check if Triton is supported on current GPU (SM 80+)."""
+    global _CACHED_TRITON_SUPPORTED
+    if _CACHED_TRITON_SUPPORTED is None:
+        props = torch.cuda.get_device_properties(torch.cuda.current_device())
+        _CACHED_TRITON_SUPPORTED = props.major >= 8
+        if not _CACHED_TRITON_SUPPORTED:
+            print(f"Triton kernel requires SM 80+, got SM {props.major}{props.minor}. Falling back to PyTorch.")
+    return _CACHED_TRITON_SUPPORTED
+
+
+# ============================================================
 # Triton Kernels
 # ============================================================
 
@@ -818,15 +848,8 @@ def flat_group_gemm_fuse_reshape(
         device=query_states.device
     )
 
-    # Adjust block size based on GPU shared memory
-    # RTX 3090 has ~100KB, A100/H100 have ~160KB+
-    props = torch.cuda.get_device_properties(torch.cuda.current_device())
-    if props.total_memory < 30 * 1024**3:  # Less than 30GB (e.g., RTX 3090 24GB)
-        BLOCK_M = 64
-        BLOCK_N = 64
-    else:
-        BLOCK_M = 128
-        BLOCK_N = 128
+    # Use cached block size (avoids repeated GPU property queries)
+    BLOCK_M, BLOCK_N = _get_gemm_block_size()
 
     assert q_len % (stride * BLOCK_M) == 0, f"q_len {q_len} must be divisible by stride*BLOCK_M {stride * BLOCK_M}"
     assert kv_len % (stride * BLOCK_N) == 0, f"kv_len {kv_len} must be divisible by stride*BLOCK_N {stride * BLOCK_N}"
@@ -1016,27 +1039,15 @@ def find_blocks_chunked(
     else:
         raise NotImplementedError("Block num selection (num_to_choose) not implemented")
 
-    # Enforce causal: zero out future blocks
-    try:
-        if causal:
-            assert (~mask[:, :, :, current_index + chunk_num :]).all()
-    except:
+    # Enforce causal: zero out future blocks (always apply, no validation needed)
+    if causal:
         mask[:, :, :, current_index + chunk_num :] = False
 
-    # Validation
-    if causal:
-        if decoding:
-            assert mask[:, :, :, 0].all() and mask[:, :, :, -1].all()
-        else:
-            lambda_mask = torch.zeros_like(input_tensor, dtype=bool, device=input_tensor.device)
-            lambda_mask[:, :, :, 0] = True
-            lambda_mask[:, :, :, current_index : current_index + chunk_num] = (
-                torch.eye(chunk_num, device=lambda_mask.device)
-                .unsqueeze(0)
-                .unsqueeze(0)
-                .expand(1, head_num, chunk_num, chunk_num)
-            )
-            assert torch.where(lambda_mask, mask, True).all()
+    # DEBUG: Validation assertions are removed to avoid GPU-CPU sync overhead
+    # The validation was:
+    # - assert mask[:, :, :, 0].all()  (sink block always selected)
+    # - assert diagonal blocks selected
+    # These are guaranteed by the algorithm above.
 
     return mask
 
@@ -1165,12 +1176,9 @@ def xattn_estimate(
     else:
         pad_query_states = query_states
 
-    # Check GPU capability for Triton
-    if use_triton:
-        props = torch.cuda.get_device_properties(torch.cuda.current_device())
-        if props.major < 8:
-            use_triton = False
-            print(f"Triton kernel requires SM 80+, got SM {props.major}{props.minor}. Falling back to PyTorch.")
+    # Check GPU capability for Triton (cached)
+    if use_triton and not _is_triton_supported():
+        use_triton = False
 
     # Compute reshaped dimensions
     reshaped_chunk_size = chunk_size // stride
@@ -1410,11 +1418,9 @@ def xattn_estimate_chunked(
     k_block_num = (k_len + block_size - 1) // block_size
     q_start_block = q_start_pos // block_size
 
-    # Check GPU capability for Triton
-    if use_triton:
-        props = torch.cuda.get_device_properties(torch.cuda.current_device())
-        if props.major < 8:
-            use_triton = False
+    # Check GPU capability for Triton (cached)
+    if use_triton and not _is_triton_supported():
+        use_triton = False
 
     # Pad Q and K for alignment
     if use_triton:

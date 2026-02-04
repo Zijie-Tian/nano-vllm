@@ -454,14 +454,8 @@ class XAttentionBSAPolicy(SparsePolicy):
             )
 
         # Record density for all layers via DensityObserver
-        if layer_id == 0:
-            # DEBUG: 打印 GPU-only Layer 0 的 mask 详情
-            q_bk = mask_trimmed.shape[2]
-            k_bk = mask_trimmed.shape[3]
-            causal_total = q_bk * (q_bk + 1) // 2 * mask_trimmed.shape[0] * mask_trimmed.shape[1]
-            causal_mask = torch.tril(torch.ones(q_bk, k_bk, device=mask_trimmed.device, dtype=torch.bool))
-            selected = (mask_trimmed & causal_mask.unsqueeze(0).unsqueeze(0)).sum().item()
-
+        # Note: DensityObserver.record only computes density when enabled,
+        # otherwise it returns immediately without any GPU-CPU sync
         DensityObserver.record(layer_id, mask_trimmed, causal=True)
 
         return output
