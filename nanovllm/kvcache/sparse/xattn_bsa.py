@@ -828,48 +828,49 @@ class XAttentionBSAPolicy(SparsePolicy):
             )
 
         # ================================================================
-        # Step 5: Record density (only on layer 0)
+        # Step 5: Record density (all layers for alignment with GPU-only)
         # ================================================================
+        # Trim mask to valid region
+        valid_q_blocks = (q_len + self.BSA_BLOCK_SIZE - 1) // self.BSA_BLOCK_SIZE
+        valid_k_blocks = (total_k_len + self.BSA_BLOCK_SIZE - 1) // self.BSA_BLOCK_SIZE
+        mask_valid = mask[:, :, :valid_q_blocks, :valid_k_blocks]
+        attn_sums_valid = attn_sum_concat[:, :, :valid_q_blocks, :valid_k_blocks]
+
+        # Compute causal mask for density calculation
+        q_offset_blocks = valid_k_blocks - valid_q_blocks
+        indices = torch.arange(valid_k_blocks, device=mask.device).unsqueeze(0)
+        q_indices = torch.arange(valid_q_blocks, device=mask.device).unsqueeze(1)
+        causal_mask = indices <= (q_indices + q_offset_blocks)
+
+        chunk_total = causal_mask.sum().item() * mask_valid.shape[0] * mask_valid.shape[1]
+        chunk_selected = (mask_valid & causal_mask.unsqueeze(0).unsqueeze(0)).sum().item()
+
+        DensityObserver.record_counts(layer_id, chunk_selected, chunk_total)
+        # Only log for layer 0 to avoid spam (density is recorded for all layers)
         if layer_id == 0:
-            # Trim mask to valid region
-            valid_q_blocks = (q_len + self.BSA_BLOCK_SIZE - 1) // self.BSA_BLOCK_SIZE
-            valid_k_blocks = (total_k_len + self.BSA_BLOCK_SIZE - 1) // self.BSA_BLOCK_SIZE
-            mask_valid = mask[:, :, :valid_q_blocks, :valid_k_blocks]
-            attn_sums_valid = attn_sum_concat[:, :, :valid_q_blocks, :valid_k_blocks]
-
-            # Compute causal mask for density calculation
-            q_offset_blocks = valid_k_blocks - valid_q_blocks
-            indices = torch.arange(valid_k_blocks, device=mask.device).unsqueeze(0)
-            q_indices = torch.arange(valid_q_blocks, device=mask.device).unsqueeze(1)
-            causal_mask = indices <= (q_indices + q_offset_blocks)
-
-            chunk_total = causal_mask.sum().item() * mask_valid.shape[0] * mask_valid.shape[1]
-            chunk_selected = (mask_valid & causal_mask.unsqueeze(0).unsqueeze(0)).sum().item()
-
-            DensityObserver.record_counts(layer_id, chunk_selected, chunk_total)
-            logger.info(f"[XAttn Offload] Layer0 chunk: q_len={q_len}, k_len={total_k_len}, "
+            logger.info(f"[XAttn Offload] Layer{layer_id} chunk: q_len={q_len}, k_len={total_k_len}, "
                        f"valid_q_blocks={valid_q_blocks}, valid_k_blocks={valid_k_blocks}, "
                        f"q_offset={q_offset_blocks}, selected={chunk_selected}, total={chunk_total}, "
                        f"density={chunk_selected/chunk_total:.4f}")
 
-            # Debug: Save mask and attention sums for comparison
-            if _DEBUG_SAVE_MASK:
-                import os
-                chunk_idx = ctx.query_chunk_idx if ctx else 0
-                save_dir = "/home/zijie/Code/nano-vllm/results/mask_alignment"
-                os.makedirs(save_dir, exist_ok=True)
-                save_path = f"{save_dir}/offload_layer{layer_id}_chunk{chunk_idx}.pt"
-                torch.save({
-                    "mask": mask_valid.clone().cpu(),
-                    "attn_sums": attn_sums_valid.clone().cpu(),
-                    "q_len": q_len,
-                    "k_len": total_k_len,
-                    "valid_q_blocks": valid_q_blocks,
-                    "valid_k_blocks": valid_k_blocks,
-                    "current_index": current_index,
-                    "chunk_start": chunk_start,
-                }, save_path)
-                logger.info(f"[DEBUG] Saved mask to {save_path}")
+        # Debug: Save mask and attention sums for comparison
+        if _DEBUG_SAVE_MASK:
+            import os
+            chunk_idx = ctx.query_chunk_idx if ctx else 0
+            save_dir = "/home/zijie/Code/nano-vllm/results/mask_alignment"
+            os.makedirs(save_dir, exist_ok=True)
+            save_path = f"{save_dir}/offload_layer{layer_id}_chunk{chunk_idx}.pt"
+            torch.save({
+                "mask": mask_valid.clone().cpu(),
+                "attn_sums": attn_sums_valid.clone().cpu(),
+                "q_len": q_len,
+                "k_len": total_k_len,
+                "valid_q_blocks": valid_q_blocks,
+                "valid_k_blocks": valid_k_blocks,
+                "current_index": current_index,
+                "chunk_start": chunk_start,
+            }, save_path)
+            logger.info(f"[DEBUG] Saved mask to {save_path}")
 
         del attn_sum_concat
 
