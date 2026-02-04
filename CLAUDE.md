@@ -45,6 +45,7 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 | [`docs/xattn_offload_stream_sync_fix.md`](docs/xattn_offload_stream_sync_fix.md) | 🐛 FIX: XAttention Offload stream 同步 bug，Pass1/Pass2 K 数据不一致，compute_stream 包装 |
 | [`docs/xattn_density_types.md`](docs/xattn_density_types.md) | 📊 Compute vs Comm density: BSA block (128) vs CPU block (4096) 粒度，聚合效应导致 comm=100% |
 | [`docs/xattn_density_alignment_verification.md`](docs/xattn_density_alignment_verification.md) | ✅ VERIFIED: GPU-only vs Offload density 对齐验证 (32K 差异 0.37%, 64K 差异 0.09%) |
+| [`docs/xattn_768k_density_benchmark.md`](docs/xattn_768k_density_benchmark.md) | 📊 BENCH: 768K context density 测试，compute=56.95%, comm=100%，聚合效应分析 |
 | [`docs/test_ruler_usage_guide.md`](docs/test_ruler_usage_guide.md) | 📖 GUIDE: test_ruler.py 使用指南，RULER benchmark 测试命令，已验证的命令示例 |
 | [`docs/xattn_offload_profiling_32k.md`](docs/xattn_offload_profiling_32k.md) | 📊 PROFILE: XAttn vs Full 32K nsys 分析，estimate 占 41%，find_blocks 占 37%，compute 仅 21% |
 | [`docs/changelog_2026-02-05.md`](docs/changelog_2026-02-05.md) | 📋 CHANGELOG: GQA buffer OOM 修复 (节省 16GB)，tests 目录清理 (-4306 行) |
