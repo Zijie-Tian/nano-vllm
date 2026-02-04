@@ -44,6 +44,7 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 | [`docs/xattn_memory_benchmark.md`](docs/xattn_memory_benchmark.md) | 📊 BENCH: XAttention 内存基准测试，Qwen3-0.6B 32K 在 24GB 显存可行 (gpu-util=0.28) |
 | [`docs/xattn_offload_stream_sync_fix.md`](docs/xattn_offload_stream_sync_fix.md) | 🐛 FIX: XAttention Offload stream 同步 bug，Pass1/Pass2 K 数据不一致，compute_stream 包装 |
 | [`docs/xattn_density_types.md`](docs/xattn_density_types.md) | 📊 Compute vs Comm density: BSA block (128) vs CPU block (4096) 粒度，聚合效应导致 comm=100% |
+| [`docs/xattn_density_alignment_verification.md`](docs/xattn_density_alignment_verification.md) | ✅ VERIFIED: GPU-only vs Offload density 对齐验证 (32K 差异 0.37%, 64K 差异 0.09%) |
 
 ## Rules Index
 
