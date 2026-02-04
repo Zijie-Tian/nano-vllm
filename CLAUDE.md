@@ -42,6 +42,7 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 | [`docs/xattn_kv_chunking_density_test.md`](docs/xattn_kv_chunking_density_test.md) | 🧪 TEST: XAttention KV chunking density 验证，threshold=1.0 对齐，threshold<1.0 差异 10-13% |
 | [`docs/gpuonly_density_alignment_test.md`](docs/gpuonly_density_alignment_test.md) | ✅ TEST: Density 对齐验证 (GPU-only + Offload, 4K-64K)，xattn_estimate vs KV chunking 完全一致 |
 | [`docs/xattn_memory_benchmark.md`](docs/xattn_memory_benchmark.md) | 📊 BENCH: XAttention 内存基准测试，Qwen3-0.6B 32K 在 24GB 显存可行 (gpu-util=0.28) |
+| [`docs/xattn_offload_stream_sync_fix.md`](docs/xattn_offload_stream_sync_fix.md) | 🐛 FIX: XAttention Offload stream 同步 bug，Pass1/Pass2 K 数据不一致，compute_stream 包装 |
 
 ## Rules Index
 
@@ -105,6 +106,13 @@ PYTHONPATH=/home/zijie/Code/nano-vllm:$PYTHONPATH python tests/test_needle.py
 ## Benchmarking
 
 **Files**: `bench.py` (GPU), `bench_offload.py` (CPU offload), `bench_vllm.py` (comparison)
+
+**GPU-only 测试模型选择**:
+
+| GPU | 显存 | GPU-only 测试模型 |
+|-----|------|------------------|
+| RTX 3090 | 24GB | **Qwen3-0.6B** (必须，7B+ 模型会 OOM) |
+| A100 | 40GB+ | Qwen3-0.6B / 4B / 7B 均可 |
 
 **Offload Mode Constraint**: When using `enable_cpu_offload=True`, only test with context length ≥ 32K. Shorter contexts don't exercise the chunked offload pipeline properly.
 
