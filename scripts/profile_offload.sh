@@ -129,6 +129,9 @@ case "$CTX_LEN" in
     512k)
         MAX_MODEL_LEN=576000
         ;;
+    768k)
+        MAX_MODEL_LEN=850000
+        ;;
     1m)
         MAX_MODEL_LEN=1100000
         ;;
