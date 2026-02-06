@@ -60,53 +60,108 @@ cpu_needed = mask_per_cpu.any(dim=-1).any(dim=2).any(dim=1)
 
 ## 测试结果
 
+**测试日期**: 2026-02-07
+**GPU**: RTX 3090 (GPU 5)
+**模型**: Llama-3.1-8B-Instruct (GQA, 32 heads, 8 KV heads)
+
 ### 测试命令
 
 ```bash
-# Offload 模式测试
-CUDA_VISIBLE_DEVICES=0 PYTHONPATH=.:$PYTHONPATH python tests/test_ruler.py \
+# 32K Offload 模式 (3 samples)
+CUDA_VISIBLE_DEVICES=5 PYTHONPATH=/home/zijie/Code/nano-vllm:$PYTHONPATH \
+    python tests/test_ruler.py \
     --model ~/models/Llama-3.1-8B-Instruct \
-    --data-dir tests/data/ruler_64k \
+    --data-dir tests/data/ruler_32k \
+    --datasets niah_single_1 \
+    --num-samples 3 \
+    --max-model-len 40960 \
+    --enable-offload \
+    --sparse-policy XATTN_BSA \
+    --sparse-threshold 0.9
+
+# 128K Offload 模式 (1 sample)
+CUDA_VISIBLE_DEVICES=5 PYTHONPATH=/home/zijie/Code/nano-vllm:$PYTHONPATH \
+    python tests/test_ruler.py \
+    --model ~/models/Llama-3.1-8B-Instruct \
+    --data-dir tests/data/ruler_128k \
     --datasets niah_single_1 \
     --num-samples 1 \
-    --max-model-len 72000 \
+    --max-model-len 135000 \
     --enable-offload \
     --sparse-policy XATTN_BSA \
     --sparse-threshold 0.9
 ```
 
-### 输出示例
+### Comm Density 测试结果
+
+| Context | Samples | Pass Rate | Compute Density | Comm Density | H2D Savings |
+|---------|---------|-----------|-----------------|--------------|-------------|
+| 32K | 3 | 3/3 (100%) | 38.01% | **100%** | 0% |
+| 64K | 1 | 1/1 (100%) | 36.91% | **100%** | 0% |
+| 128K | 1 | 1/1 (100%) | ~23.5% | **100%** | 0% |
+
+### DensityObserver 输出示例 (32K)
 
 ```
 [DensityObserver] Mode: offload
-  Compute density: 0.3691 (min: 0.3691 @ layer 0)
+  Compute density: 0.3801 (min: 0.3801 @ layer 0)
   Comm density:    1.0000 (CPU block granularity)
   Savings ratio:   0.0% H2D transfer reduction
   Num layers: 1
-  Layer 0 density: 0.369052
+  Layer 0 density: 0.380100
 ```
 
 ## 关键发现
 
+### Comm Density = 100% 的数学证明
+
+三级 `any()` 聚合过程:
+
+```
+mask_per_cpu: [1, 32_heads, Q_bsa, num_cpu_blocks, 32_bsa_per_cpu]
+                               ↓ any(dim=-1) : 32 BSA 子块取并
+                               ↓ any(dim=2)  : Q 块取并
+                               ↓ any(dim=1)  : 32 heads 取并
+cpu_needed:   [1, num_cpu_blocks]
+```
+
+以 32K context 为例 (compute density = 38%):
+- 单个 head 选中某 BSA block 的概率 ≈ 0.38
+- **Head 并集**: 32 heads 都不选中某 BSA block 的概率 = (1-0.38)^32 ≈ 6.7×10⁻⁷
+- **BSA 子块并集**: CPU block 内 32 个 BSA 子块都不被选中的概率 ≈ (6.7×10⁻⁷)^32 → 0
+- 结论: 任意 CPU block 被选中的概率 → **100%**
+
 ### 当前 XAttention 的通信优化局限
 
-1. **Compute density 有效降低**: ~37% @ 64K context（计算量减少 63%）
-2. **Comm density 没有降低**: 100%（通信量没有减少）
+1. **Compute density 有效降低**: 23-38% (随 context 增长)，计算量减少 62-77%
+2. **Comm density 没有降低**: 100%（H2D 传输量没有任何减少）
 
 ### 原因分析
 
 Attention pattern 的特点：
-- 不同 heads 关注不同位置
+- 不同 heads 关注不同位置（GQA 32 heads 的并集覆盖全部位置）
 - 不同 Q positions 关注不同 K positions
 - 稀疏选择分布在整个 sequence 上
 
 这导致虽然每个 (head, Q, K) 组合只选择少量 blocks，但聚合后覆盖了所有 CPU blocks。
 
+### 代码位置
+
+Comm density 聚合逻辑: `xattn_bsa.py:922-924`
+
+```python
+mask_per_cpu = mask_historical.view(B, H, Q_bsa, num_historical_blocks, bsa_per_cpu)
+cpu_needed = mask_per_cpu.any(dim=-1).any(dim=2).any(dim=1)  # [B, num_cpu]
+```
+
+Comm density 记录: `xattn_bsa.py:947` (仅 layer_id == 0)
+
 ### 潜在优化方向
 
-1. **Per-head block selection**: 每个 head 独立选择 CPU blocks
+1. **Per-head block selection**: 每个 head 独立选择 CPU blocks（需要 per-head H2D）
 2. **Block clustering**: 将相关 blocks 聚合到同一 CPU block
 3. **Dynamic block size**: 根据 attention pattern 动态调整 CPU block 大小
+4. **减小 CPU block 粒度**: 从 4096 降到更小值（但会增加 pipeline 管理开销）
 
 ## DensityObserver API
 

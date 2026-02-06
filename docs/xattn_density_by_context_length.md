@@ -41,14 +41,17 @@ CUDA_VISIBLE_DEVICES=4 PYTHONPATH=/home/zijie/Code/nano-vllm:$PYTHONPATH \
 
 ### Density 汇总表
 
-| Context | max-model-len | Compute Density | Min Density | Min Layer | Layer 0 Density |
-|---------|---------------|-----------------|-------------|-----------|-----------------|
-| 4K | 5000 | 51.33% | 31.93% | Layer 3 | 62.46% |
-| 8K | 10000 | 48.78% | 27.90% | Layer 5 | 62.34% |
-| 16K | 20000 | 45.37% | 23.57% | Layer 5 | 59.85% |
-| 32K | 40960 | 38.10% | 17.52% | Layer 5 | 49.84% |
-| 64K | 72000 | 28.27% | 11.87% | Layer 5 | 36.91% |
-| 128K | 135000 | **23.49%** | **8.29%** | Layer 3 | 32.55% |
+| Context | max-model-len | Compute Density | Min Density | Min Layer | Layer 0 Density | Comm Density |
+|---------|---------------|-----------------|-------------|-----------|-----------------|--------------|
+| 4K | 5000 | 51.33% | 31.93% | Layer 3 | 62.46% | N/A (无历史块) |
+| 8K | 10000 | 48.78% | 27.90% | Layer 5 | 62.34% | 100% |
+| 16K | 20000 | 45.37% | 23.57% | Layer 5 | 59.85% | 100% |
+| 32K | 40960 | 38.10% | 17.52% | Layer 5 | 49.84% | 100% |
+| 64K | 72000 | 28.27% | 11.87% | Layer 5 | 36.91% | 100% |
+| 128K | 135000 | **23.49%** | **8.29%** | Layer 3 | 32.55% | 100% |
+
+> **Comm Density 说明**: 由于 32 heads 的 `any()` 并集效应，BSA 级别的稀疏无法传导到 CPU block 级别。
+> 详见 [`docs/xattn_density_types.md`](xattn_density_types.md) 中的数学证明。
 
 ### 测试命令
 
@@ -143,17 +146,17 @@ CUDA_VISIBLE_DEVICES=4 PYTHONPATH=/home/zijie/Code/nano-vllm:$PYTHONPATH \
 
 ### Density 汇总表
 
-| Context | max-model-len | Compute Density | Min Density | Min Layer | Layer 0 Density |
-|---------|---------------|-----------------|-------------|-----------|-----------------|
-| 4K | 5000 | 56.89% | 32.81% | Layer 6 | 87.74% |
-| 8K | 10000 | 49.43% | 21.07% | Layer 6 | 79.28% |
-| 16K | 20000 | 43.57% | 15.72% | Layer 6 | 74.32% |
-| 32K | 40960 | 40.36% | 13.85% | Layer 6 | 71.45% |
-| 64K | 72000 | 37.26% | 11.90% | Layer 6 | 68.52% |
-| 128K | 135000 | 35.25% | 10.06% | Layer 6 | 64.78% |
-| 256K | 270000 | 25.54% | 6.21% | Layer 6 | 62.60% |
-| 512K | 530000 | 24.46% | 6.69% | Layer 6 | 58.66% |
-| 768K | 800000 | **23.40%** | **6.09%** | Layer 6 | 56.95% |
+| Context | max-model-len | Compute Density | Min Density | Min Layer | Layer 0 Density | Comm Density |
+|---------|---------------|-----------------|-------------|-----------|-----------------|--------------|
+| 4K | 5000 | 56.89% | 32.81% | Layer 6 | 87.74% | N/A (无历史块) |
+| 8K | 10000 | 49.43% | 21.07% | Layer 6 | 79.28% | 100% |
+| 16K | 20000 | 43.57% | 15.72% | Layer 6 | 74.32% | 100% |
+| 32K | 40960 | 40.36% | 13.85% | Layer 6 | 71.45% | 100% |
+| 64K | 72000 | 37.26% | 11.90% | Layer 6 | 68.52% | 100% |
+| 128K | 135000 | 35.25% | 10.06% | Layer 6 | 64.78% | 100% |
+| 256K | 270000 | 25.54% | 6.21% | Layer 6 | 62.60% | 100% |
+| 512K | 530000 | 24.46% | 6.69% | Layer 6 | 58.66% | 100% |
+| 768K | 800000 | **23.40%** | **6.09%** | Layer 6 | 56.95% | 100% |
 
 ### 测试命令
 
@@ -262,11 +265,21 @@ CUDA_VISIBLE_DEVICES=4 PYTHONPATH=/home/zijie/Code/nano-vllm:$PYTHONPATH \
 | Density 下降速率 | 较快 | 较慢 |
 | 极长 context density | N/A (max 128K) | ~23% (768K) |
 
+### Comm Density = 100% 的根因
+
+所有 context length 下 comm density 均为 100%，原因是 `select_blocks` 中的三级 `any()` 聚合:
+- 32 个 head 的并集 → 不同 head 关注不同位置
+- 所有 Q BSA block 的并集 → 不同 Q 位置关注不同 K 位置
+- CPU block 内 32 个 BSA 子块的并集 → 粒度放大 32 倍
+
+即使单个 head 的 compute density 仅 38%，32 heads 并集后覆盖率 → 100%。
+
 ### 优化建议
 
 1. **按层独立优化**: 针对最稀疏的层使用更细粒度的 block selection
 2. **动态阈值**: 根据 context length 动态调整 sparse_threshold
-3. **CPU block 粒度优化**: 当前 4096 tokens 粒度导致 comm_density=100%，需要减小
+3. **Per-head H2D**: 每个 head 独立传输所需 blocks（需要修改 offload 架构）
+4. **减小 CPU block 粒度**: 从 4096 降到更小值（但增加 pipeline 管理开销）
 
 ---
 
