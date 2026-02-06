@@ -48,6 +48,7 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 | [`docs/xattn_768k_density_benchmark.md`](docs/xattn_768k_density_benchmark.md) | 📊 BENCH: 768K context density 测试，compute=56.95%, comm=100%，聚合效应分析 |
 | [`docs/test_ruler_usage_guide.md`](docs/test_ruler_usage_guide.md) | 📖 GUIDE: test_ruler.py 使用指南，RULER benchmark 测试命令，已验证的命令示例 |
 | [`docs/xattn_offload_profiling_32k.md`](docs/xattn_offload_profiling_32k.md) | 📊 PROFILE: XAttn vs Full 32K nsys 分析，estimate 占 41%，find_blocks 占 37%，compute 仅 21% |
+| [`docs/select_blocks_ring_buffer_pipeline.md`](docs/select_blocks_ring_buffer_pipeline.md) | ⚡ PERF: select_blocks ring buffer pipeline 优化，128K prefill -9.5%，find_blocks -44.8% |
 | [`docs/changelog_2026-02-05.md`](docs/changelog_2026-02-05.md) | 📋 CHANGELOG: GQA buffer OOM 修复 (节省 16GB)，tests 目录清理 (-4306 行) |
 
 ## Rules Index

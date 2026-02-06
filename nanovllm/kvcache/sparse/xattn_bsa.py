@@ -613,53 +613,72 @@ class XAttentionBSAPolicy(SparsePolicy):
         # Get compute_stream for all compute kernels (like attention computation)
         compute_stream = offload_engine.compute_stream
 
+        # Ring buffer pipeline config (shared by pass1 and pass2)
+        load_slots = list(range(offload_engine.num_ring_slots))
+        num_slots = len(load_slots)
+        num_blocks_hist = len(available_blocks)
+
         with nvtx.range("xattn_estimate_pass1"):
-            slot = 0
+            # Process historical blocks (from CPU) with ring buffer pipeline
+            if num_blocks_hist > 0:
+                # Preload first N blocks into ring buffer slots
+                num_preload = min(num_slots, num_blocks_hist)
+                for i in range(num_preload):
+                    offload_engine.load_k_only_to_slot_layer(
+                        load_slots[i], layer_id, available_blocks[i],
+                        chunk_idx=available_blocks[i])
 
-            # Process historical blocks (from CPU)
-            for kv_chunk_idx, cpu_block_id in enumerate(available_blocks):
-                # Load K from CPU (on slot_transfer_stream)
-                offload_engine.load_k_only_to_slot_layer(slot, layer_id, cpu_block_id, chunk_idx=cpu_block_id)
-                # wait_slot_layer makes compute_stream wait for H2D transfer
-                offload_engine.wait_slot_layer(slot)
+                for kv_chunk_idx in range(num_blocks_hist):
+                    current_slot = load_slots[kv_chunk_idx % num_slots]
 
-                # All compute kernels run on compute_stream (like attention computation)
-                with torch.cuda.stream(compute_stream):
-                    k_block = offload_engine.get_k_for_slot(slot)  # [1, block_size, num_kv_heads, head_dim]
-                    K_chunk = k_block.transpose(1, 2)  # [1, num_kv_heads, block_size, head_dim]
+                    # wait_slot_layer makes compute_stream wait for H2D transfer
+                    offload_engine.wait_slot_layer(current_slot)
 
-                    # GQA expansion
-                    num_kv_heads = K_chunk.shape[1]
-                    if num_heads != num_kv_heads:
-                        num_groups = num_heads // num_kv_heads
-                        K_chunk = K_chunk.repeat_interleave(num_groups, dim=1)
+                    # All compute kernels run on compute_stream (like attention computation)
+                    with torch.cuda.stream(compute_stream):
+                        k_block = offload_engine.get_k_for_slot(current_slot)  # [1, block_size, num_kv_heads, head_dim]
+                        K_chunk = k_block.transpose(1, 2)  # [1, num_kv_heads, block_size, head_dim]
 
-                    # KV offset in reshaped space
-                    kv_offset_reshaped = kv_chunk_idx * kv_chunk_reshaped
+                        # GQA expansion
+                        num_kv_heads = K_chunk.shape[1]
+                        if num_heads != num_kv_heads:
+                            num_groups = num_heads // num_kv_heads
+                            K_chunk = K_chunk.repeat_interleave(num_groups, dim=1)
 
-                    # Compute raw attention scores
-                    attn_weights_kv = flat_group_gemm_fuse_reshape(
-                        Q, K_chunk, self.stride,
-                        chunk_start=chunk_start,
-                        chunk_end=chunk_end,
-                        is_causal=False,  # K 不完整，不能在这里用 causal
-                    )
+                        # KV offset in reshaped space
+                        kv_offset_reshaped = kv_chunk_idx * kv_chunk_reshaped
 
-                    # Compute partial stats (带 causal mask)
-                    m_partial, l_partial = softmax_compute_partial_stats(
-                        attn_weights_kv,
-                        reshaped_block_size,
-                        segment_size,
-                        scale,
-                        chunk_start=chunk_start,
-                        kv_offset=kv_offset_reshaped,
-                        is_causal=True,
-                    )
-                    m_chunks.append(m_partial)
-                    l_chunks.append(l_partial)
+                        # Compute raw attention scores
+                        attn_weights_kv = flat_group_gemm_fuse_reshape(
+                            Q, K_chunk, self.stride,
+                            chunk_start=chunk_start,
+                            chunk_end=chunk_end,
+                            is_causal=False,  # K 不完整，不能在这里用 causal
+                        )
 
-                    offload_engine.record_slot_compute_done(slot)
-                    del attn_weights_kv
+                        # Compute partial stats (带 causal mask)
+                        m_partial, l_partial = softmax_compute_partial_stats(
+                            attn_weights_kv,
+                            reshaped_block_size,
+                            segment_size,
+                            scale,
+                            chunk_start=chunk_start,
+                            kv_offset=kv_offset_reshaped,
+                            is_causal=True,
+                        )
+                        m_chunks.append(m_partial)
+                        l_chunks.append(l_partial)
+
+                        offload_engine.record_slot_compute_done(current_slot)
+                        del attn_weights_kv
+
+                    # Issue next H2D transfer (overlap with compute on different slot)
+                    next_idx = kv_chunk_idx + num_slots
+                    if next_idx < num_blocks_hist:
+                        next_slot = load_slots[next_idx % num_slots]
+                        offload_engine.load_k_only_to_slot_layer(
+                            next_slot, layer_id, available_blocks[next_idx],
+                            chunk_idx=available_blocks[next_idx])
 
             # Process current chunk K (already on GPU) on compute_stream
             with torch.cuda.stream(compute_stream):
@@ -719,52 +738,66 @@ class XAttentionBSAPolicy(SparsePolicy):
         attn_sum_per_kv = []
 
         with nvtx.range("xattn_estimate_pass2"):
-            slot = 0
+            # Process historical blocks again with ring buffer pipeline
+            if num_blocks_hist > 0:
+                # Preload first N blocks into ring buffer slots
+                num_preload = min(num_slots, num_blocks_hist)
+                for i in range(num_preload):
+                    offload_engine.load_k_only_to_slot_layer(
+                        load_slots[i], layer_id, available_blocks[i],
+                        chunk_idx=available_blocks[i])
 
-            # Process historical blocks again
-            for kv_chunk_idx, cpu_block_id in enumerate(available_blocks):
-                # Load K from CPU (on slot_transfer_stream)
-                offload_engine.load_k_only_to_slot_layer(slot, layer_id, cpu_block_id, chunk_idx=cpu_block_id)
-                # wait_slot_layer makes compute_stream wait for H2D transfer
-                offload_engine.wait_slot_layer(slot)
+                for kv_chunk_idx in range(num_blocks_hist):
+                    current_slot = load_slots[kv_chunk_idx % num_slots]
 
-                # All compute kernels run on compute_stream
-                with torch.cuda.stream(compute_stream):
-                    k_block = offload_engine.get_k_for_slot(slot)
-                    K_chunk = k_block.transpose(1, 2)
+                    # wait_slot_layer makes compute_stream wait for H2D transfer
+                    offload_engine.wait_slot_layer(current_slot)
 
-                    num_kv_heads = K_chunk.shape[1]
-                    if num_heads != num_kv_heads:
-                        num_groups = num_heads // num_kv_heads
-                        K_chunk = K_chunk.repeat_interleave(num_groups, dim=1)
+                    # All compute kernels run on compute_stream
+                    with torch.cuda.stream(compute_stream):
+                        k_block = offload_engine.get_k_for_slot(current_slot)
+                        K_chunk = k_block.transpose(1, 2)
 
-                    kv_offset_reshaped = kv_chunk_idx * kv_chunk_reshaped
+                        num_kv_heads = K_chunk.shape[1]
+                        if num_heads != num_kv_heads:
+                            num_groups = num_heads // num_kv_heads
+                            K_chunk = K_chunk.repeat_interleave(num_groups, dim=1)
 
-                    # Recompute attention scores (trade-off: compute vs memory)
-                    attn_weights_kv = flat_group_gemm_fuse_reshape(
-                        Q, K_chunk, self.stride,
-                        chunk_start=chunk_start,
-                        chunk_end=chunk_end,
-                        is_causal=False,
-                    )
+                        kv_offset_reshaped = kv_chunk_idx * kv_chunk_reshaped
 
-                    # Normalize with global stats and compute block sums
-                    block_sum_kv = softmax_normalize_and_block_sum(
-                        attn_weights_kv,
-                        m_global,
-                        l_global,
-                        reshaped_block_size,
-                        segment_size,
-                        chunk_start=chunk_start,
-                        real_q_len=k_reshaped_seq_len - k_reshaped_num_to_pad,
-                        scale=scale,
-                        kv_offset=kv_offset_reshaped,
-                        is_causal=True,
-                    )
-                    attn_sum_per_kv.append(block_sum_kv)
+                        # Recompute attention scores (trade-off: compute vs memory)
+                        attn_weights_kv = flat_group_gemm_fuse_reshape(
+                            Q, K_chunk, self.stride,
+                            chunk_start=chunk_start,
+                            chunk_end=chunk_end,
+                            is_causal=False,
+                        )
 
-                    offload_engine.record_slot_compute_done(slot)
-                    del attn_weights_kv
+                        # Normalize with global stats and compute block sums
+                        block_sum_kv = softmax_normalize_and_block_sum(
+                            attn_weights_kv,
+                            m_global,
+                            l_global,
+                            reshaped_block_size,
+                            segment_size,
+                            chunk_start=chunk_start,
+                            real_q_len=k_reshaped_seq_len - k_reshaped_num_to_pad,
+                            scale=scale,
+                            kv_offset=kv_offset_reshaped,
+                            is_causal=True,
+                        )
+                        attn_sum_per_kv.append(block_sum_kv)
+
+                        offload_engine.record_slot_compute_done(current_slot)
+                        del attn_weights_kv
+
+                    # Issue next H2D transfer (overlap with compute on different slot)
+                    next_idx = kv_chunk_idx + num_slots
+                    if next_idx < num_blocks_hist:
+                        next_slot = load_slots[next_idx % num_slots]
+                        offload_engine.load_k_only_to_slot_layer(
+                            next_slot, layer_id, available_blocks[next_idx],
+                            chunk_idx=available_blocks[next_idx])
 
             # Process current chunk on compute_stream
             with torch.cuda.stream(compute_stream):
