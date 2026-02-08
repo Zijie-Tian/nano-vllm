@@ -16,15 +16,15 @@ TEMPERATURE="0.0" # greedy
 TOP_P="1.0"
 TOP_K="32"
 SEQ_LENGTHS=(
-    # 4096
-    # 8192
-    # 16384
-    # 32768
+    # 4096     # 4K
+    # 8192     # 8K
+    # 16384    # 16K
+    # 32768    # 32K
     # 65536
     # 131072
-    # 262144   # 256K
+    262144   # 256K
     # 524288   # 512K
-    786432   # 768K
+    # 786432   # 768K
     # 1048576  # 1M
 )
 
@@ -83,6 +83,15 @@ MODEL_SELECT() {
             TOKENIZER_PATH="${MODEL_DIR}/GLM-4-9B-Chat-1M"
             TOKENIZER_TYPE="hf"
             NANOVLLM_CPU_OFFLOAD="true"  # Large model, use offload
+            ;;
+        glm4-9b-xattn-nanovllm)
+            # XAttention variant: use with --metric xattn for sparse attention testing
+            MODEL_PATH="${MODEL_DIR}/GLM-4-9B-Chat-1M"
+            MODEL_TEMPLATE_TYPE="glm4"
+            MODEL_FRAMEWORK="nanovllm"
+            TOKENIZER_PATH="${MODEL_DIR}/GLM-4-9B-Chat-1M"
+            TOKENIZER_TYPE="hf"
+            NANOVLLM_CPU_OFFLOAD="true"  # Use offload for XAttention with long context
             ;;
         # Qwen2.5-7B-Instruct-1M (NanoVLLM backend)
         qwen2.5-7b-1m-nanovllm)
