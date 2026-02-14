@@ -22,9 +22,9 @@ SEQ_LENGTHS=(
     # 32768    # 32K
     # 65536
     # 131072
-    262144   # 256K
+    # 262144   # 256K
     # 524288   # 512K
-    # 786432   # 768K
+    786432   # 768K
     # 1048576  # 1M
 )
 
@@ -74,6 +74,15 @@ MODEL_SELECT() {
             MODEL_TEMPLATE_TYPE="meta-llama3"
             MODEL_FRAMEWORK="nanovllm"
             NANOVLLM_CPU_OFFLOAD="true"  # Large model, use offload
+            ;;
+        llama3.1-8b-xattn-nanovllm)
+            # XAttention variant: use with --metric xattn for sparse attention testing
+            MODEL_PATH="${MODEL_DIR}/Llama-3.1-8B-Instruct"
+            MODEL_TEMPLATE_TYPE="meta-llama3"
+            MODEL_FRAMEWORK="nanovllm"
+            TOKENIZER_PATH="${MODEL_DIR}/Llama-3.1-8B-Instruct"
+            TOKENIZER_TYPE="hf"
+            NANOVLLM_CPU_OFFLOAD="true"  # Use offload for XAttention with long context
             ;;
         # GLM-4-9B-Chat-1M (NanoVLLM backend)
         glm4-9b-nanovllm)
