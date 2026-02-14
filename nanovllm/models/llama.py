@@ -1,4 +1,3 @@
-import os
 import torch
 from torch import nn
 import torch.distributed as dist
@@ -74,37 +73,7 @@ class LlamaAttention(nn.Module):
         k = k.view(-1, self.num_kv_heads, self.head_dim)
         v = v.view(-1, self.num_kv_heads, self.head_dim)
 
-        # --- Temporary: save pre-RoPE and post-RoPE QKV ---
-        _save_dir = os.environ.get("SAVE_ROPE_DIR", "")
-        _should_save = (
-            _save_dir
-            and not getattr(self, '_rope_saved', False)
-            and self.attn.layer_id >= 0
-            and q.shape[0] > 1024
-        )
-        if _should_save:
-            pre_rope_q = q.detach().cpu()
-            pre_rope_k = k.detach().cpu()
-            v_cpu = v.detach().cpu()
-            positions_cpu = positions.detach().cpu()
-
-        # Llama has no q_norm/k_norm
         q, k = self.rotary_emb(positions, q, k)
-
-        if _should_save:
-            layer_id = self.attn.layer_id
-            save_path = os.path.join(_save_dir, f'layer_{layer_id:02d}.pt')
-            torch.save({
-                'pre_rope_q': pre_rope_q,
-                'pre_rope_k': pre_rope_k,
-                'post_rope_q': q.detach().cpu(),
-                'post_rope_k': k.detach().cpu(),
-                'v': v_cpu,
-                'positions': positions_cpu,
-            }, save_path)
-            print(f"[SAVE_ROPE] Saved layer {layer_id} to {save_path}")
-            self._rope_saved = True
-        # --- End temporary save ---
 
         o = self.attn(q, k, v)
         output = self.o_proj(o.flatten(1, -1))

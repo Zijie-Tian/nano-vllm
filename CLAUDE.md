@@ -50,6 +50,7 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 | [`docs/xattn_offload_profiling_32k.md`](docs/xattn_offload_profiling_32k.md) | 📊 PROFILE: XAttn vs Full 32K nsys 分析，estimate 占 41%，find_blocks 占 37%，compute 仅 21% |
 | [`docs/select_blocks_ring_buffer_pipeline.md`](docs/select_blocks_ring_buffer_pipeline.md) | ⚡ PERF: select_blocks ring buffer pipeline 优化，128K prefill -9.5%，find_blocks -44.8% |
 | [`docs/changelog_2026-02-05.md`](docs/changelog_2026-02-05.md) | 📋 CHANGELOG: GQA buffer OOM 修复 (节省 16GB)，tests 目录清理 (-4306 行) |
+| [`docs/rope_data_collection_guide.md`](docs/rope_data_collection_guide.md) | 📊 DATA: RoPE 数据收集流程，pre/post RoPE QKV 保存、chunk 合并、上传备份，三模型七种 context |
 
 ## Rules Index
 
