@@ -24,7 +24,7 @@ from pathlib import Path
 # ============================================================
 
 MODEL = "glm-4-9b"
-LENGTH = "512k"
+LENGTH = "768k"
 LAYER = 5
 DATA_PATH = Path(__file__).parent.parent / f"results/kvcache-rope/{MODEL}/{LENGTH}/layer_{LAYER:02d}.pt"
 OUT_DIR = Path(__file__).parent.parent / f"results/kvcache-rope-ret/{MODEL}/{LENGTH}"
@@ -154,9 +154,18 @@ grid_size = get_grid_size(seq_len)
 use_grid = grid_size > 1
 n_grid = math.ceil(seq_len / grid_size) if use_grid else seq_len
 
+# Adaptive CHUNK_SIZE: scores [C, S] float32 needs 2x during softmax
+# Constraint: 2 * C * S * 4 + S * head_dim * 4 < GPU_MEM
+# Use conservative 14GB to account for PyTorch allocator fragmentation
+GPU_SAFE_BYTES = 14 * 1024**3
+max_chunk = int((GPU_SAFE_BYTES - seq_len * head_dim * 4) / (8 * seq_len))
+max_chunk = max(256, (max_chunk // 256) * 256)  # align to 256
+if max_chunk < CHUNK_SIZE:
+    CHUNK_SIZE = max_chunk
+
 print(f"Model: {MODEL}, Layer: {LAYER}, Seq length: {seq_len}")
 print(f"  Q: {post_q.shape}  (heads={num_heads}, head_dim={head_dim})")
-print(f"  K: {post_k.shape}  (kv_heads={num_kv_heads}, GQA groups={num_groups})")
+print(f"  K: {post_k.shape}  (kv_heads={num_kv_heads}, GQA groups={num_groups})  chunk_size={CHUNK_SIZE}")
 if use_grid:
     print(f"  Mode: GRID  grid_size={grid_size}  output={n_grid}x{n_grid}")
 else:
