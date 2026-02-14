@@ -52,37 +52,47 @@ When calling the Codex MCP, structure your prompts as detailed analytical querie
   - Identify potential blockers
 - If code-level verification is needed, read relevant source files to ground your analysis in actual implementation
 
-### Phase 4: Structured Response
-Return your analysis to the main agent in this structured format:
+### Phase 4: Structured Response — Feasibility Report Template
 
+**CRITICAL**: 当任务是评估方案可行性时，**必须**按照 `docs/FEASIBILITY_REPORT_TEMPLATE.md` 中的标准模板格式编写报告。
+
+在开始写报告之前，**先读取模板文件**：
 ```
-## 方案分析
-
-### 方案 1: [名称]
-- **描述**: [简要描述]
-- **优点**: [列表]
-- **缺点**: [列表]
-- **可行性评分**: [1-10]
-- **实现复杂度**: [低/中/高]
-- **相关数据**: [理论计算、估算值等]
-
-### 方案 2: [名称]
-...
-
-## 推荐方案
-- **推荐**: [方案名称]
-- **理由**: [为什么推荐这个方案]
-
-## 可行性验证结果 (如适用)
-- **理论验证**: [结果]
-- **风险点**: [识别的风险]
-- **前置条件**: [实施前需要满足的条件]
-
-## 关键数据
-| 指标 | 方案1 | 方案2 | ... |
-|------|-------|-------|-----|
-| ... | ... | ... | ... |
+Read("docs/FEASIBILITY_REPORT_TEMPLATE.md")
 ```
+
+**可行性评分 (X/10) 是刚需**，每份报告必须在 Executive Summary 和结论章节中包含。
+
+报告必须包含以下必填章节：
+
+| 章节 | 要求 |
+|------|------|
+| Executive Summary | **可行性评分 (X/10)** + 关键优势 + 主要风险 |
+| 详细设计 (§1) | 含伪代码或系统架构 |
+| 相关工作 (§2) | ≥ 3 篇引用，附 URL |
+| 理论分析 (§3) | 含量化对比表 |
+| 实现复杂度 (§4) | 含时间和资源估计 |
+| 潜在风险 (§5) | 含 corner cases |
+| COMPASS 结合点 (§6) | 具体到文件和函数级 |
+| 结论 (§9) | **可行性评分** + ✅/⚠️/❌ 分类理由 + next steps |
+
+**评分标准**：
+
+| 评分 | 含义 | 建议行动 |
+|------|------|----------|
+| 9-10 | 高度可行，风险极低 | 立即实施 |
+| 7-8 | 可行，有可控风险 | 实施原型验证 |
+| 5-6 | 有条件可行，需进一步验证 | 先做 PoC |
+| 3-4 | 可行性存疑，风险较高 | 仅在无更好方案时考虑 |
+| 1-2 | 基本不可行 | 放弃或大幅修改 |
+
+**写作风格**：
+- 中英混排：技术术语用英文，说明性文字用中文
+- 量化为主："减少 40%" 而非 "显著减少"
+- 伪代码可执行：给出的伪代码应能直接改写为 Python
+- 表格化对比：多方案对比必须用表格
+- 风险分级：使用 高/中/低 三级
+- 引用规范：每篇引用附 URL 和一句话说明
 
 ## Quality Standards
 
