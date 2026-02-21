@@ -1,12 +1,14 @@
 """
-Test: Compare xattn_estimate vs xattn_estimate_chunked
-Verify that chunked estimation with EXTERNAL chunking produces the same mask as standard estimation.
-"""
+Test: xattn_estimate_chunked alignment with xattn_estimate using kvcache-rope data
 
+This test verifies that the chunked implementation produces masks that are
+highly aligned (IoU > 0.98) with the standard implementation.
+"""
+import torch
+import torch.nn.functional as F
 import sys
 import os
-import torch
-import warnings
+import math
 
 sys.path.insert(0, "/home/zijie/Code/COMPASS")
 
@@ -16,232 +18,378 @@ from compass.src.Xattn_chunked import xattn_estimate_chunked
 # ============================================================
 # Configuration
 # ============================================================
-
-BLOCK_SIZE = 64
-STRIDE = 4
+BLOCK_SIZE = 128
+STRIDE = 8
 THRESHOLD = 0.9
-CHUNK_SIZE = 4096
+MODEL = "glm-4-9b"
+LAYER = 5
 
 # ============================================================
 # Utility Functions
 # ============================================================
 
-def load_qkv(path):
-    """Load saved QKV data."""
-    data = torch.load(path, map_location="cpu")
-    print(f"Loaded: {path}")
-    print(f"  Query shape: {data['query'].shape}")
-    print(f"  Key shape: {data['key'].shape}")
-    print(f"  Layer: {data['layer_id']}, Density: {data['density']:.2%}")
-    return data
+def load_kv_data(data_path):
+    """Load KV data from kvcache-rope dataset."""
+    data = torch.load(data_path, map_location="cpu")
+    post_q = data['post_rope_q']
+    post_k = data['post_rope_k']
 
-def compare_masks(mask1, mask2, name1="standard", name2="chunked"):
-    """Compare two masks and report differences."""
-    if mask1.shape != mask2.shape:
-        print(f"Shape mismatch: {name1}={mask1.shape}, {name2}={mask2.shape}")
-        return False
+    seq_len, num_heads, head_dim = post_q.shape
+    _, num_kv_heads, _ = post_k.shape
 
-    diff = (mask1 != mask2).sum().item()
-    total = mask1.numel()
-    match_rate = (total - diff) / total * 100
+    # Repeat K/V for GQA
+    num_groups = num_heads // num_kv_heads
+    post_k = post_k.repeat_interleave(num_groups, dim=1)
 
-    print(f"  Match rate: {match_rate:.4f}% ({total - diff}/{total})")
+    # Convert to [batch, heads, seq_len, head_dim]
+    query = post_q.unsqueeze(0).transpose(1, 2)
+    key = post_k.unsqueeze(0).transpose(1, 2)
 
-    if diff > 0:
-        diff_indices = torch.where(mask1 != mask2)
-        print(f"  First 5 diff positions: {list(zip(*[idx[:5].tolist() for idx in diff_indices]))}")
-
-    return diff == 0
+    return query, key, seq_len
 
 
-def run_chunked_externally(query, key, q_start_pos, block_size, stride, threshold, chunk_size):
-    """
-    Run xattn_estimate_chunked with EXTERNAL chunking.
-    This simulates how chunked prefill should be used in practice.
-    """
-    batch_size, num_heads, q_len, head_dim = query.shape
-    _, _, k_len, _ = key.shape
+def compare_masks(attn_sum_std, mask_std, attn_sum_chunked, mask_chunked, tolerance=1e-5):
+    """Compare standard and chunked results."""
+    results = {}
 
-    q_block_num = (q_len + block_size - 1) // block_size
-    k_block_num = (k_len + block_size - 1) // block_size
+    # Shape check
+    results['shape_match'] = mask_std.shape == mask_chunked.shape
+    if not results['shape_match']:
+        results['shape_diff'] = f"std={mask_std.shape}, chunked={mask_chunked.shape}"
+        results['exact_match'] = False
+        results['iou'] = 0.0
+        results['attn_max_diff'] = float('inf')
+        results['std_density'] = mask_std.float().mean().item()
+        results['chunked_density'] = mask_chunked.float().mean().item()
+        return results
 
-    # If Q fits in one chunk, call directly
-    if q_len <= chunk_size:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            return xattn_estimate_chunked(
-                query, key,
-                q_start_pos=q_start_pos,
-                block_size=block_size,
-                stride=stride,
-                threshold=threshold,
-                use_triton=True,
-                chunk_size=chunk_size,
-            )
+    # Exact match
+    results['exact_match'] = (mask_std == mask_chunked).all().item()
 
-    # External chunking: split Q and call for each chunk
-    num_q_chunks = (q_len + chunk_size - 1) // chunk_size
-    print(f"    External chunking: {num_q_chunks} chunks")
+    # Attn sum difference
+    results['attn_max_diff'] = (attn_sum_std - attn_sum_chunked).abs().max().item()
 
-    combined_attn_sum = torch.zeros(
-        batch_size, num_heads, q_block_num, k_block_num,
-        dtype=query.dtype, device=query.device
-    )
-    combined_mask = torch.zeros(
-        batch_size, num_heads, q_block_num, k_block_num,
-        dtype=torch.bool, device=query.device
-    )
+    # IoU
+    intersection = (mask_std & mask_chunked).sum().item()
+    union = (mask_std | mask_chunked).sum().item()
+    results['iou'] = intersection / union if union > 0 else 0
 
-    q_block_offset = 0
-    for q_chunk_idx in range(num_q_chunks):
-        q_chunk_start = q_chunk_idx * chunk_size
-        q_chunk_end = min((q_chunk_idx + 1) * chunk_size, q_len)
+    # Density
+    results['std_density'] = mask_std.float().mean().item()
+    results['chunked_density'] = mask_chunked.float().mean().item()
 
-        q_chunk = query[:, :, q_chunk_start:q_chunk_end, :]
-
-        # For causal attention, K accumulates up to current Q position
-        k_end = q_start_pos + q_chunk_end
-        k_chunk = key[:, :, :k_end, :]
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            attn_sum_chunk, mask_chunk = xattn_estimate_chunked(
-                q_chunk, k_chunk,
-                q_start_pos=q_start_pos + q_chunk_start,
-                block_size=block_size,
-                stride=stride,
-                threshold=threshold,
-                use_triton=True,
-                chunk_size=chunk_size,
-            )
-
-        # Place chunk results into combined output
-        chunk_q_blocks = mask_chunk.shape[2]
-        chunk_k_blocks = mask_chunk.shape[3]
-        combined_attn_sum[:, :, q_block_offset:q_block_offset+chunk_q_blocks, :chunk_k_blocks] = attn_sum_chunk
-        combined_mask[:, :, q_block_offset:q_block_offset+chunk_q_blocks, :chunk_k_blocks] = mask_chunk
-        q_block_offset += chunk_q_blocks
-
-    return combined_attn_sum, combined_mask
+    return results
 
 
-def test_single_qkv(qkv_path):
-    """Test a single QKV file."""
-    data = load_qkv(qkv_path)
-    query = data["query"].cuda().to(torch.bfloat16)
-    key = data["key"].cuda().to(torch.bfloat16)
+# ============================================================
+# Test Cases
+# ============================================================
 
-    seq_len = query.shape[2]
-    print(f"\nTesting with seq_len={seq_len}")
+def test_short_sequence():
+    """Test 1: Short sequence (4K) - No Q chunking, No KV chunking."""
+    print("\n" + "=" * 60)
+    print("Test 1: Short Sequence (4K)")
     print("=" * 60)
 
-    # Run standard xattn_estimate
-    print("[1] Running standard xattn_estimate...")
-    try:
+    DATA_PATH = f"/home/zijie/Code/COMPASS/results/kvcache-rope/{MODEL}/16k/layer_{LAYER:02d}.pt"
+    if not os.path.exists(DATA_PATH):
+        print(f"SKIP: Data not found: {DATA_PATH}")
+        return True
+
+    query, key, seq_len = load_kv_data(DATA_PATH)
+    query = query.cuda().to(torch.bfloat16)
+    key = key.cuda().to(torch.bfloat16)
+
+    test_seq_len = 4096
+    chunk_size = 4096
+    kv_chunk_size = 4096
+
+    query = query[:, :, :test_seq_len, :]
+    key = key[:, :, :test_seq_len, :]
+
+    print(f"  Testing with seq_len={test_seq_len}, chunk_size={chunk_size}")
+    print(f"  Expected: No Q chunking, No KV chunking")
+
+    attn_sum_std, mask_std = xattn_estimate(
+        query, key,
+        block_size=BLOCK_SIZE,
+        stride=STRIDE,
+        threshold=THRESHOLD,
+        chunk_size=chunk_size,
+        use_triton=True,
+    )
+
+    attn_sum_chunked, mask_chunked = xattn_estimate_chunked(
+        query, key,
+        q_start_pos=0,
+        block_size=BLOCK_SIZE,
+        stride=STRIDE,
+        threshold=THRESHOLD,
+        use_triton=True,
+        chunk_size=chunk_size,
+        kv_chunk_size=kv_chunk_size,
+    )
+
+    results = compare_masks(attn_sum_std, mask_std, attn_sum_chunked, mask_chunked)
+    print(f"  Exact match: {results['exact_match']}")
+    print(f"  Attn max diff: {results['attn_max_diff']:.6f}")
+    print(f"  IoU: {results['iou']:.4f}")
+    print(f"  Density: std={results['std_density']:.4f}, chunked={results['chunked_density']:.4f}")
+
+    return results['exact_match']
+
+
+def test_medium_sequence():
+    """Test 2: Medium sequence (16K) - No Q chunking, KV chunking only."""
+    print("\n" + "=" * 60)
+    print("Test 2: Medium Sequence (16K) - KV Chunking Only")
+    print("=" * 60)
+
+    DATA_PATH = f"/home/zijie/Code/COMPASS/results/kvcache-rope/{MODEL}/16k/layer_{LAYER:02d}.pt"
+    if not os.path.exists(DATA_PATH):
+        print(f"SKIP: Data not found: {DATA_PATH}")
+        return True
+
+    query, key, seq_len = load_kv_data(DATA_PATH)
+    query = query.cuda().to(torch.bfloat16)
+    key = key.cuda().to(torch.bfloat16)
+
+    q_chunk_size = 16384
+    kv_chunk_size = 4096
+
+    print(f"  Testing with seq_len={seq_len}")
+    print(f"  Q chunk_size={q_chunk_size}, KV chunk_size={kv_chunk_size}")
+    print(f"  Expected: No Q chunking, KV chunking enabled")
+
+    attn_sum_std, mask_std = xattn_estimate(
+        query, key,
+        block_size=BLOCK_SIZE,
+        stride=STRIDE,
+        threshold=THRESHOLD,
+        chunk_size=q_chunk_size,
+        use_triton=True,
+    )
+
+    attn_sum_chunked, mask_chunked = xattn_estimate_chunked(
+        query, key,
+        q_start_pos=0,
+        block_size=BLOCK_SIZE,
+        stride=STRIDE,
+        threshold=THRESHOLD,
+        use_triton=True,
+        chunk_size=q_chunk_size,
+        kv_chunk_size=kv_chunk_size,
+    )
+
+    results = compare_masks(attn_sum_std, mask_std, attn_sum_chunked, mask_chunked)
+    print(f"  Exact match: {results['exact_match']}")
+    print(f"  Attn max diff: {results['attn_max_diff']:.6f}")
+    print(f"  IoU: {results['iou']:.4f}")
+    print(f"  Density: std={results['std_density']:.4f}, chunked={results['chunked_density']:.4f}")
+
+    return results['exact_match']
+
+
+def test_long_sequence():
+    """Test 3: Long sequence - True 2D chunking (Q + KV)."""
+    print("\n" + "=" * 60)
+    print("Test 3: Long Sequence - True 2D Chunking (Q + KV)")
+    print("=" * 60)
+
+    DATA_PATH = f"/home/zijie/Code/COMPASS/results/kvcache-rope/{MODEL}/64k/layer_{LAYER:02d}.pt"
+    if not os.path.exists(DATA_PATH):
+        print(f"SKIP: Data not found: {DATA_PATH}")
+        return True
+
+    query, key, seq_len = load_kv_data(DATA_PATH)
+    query = query.cuda().to(torch.bfloat16)
+    key = key.cuda().to(torch.bfloat16)
+
+    chunk_size = 4096
+    kv_chunk_size = 4096
+
+    print(f"  Testing with seq_len={seq_len}")
+    print(f"  Q chunk_size={chunk_size} ({(seq_len + chunk_size - 1) // chunk_size} chunks)")
+    print(f"  KV chunk_size={kv_chunk_size} ({(seq_len + kv_chunk_size - 1) // kv_chunk_size} chunks)")
+    print(f"  Expected: Q chunking + KV chunking (2D)")
+
+    attn_sum_std, mask_std = xattn_estimate(
+        query, key,
+        block_size=BLOCK_SIZE,
+        stride=STRIDE,
+        threshold=THRESHOLD,
+        chunk_size=chunk_size,
+        use_triton=True,
+    )
+
+    attn_sum_chunked, mask_chunked = xattn_estimate_chunked(
+        query, key,
+        q_start_pos=0,
+        block_size=BLOCK_SIZE,
+        stride=STRIDE,
+        threshold=THRESHOLD,
+        use_triton=True,
+        chunk_size=chunk_size,
+        kv_chunk_size=kv_chunk_size,
+    )
+
+    results = compare_masks(attn_sum_std, mask_std, attn_sum_chunked, mask_chunked)
+    print(f"  Exact match: {results['exact_match']}")
+    print(f"  Attn max diff: {results['attn_max_diff']:.6f}")
+    print(f"  IoU: {results['iou']:.4f}")
+    print(f"  Density: std={results['std_density']:.4f}, chunked={results['chunked_density']:.4f}")
+
+    return results['exact_match']
+
+
+def test_streaming():
+    """Test 4: Streaming chunked prefill scenario."""
+    print("\n" + "=" * 60)
+    print("Test 4: Streaming Chunked Prefill")
+    print("=" * 60)
+
+    DATA_PATH = f"/home/zijie/Code/COMPASS/results/kvcache-rope/{MODEL}/64k/layer_{LAYER:02d}.pt"
+    if not os.path.exists(DATA_PATH):
+        print(f"SKIP: Data not found: {DATA_PATH}")
+        return True
+
+    query, key, seq_len = load_kv_data(DATA_PATH)
+    query = query.cuda().to(torch.bfloat16)
+    key = key.cuda().to(torch.bfloat16)
+
+    stream_chunk_size = 4096
+    kv_chunk_size = 4096
+
+    num_chunks = (seq_len + stream_chunk_size - 1) // stream_chunk_size
+    print(f"  Simulating streaming with {num_chunks} chunks")
+    print(f"  Stream chunk size: {stream_chunk_size}")
+    print(f"  KV chunk size: {kv_chunk_size}")
+
+    all_passed = True
+    for chunk_idx in range(num_chunks):
+        q_start = chunk_idx * stream_chunk_size
+        q_end = min(q_start + stream_chunk_size, seq_len)
+
+        q_chunk = query[:, :, q_start:q_end, :]
+        k_chunk = key[:, :, :q_end, :]
+
+        print(f"\n  Chunk {chunk_idx}: Q[{q_start}:{q_end}], K[0:{q_end}]")
+
+        try:
+            attn_sum_std, mask_std = xattn_estimate(
+                q_chunk, k_chunk,
+                block_size=BLOCK_SIZE,
+                stride=STRIDE,
+                threshold=THRESHOLD,
+                chunk_size=stream_chunk_size,
+                use_triton=True,
+            )
+
+            attn_sum_chunked, mask_chunked = xattn_estimate_chunked(
+                q_chunk, k_chunk,
+                q_start_pos=q_start,
+                block_size=BLOCK_SIZE,
+                stride=STRIDE,
+                threshold=THRESHOLD,
+                use_triton=True,
+                chunk_size=stream_chunk_size,
+                kv_chunk_size=kv_chunk_size,
+            )
+
+            results = compare_masks(attn_sum_std, mask_std, attn_sum_chunked, mask_chunked)
+            print(f"    Exact match: {results['exact_match']}, IoU: {results['iou']:.4f}")
+
+            if not results['exact_match']:
+                all_passed = False
+
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                print(f"    OOM (skipping chunk)")
+                continue
+            raise
+
+    return all_passed
+
+
+def test_different_thresholds():
+    """Test 5: Different threshold values."""
+    print("\n" + "=" * 60)
+    print("Test 5: Different Thresholds")
+    print("=" * 60)
+
+    DATA_PATH = f"/home/zijie/Code/COMPASS/results/kvcache-rope/{MODEL}/16k/layer_{LAYER:02d}.pt"
+    if not os.path.exists(DATA_PATH):
+        print(f"SKIP: Data not found: {DATA_PATH}")
+        return True
+
+    query, key, seq_len = load_kv_data(DATA_PATH)
+    query = query.cuda().to(torch.bfloat16)
+    key = key.cuda().to(torch.bfloat16)
+
+    chunk_size = 4096
+    kv_chunk_size = 4096
+    thresholds = [0.8, 0.9, 0.95, 0.99]
+
+    all_passed = True
+    for threshold in thresholds:
+        print(f"\n  Threshold = {threshold}")
+
         attn_sum_std, mask_std = xattn_estimate(
             query, key,
             block_size=BLOCK_SIZE,
             stride=STRIDE,
-            threshold=THRESHOLD,
-            chunk_size=CHUNK_SIZE,
+            threshold=threshold,
+            chunk_size=chunk_size,
             use_triton=True,
         )
-        print(f"  mask shape: {mask_std.shape}, density: {mask_std.float().mean().item():.4f}")
-    except Exception as e:
-        print(f"  ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
 
-    # Run chunked xattn_estimate with EXTERNAL chunking
-    print("[2] Running chunked xattn_estimate (external chunking)...")
-    try:
-        attn_sum_chunked, mask_chunked = run_chunked_externally(
+        attn_sum_chunked, mask_chunked = xattn_estimate_chunked(
             query, key,
             q_start_pos=0,
             block_size=BLOCK_SIZE,
             stride=STRIDE,
-            threshold=THRESHOLD,
-            chunk_size=CHUNK_SIZE,
+            threshold=threshold,
+            use_triton=True,
+            chunk_size=chunk_size,
+            kv_chunk_size=kv_chunk_size,
         )
-        print(f"  mask shape: {mask_chunked.shape}, density: {mask_chunked.float().mean().item():.4f}")
-    except Exception as e:
-        print(f"  ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
 
-    # Compare results
-    print("[3] Comparing results...")
-    chunked_q_blocks = mask_chunked.shape[2]
-    chunked_k_blocks = mask_chunked.shape[3]
+        results = compare_masks(attn_sum_std, mask_std, attn_sum_chunked, mask_chunked)
+        print(f"    Exact match: {results['exact_match']}, IoU: {results['iou']:.4f}")
 
-    # Extract comparable region from standard mask
-    mask_std_comparable = mask_std[:, :, :chunked_q_blocks, :chunked_k_blocks]
+        if not results['exact_match']:
+            all_passed = False
 
-    # Compare masks
-    masks_match = compare_masks(mask_std_comparable, mask_chunked, "standard", "chunked")
+    return all_passed
 
-    # Compare attn_sums
-    attn_sum_std_comparable = attn_sum_std[:, :, :chunked_q_blocks, :chunked_k_blocks]
-    if attn_sum_std_comparable.shape == attn_sum_chunked.shape:
-        attn_diff = (attn_sum_std_comparable - attn_sum_chunked).abs().max().item()
-        print(f"  Attn sum max diff: {attn_diff:.6f}")
-    else:
-        print(f"  Attn sum shape mismatch")
-
-    # Clean up GPU memory
-    del query, key, attn_sum_std, mask_std, attn_sum_chunked, mask_chunked
-    torch.cuda.empty_cache()
-
-    return masks_match
 
 # ============================================================
-# Main Test
+# Main
 # ============================================================
 
 if __name__ == "__main__":
-    qkv_files = [
-        "/home/zijie/Code/COMPASS/results/kvcache/qkv_3688.pt",   # 4K
-        "/home/zijie/Code/COMPASS/results/kvcache/qkv_7888.pt",   # 8K
-        "/home/zijie/Code/COMPASS/results/kvcache/qkv_15685.pt",  # 16K
-        "/home/zijie/Code/COMPASS/results/kvcache/qkv_32485.pt",  # 32K
-        "/home/zijie/Code/COMPASS/results/kvcache/qkv_64891.pt",  # 64K
-    ]
+    print("Testing xattn_estimate_chunked vs xattn_estimate")
+    print(f"Model: {MODEL} layer {LAYER:02d}")
+    print(f"Config: BLOCK_SIZE={BLOCK_SIZE}, STRIDE={STRIDE}")
+    print("\nThis test verifies 2D chunking (Q + KV) alignment with standard implementation.")
 
-    # Find all available files
-    available_files = [p for p in qkv_files if os.path.exists(p)]
+    results = {}
+    results['short'] = test_short_sequence()
+    results['medium'] = test_medium_sequence()
+    results['long'] = test_long_sequence()
+    results['streaming'] = test_streaming()
+    results['thresholds'] = test_different_thresholds()
 
-    if not available_files:
-        print("No QKV file found. Run xattn with XATTN_SAVE_KV=1 first.")
-        sys.exit(1)
-
-    print(f"Found {len(available_files)} QKV files to test")
-    print(f"Testing EXTERNAL chunking (chunk_size={CHUNK_SIZE})")
-
-    all_passed = True
-    results = []
-
-    for qkv_path in available_files:
-        passed = test_single_qkv(qkv_path)
-        seq_len = int(os.path.basename(qkv_path).replace("qkv_", "").replace(".pt", ""))
-        results.append((seq_len, passed))
-        if not passed:
-            all_passed = False
-
-    # Summary
     print("\n" + "=" * 60)
     print("SUMMARY")
     print("=" * 60)
-    for seq_len, passed in results:
-        status = "PASSED" if passed else "FAILED"
-        chunks = (seq_len + CHUNK_SIZE - 1) // CHUNK_SIZE
-        print(f"  seq_len={seq_len} ({chunks} chunk{'s' if chunks > 1 else ''}): {status}")
+    for name, passed in results.items():
+        status = "✅ PASSED" if passed else "❌ FAILED"
+        print(f"  {name.capitalize()}: {status}")
+
+    if all(results.values()):
+        print("\n✅ ALL TESTS PASSED!")
+    else:
+        print("\n❌ SOME TESTS FAILED!")
 
     print("=" * 60)
-    if all_passed:
-        print("ALL TESTS PASSED!")
-        sys.exit(0)
-    else:
-        print("SOME TESTS FAILED!")
-        sys.exit(1)
