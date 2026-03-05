@@ -24,6 +24,8 @@ from nanovllm.kvcache.sparse.policy import SparsePolicy, PolicyContext
 from nanovllm.kvcache.sparse.full_policy import FullAttentionPolicy
 from nanovllm.kvcache.sparse.quest import QuestPolicy, QuestConfig, BlockMetadataManager
 from nanovllm.kvcache.sparse.xattn_bsa import XAttentionBSAPolicy
+from nanovllm.kvcache.sparse.compass import COMPASSPolicy
+from nanovllm.kvcache.sparse.blasst import BLASSTPolicy
 
 
 def create_sparse_policy(policy_type: SparsePolicyType, **kwargs) -> SparsePolicy:
@@ -66,6 +68,12 @@ def create_sparse_policy(policy_type: SparsePolicyType, **kwargs) -> SparsePolic
             use_triton=kwargs.get("use_triton", True),
         )
 
+    elif policy_type == SparsePolicyType.COMPASS:
+        return COMPASSPolicy()
+
+    elif policy_type == SparsePolicyType.BLASST:
+        return BLASSTPolicy()
+
     else:
         raise ValueError(f"Unknown policy type: {policy_type}")
 
@@ -79,5 +87,7 @@ __all__ = [
     "QuestConfig",
     "BlockMetadataManager",
     "XAttentionBSAPolicy",
+    "COMPASSPolicy",
+    "BLASSTPolicy",
     "create_sparse_policy",
 ]

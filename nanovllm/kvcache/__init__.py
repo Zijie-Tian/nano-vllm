@@ -64,6 +64,10 @@ def create_kvcache_manager(config: "Config") -> KVCacheManager:
                     'stride': getattr(config, 'sparse_stride', 8),
                     'chunk_size': getattr(config, 'sparse_chunk_size', 16384),
                 }
+            elif sparse_policy_type == SparsePolicyType.COMPASS:
+                policy_kwargs = {}  # COMPASS has no extra parameters
+            elif sparse_policy_type == SparsePolicyType.BLASST:
+                policy_kwargs = {}  # BLASST has no extra parameters
 
             sparse_policy = create_sparse_policy(sparse_policy_type, **policy_kwargs)
         else:
@@ -116,6 +120,10 @@ def create_kvcache_manager(config: "Config") -> KVCacheManager:
             'stride': getattr(config, 'sparse_stride', 8),
             'chunk_size': getattr(config, 'sparse_chunk_size', 16384),
         }
+    elif sparse_policy_type == SparsePolicyType.COMPASS:
+        policy_kwargs = {}  # COMPASS has no extra parameters
+    elif sparse_policy_type == SparsePolicyType.BLASST:
+        policy_kwargs = {}  # BLASST has no extra parameters
 
     sparse_policy = create_sparse_policy(sparse_policy_type, **policy_kwargs)
 
