@@ -236,8 +236,8 @@ if __name__ == "__main__":
 
     test_chunk_attention()
     test_chunk_attention_small()
-    # test_merge_outputs()  # Skip: kernel has memory access issue
-    # test_end_to_end_blasst()  # Skip: depends on merge
+    test_merge_outputs()
+    test_end_to_end_blasst()
 
     print("=" * 60)
     print("All tests PASSED!")

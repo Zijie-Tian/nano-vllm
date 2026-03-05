@@ -147,77 +147,39 @@ def blasst_chunk_attention(
     return out, lse
 
 
-@triton.jit
-def _merge_attn_kernel(
-    O1, LSE1, O2, LSE2,
-    Out, LseOut,
-    o1_stride_0, o1_stride_1, o1_stride_2,
-    o2_stride_0, o2_stride_1, o2_stride_2,
-    out_stride_0, out_stride_1, out_stride_2,
-    lse_stride_0,
-    batch_heads, seq_len, head_dim,
-    BLOCK_M: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-):
-    """Merge two attention outputs using online softmax."""
-    pid_m = tl.program_id(0)
-    pid_bh = tl.program_id(1)
-
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_d = tl.arange(0, BLOCK_D)
-
-    lse1_ptrs = LSE1 + pid_bh * lse_stride_0 + offs_m
-    lse2_ptrs = LSE2 + pid_bh * lse_stride_0 + offs_m
-
-    mask = offs_m < seq_len
-
-    lse1 = tl.load(lse1_ptrs, mask=mask, other=float('-inf'))
-    lse2 = tl.load(lse2_ptrs, mask=mask, other=float('-inf'))
-
-    m_out = tl.maximum(lse1, lse2)
-    exp1 = tl.exp(lse1 - m_out)
-    exp2 = tl.exp(lse2 - m_out)
-    sum_exp = exp1 + exp2
-
-    o1_ptrs = O1 + pid_bh * o1_stride_0 + offs_m[:, None] * o1_stride_1 + offs_d[None, :]
-    o2_ptrs = O2 + pid_bh * o2_stride_0 + offs_m[:, None] * o2_stride_1 + offs_d[None, :]
-
-    o_mask = offs_m[:, None] < seq_len
-    o1 = tl.load(o1_ptrs, mask=o_mask, other=0.0)
-    o2 = tl.load(o2_ptrs, mask=o_mask, other=0.0)
-
-    out = (o1 * exp1[:, None] + o2 * exp2[:, None]) / sum_exp[:, None]
-
-    out_ptrs = Out + pid_bh * out_stride_0 + offs_m[:, None] * out_stride_1 + offs_d[None, :]
-    tl.store(out_ptrs, out.to(Out.dtype.element_ty), mask=o_mask)
-
-    lse_out_ptrs = LseOut + pid_bh * lse_stride_0 + offs_m
-    tl.store(lse_out_ptrs, m_out + tl.log(sum_exp), mask=mask)
-
-
 def merge_attn_outputs(
     o1: torch.Tensor,
     lse1: torch.Tensor,
     o2: torch.Tensor,
     lse2: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Merge two attention outputs."""
+    """
+    Merge two attention outputs using online softmax.
+
+    Uses PyTorch implementation (Triton kernel had memory issues).
+    This is efficient enough for the merge step.
+    """
     batch, num_heads, seq_len, head_dim = o1.shape
-    batch_heads = batch * num_heads
 
-    out = torch.empty_like(o1)
-    lse_out = torch.empty_like(lse1)
+    # Reshape LSE to [batch, heads, seq]
+    lse1_reshaped = lse1.view(batch, num_heads, seq_len)
+    lse2_reshaped = lse2.view(batch, num_heads, seq_len)
 
-    grid = (triton.cdiv(seq_len, 128), batch_heads)
+    # Compute max and exp in log space
+    max_lse = torch.maximum(lse1_reshaped, lse2_reshaped)
+    exp1 = torch.exp(lse1_reshaped - max_lse)
+    exp2 = torch.exp(lse2_reshaped - max_lse)
+    sum_exp = exp1 + exp2
 
-    _merge_attn_kernel[grid](
-        o1, lse1, o2, lse2, out, lse_out,
-        o1.stride(0) * o1.stride(1), o1.stride(2), o1.stride(3),
-        o2.stride(0) * o2.stride(1), o2.stride(2), o2.stride(3),
-        out.stride(0) * out.stride(1), out.stride(2), out.stride(3),
-        lse1.stride(0),
-        batch_heads, seq_len, head_dim,
-        BLOCK_M=128, BLOCK_D=head_dim,
-    )
+    # Weighted average of outputs
+    exp1_expanded = exp1.unsqueeze(-1)  # [batch, heads, seq, 1]
+    exp2_expanded = exp2.unsqueeze(-1)
+    sum_exp_expanded = sum_exp.unsqueeze(-1)
+
+    out = (o1 * exp1_expanded + o2 * exp2_expanded) / sum_exp_expanded
+
+    # Compute output LSE
+    lse_out = max_lse + torch.log(sum_exp)
+    lse_out = lse_out.view(batch * num_heads, seq_len)
 
     return out, lse_out
