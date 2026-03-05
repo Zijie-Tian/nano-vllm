@@ -1,15 +1,20 @@
 """
 BLASST sparse attention policy for chunked prefill.
 
-This is a placeholder implementation that:
-1. select_blocks returns all available blocks (FullAttention behavior)
-2. compute_chunked_prefill uses full attention computation
+BLASST: Dynamic BLocked Attention Sparsity via Softmax Thresholding
 
-This serves as a baseline for development and testing of the chunked prefill flow
-with full historical KV block loading.
+Key insight: Use online softmax running max to dynamically skip unimportant blocks.
+Skip condition: local_max - running_max < ln(λ)
+Threshold formula: λ = a / L (inverse with sequence length)
+
+Implementation notes:
+- IO communication: Same as FullAttention (load all blocks)
+- Compute decision: Skip merging blocks based on BLASST condition
+- Running max: Extracted from LSE (log-sum-exp) of flash attention
 """
 
 import logging
+import math
 import torch
 from typing import List, TYPE_CHECKING
 
@@ -27,20 +32,49 @@ class BLASSTPolicy(SparsePolicy):
     """
     BLASST sparse attention policy.
 
-    Current implementation:
-    - select_blocks: Returns all available blocks (FullAttention behavior)
-    - compute_chunked_prefill: Full attention computation on all blocks
+    Implementation:
+    - select_blocks: Returns all available blocks (load all, decide later)
+    - compute_chunked_prefill: Dynamic skip based on running max threshold
 
-    This is a baseline for chunked prefill development.
+    Threshold configuration:
+    - a: Inverse formula parameter (λ = a / L), default 16384
+    - fixed_lambda: If set, use fixed threshold instead of formula
     """
 
     # BLASST supports both prefill and decode
     supports_prefill = True
     supports_decode = True
 
-    def __init__(self):
-        """Initialize with statistics tracking."""
+    def __init__(self, a: int = 16384, fixed_lambda: float = None):
+        """
+        Initialize BLASST policy.
+
+        Args:
+            a: Inverse formula numerator (λ = a / L). Default 16384 gives λ=0.5 at 32K.
+            fixed_lambda: If set, use fixed threshold instead of inverse formula.
+        """
+        self.a = a
+        self.fixed_lambda = fixed_lambda
         self._stats_num_chunks = 0
+        self._stats_skipped_blocks = 0
+        self._stats_total_blocks = 0
+
+    def _get_lambda(self, seq_len: int) -> float:
+        """
+        Compute threshold λ based on sequence length.
+
+        Formula: λ = a / L (inverse relationship)
+
+        Args:
+            seq_len: Current sequence length
+
+        Returns:
+            Threshold value λ
+        """
+        if self.fixed_lambda is not None:
+            return self.fixed_lambda
+        # Inverse formula: longer sequences → smaller threshold
+        return self.a / max(seq_len, 1)
 
     def select_blocks(
         self,
@@ -66,11 +100,19 @@ class BLASSTPolicy(SparsePolicy):
     def reset_stats(self) -> None:
         """Reset statistics."""
         self._stats_num_chunks = 0
+        self._stats_skipped_blocks = 0
+        self._stats_total_blocks = 0
 
     def get_stats(self) -> dict:
         """Get statistics."""
+        skip_rate = 0.0
+        if self._stats_total_blocks > 0:
+            skip_rate = self._stats_skipped_blocks / self._stats_total_blocks
         return {
             "num_chunks": self._stats_num_chunks,
+            "skipped_blocks": self._stats_skipped_blocks,
+            "total_blocks": self._stats_total_blocks,
+            "skip_rate": skip_rate,
         }
 
     # ========================================================================
@@ -131,10 +173,13 @@ class BLASSTPolicy(SparsePolicy):
         selected_blocks: List[int],
     ) -> torch.Tensor:
         """
-        Compute attention for chunked prefill.
+        Compute attention for chunked prefill with BLASST dynamic skipping.
 
-        Currently implements full attention (loads all selected_blocks).
-        TODO: Implement BLASST sparse attention computation.
+        BLASST Algorithm:
+        1. Load all KV blocks (same as FullAttention)
+        2. For each block, compute attention and extract local_max from LSE
+        3. Apply skip condition: local_max - running_max < ln(λ)
+        4. Skip merging if condition met, otherwise merge and update running_max
 
         Args:
             q: Query tensor [seq_len, num_heads, head_dim]
@@ -152,27 +197,49 @@ class BLASSTPolicy(SparsePolicy):
         Returns:
             Attention output [seq_len, num_heads, head_dim]
         """
-        # Use FlashInfer-based implementations (same as FullAttentionPolicy)
+        # Use FlashInfer-based implementations
         from nanovllm.ops.chunked_attention import (
             flash_attn_with_lse_flashinfer as flash_attn_with_lse,
             merge_attention_outputs_flashinfer as merge_attention_outputs,
         )
 
-        logger.debug(f"[BLASST] compute_chunked_prefill called, "
-                    f"layer={layer_id}, chunk={current_chunk_idx}, "
-                    f"num_tokens={num_tokens}, selected_blocks={len(selected_blocks)}")
+        # Calculate sequence length for threshold computation
+        # Total length = already prefilled + current chunk
+        total_seq_len = len(seq) if seq else num_tokens
+        lambda_val = self._get_lambda(total_seq_len)
+        ln_lambda = math.log(lambda_val)
 
         q_batched = q.unsqueeze(0)  # [1, seq_len, num_heads, head_dim]
         o_acc = None
         lse_acc = None
         compute_stream = offload_engine.compute_stream
 
-        # Load and compute attention on selected historical blocks
+        # Running max: per-token, cross-heads aggregation
+        # Shape: [q_len], initialize with -inf
+        running_max = torch.full(
+            (q.shape[0],),
+            float('-inf'),
+            device=q.device,
+            dtype=torch.float32
+        )
+
+        # Track skip statistics
+        skipped_blocks = 0
+        total_historical_blocks = 0
+
+        # Load and compute attention on historical blocks with BLASST skipping
         cpu_block_table = selected_blocks
 
         if cpu_block_table:
             load_slots = list(range(offload_engine.num_ring_slots))
             num_blocks = len(cpu_block_table)
+            total_historical_blocks = num_blocks
+
+            # Log at layer 0 for debugging
+            if layer_id == 0:
+                logger.info(f"[BLASST] Chunk {current_chunk_idx}: "
+                           f"seq_len={total_seq_len}, λ={lambda_val:.4f}, "
+                           f"blocks={num_blocks}")
 
             if len(load_slots) == 1:
                 # Only 1 slot - use synchronous mode
@@ -189,10 +256,37 @@ class BLASSTPolicy(SparsePolicy):
                             softmax_scale=softmax_scale,
                             causal=False,
                         )
-                        if o_acc is None:
-                            o_acc, lse_acc = prev_o, prev_lse
+
+                        # BLASST: Extract local_max from LSE
+                        # LSE shape: [1, num_heads, q_len] or [1, q_len, num_heads]
+                        # -> max over heads to get [q_len]
+                        lse_squeezed = prev_lse.squeeze(0)  # [num_heads, q_len] or [q_len, num_heads]
+                        local_max = lse_squeezed.max(dim=0)[0]  # Try dim=0 first
+                        if local_max.shape[0] != q.shape[0]:
+                            # Shape mismatch, try dim=-1
+                            local_max = lse_squeezed.max(dim=-1)[0]
+                        # Ensure shape is [q_len]
+                        if local_max.dim() == 0:
+                            local_max = local_max.unsqueeze(0)
+                        local_max = local_max.to(running_max.dtype)
+
+                        # BLASST skip condition: local_max - running_max < ln(λ)
+                        skip_mask = (local_max - running_max) < ln_lambda
+
+                        if skip_mask.all():
+                            # All queries skip this block
+                            skipped_blocks += 1
+                            # Still update running_max for subsequent decisions
+                            running_max = torch.maximum(running_max, local_max)
                         else:
-                            o_acc, lse_acc = merge_attention_outputs(o_acc, lse_acc, prev_o, prev_lse)
+                            # At least some queries need this block
+                            if o_acc is None:
+                                o_acc, lse_acc = prev_o, prev_lse
+                            else:
+                                o_acc, lse_acc = merge_attention_outputs(o_acc, lse_acc, prev_o, prev_lse)
+                            # Update running_max only when block is used
+                            running_max = torch.maximum(running_max, local_max)
+
                         offload_engine.record_slot_compute_done(slot)
             else:
                 # Multiple slots - use pipeline
@@ -214,12 +308,38 @@ class BLASSTPolicy(SparsePolicy):
                             softmax_scale=softmax_scale,
                             causal=False,
                         )
-                        offload_engine.record_slot_compute_done(current_slot)
 
-                        if o_acc is None:
-                            o_acc, lse_acc = prev_o, prev_lse
+                        # BLASST: Extract local_max from LSE
+                        # LSE shape: [1, num_heads, q_len] or [1, q_len, num_heads]
+                        # -> max over heads to get [q_len]
+                        lse_squeezed = prev_lse.squeeze(0)  # [num_heads, q_len] or [q_len, num_heads]
+                        local_max = lse_squeezed.max(dim=0)[0]  # Try dim=0 first
+                        if local_max.shape[0] != q.shape[0]:
+                            # Shape mismatch, try dim=-1
+                            local_max = lse_squeezed.max(dim=-1)[0]
+                        # Ensure shape is [q_len]
+                        if local_max.dim() == 0:
+                            local_max = local_max.unsqueeze(0)
+                        local_max = local_max.to(running_max.dtype)
+
+                        # BLASST skip condition: decision based on current running_max
+                        skip_mask = (local_max - running_max) < ln_lambda
+
+                        if skip_mask.all():
+                            # All queries skip this block
+                            skipped_blocks += 1
+                            # Still update running_max for subsequent decisions
+                            running_max = torch.maximum(running_max, local_max)
                         else:
-                            o_acc, lse_acc = merge_attention_outputs(o_acc, lse_acc, prev_o, prev_lse)
+                            # At least some queries need this block
+                            if o_acc is None:
+                                o_acc, lse_acc = prev_o, prev_lse
+                            else:
+                                o_acc, lse_acc = merge_attention_outputs(o_acc, lse_acc, prev_o, prev_lse)
+                            # Update running_max only when block is used
+                            running_max = torch.maximum(running_max, local_max)
+
+                        offload_engine.record_slot_compute_done(current_slot)
 
                     # Issue next transfer
                     next_block_idx = block_idx + num_slots
@@ -228,7 +348,16 @@ class BLASSTPolicy(SparsePolicy):
                         next_cpu_block_id = cpu_block_table[next_block_idx]
                         offload_engine.load_to_slot_layer(next_slot, layer_id, next_cpu_block_id, chunk_idx=next_cpu_block_id)
 
-        # Compute attention to current chunk (causal mask)
+            # Update statistics
+            self._stats_skipped_blocks += skipped_blocks
+            self._stats_total_blocks += total_historical_blocks
+
+            if layer_id == 0:
+                skip_rate = skipped_blocks / total_historical_blocks if total_historical_blocks > 0 else 0.0
+                logger.info(f"[BLASST] Chunk {current_chunk_idx}: skipped {skipped_blocks}/{total_historical_blocks} "
+                           f"({skip_rate:.1%}) blocks")
+
+        # Compute attention to current chunk (causal mask, always included)
         with torch.cuda.stream(compute_stream):
             k_curr, v_curr = offload_engine.get_prefill_buffer_slice(layer_id, num_tokens)
             current_o, current_lse = flash_attn_with_lse(
@@ -247,7 +376,7 @@ class BLASSTPolicy(SparsePolicy):
         # Sync default stream with compute_stream before returning
         torch.cuda.default_stream().wait_stream(compute_stream)
 
-        # Remove batch dimension: [1, seq_len, num_heads, head_dim] -> [seq_len, num_heads, head_dim]
+        # Remove batch dimension
         return final_o.squeeze(0)
 
     def compute_chunked_decode(
@@ -291,4 +420,6 @@ class BLASSTPolicy(SparsePolicy):
         )
 
     def __repr__(self) -> str:
-        return "BLASSTPolicy()"
+        if self.fixed_lambda is not None:
+            return f"BLASSTPolicy(fixed_lambda={self.fixed_lambda})"
+        return f"BLASSTPolicy(a={self.a})"
