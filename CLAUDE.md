@@ -53,7 +53,9 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 | [`docs/rope_data_collection_guide.md`](docs/rope_data_collection_guide.md) | 📊 DATA: RoPE 数据收集流程，pre/post RoPE QKV 保存、chunk 合并、上传备份，三模型七种 context |
 | [`docs/blasst_implementation_report.md`](docs/blasst_implementation_report.md) | 📊 BLASST: 基础实现报告，算法概述与 32K/128K 测试结果 |
 | [`docs/blasst_128_granularity.md`](docs/blasst_128_granularity.md) | ⚡️ BLASST: 128-token 细粒度实现，~98% 跳过率 vs ~83% block 粒度 |
-| [`nanovllm/ops/blasst_fused.py`](nanovllm/ops/blasst_fused.py) | ⚡️ BLASST Fused Kernel: Triton 融合算子实现，QK→skip check→conditional PV 流程 |
+| [`nanovllm/ops/blasst_fused.py`](nanovllm/ops/blasst_fused.py) | ⚡️ BLASST Fused Kernel (legacy): 单kernel实现 |
+| [`nanovllm/ops/blasst_mask.py`](nanovllm/ops/blasst_mask.py) | ⚡️ BLASST Mask Kernel: 计算 skip mask，精确统计 |
+| [`nanovllm/ops/blasst_attn.py`](nanovllm/ops/blasst_attn.py) | ⚡️ BLASST Attention Kernel: 使用 mask 计算 attention |
 
 ## Rules Index
 
