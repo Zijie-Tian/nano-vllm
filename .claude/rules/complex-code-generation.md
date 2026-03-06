@@ -24,13 +24,13 @@ This rule governs the use of Codex MCP for complex code generation tasks includi
 
 ### 1. Model Specification (CRITICAL)
 
-**MUST** always use `gpt-5.3-codex` model:
+**MUST** always use `gpt-5.4` model:
 
 ```python
 # Correct: Explicit model specification
 mcp__codex-cli__codex(
     prompt="...",
-    model="gpt-5.3-codex",
+    model="gpt-5.4",
     ...
 )
 ```
@@ -128,7 +128,7 @@ mcp__codex-cli__codex(
     - Documentation strings
     - Example usage
     """,
-    model="gpt-5.3-codex",
+    model="gpt-5.4",
     reasoningEffort="high",  # Use high effort for complex kernels
     sandbox="workspace-write"
 )
@@ -269,7 +269,7 @@ mcp__codex-cli__codex(
 
     Please provide the corrected implementation.
     """,
-    model="gpt-5.3-codex",
+    model="gpt-5.4",
     reasoningEffort="high",
     sandbox="workspace-write"
 )
@@ -401,7 +401,7 @@ def block_sparse_attention(
 ```python
 mcp__codex-cli__codex(
     prompt="[specification from Step 1]",
-    model="gpt-5.3-codex",
+    model="gpt-5.4",
     reasoningEffort="high",
     sandbox="workspace-write"
 )
@@ -446,7 +446,7 @@ Before accepting generated code:
 | Accept without testing | Run full test suite before integration |
 | Ignore numerical errors | Investigate and fix precision issues |
 | Skip edge case handling | Test and handle boundary conditions |
-| Use default model | Explicitly specify `gpt-5.3-codex` |
+| Use default model | Explicitly specify `gpt-5.4` |
 
 ---
 
@@ -455,7 +455,7 @@ Before accepting generated code:
 | Phase | Responsible | Action |
 |-------|-------------|--------|
 | 1. Spec | Me | Write detailed design specification |
-| 2. Generate | Codex (gpt-5.3-codex) | Generate optimized kernel code |
+| 2. Generate | Codex (gpt-5.4) | Generate optimized kernel code |
 | 3. Test | Me | Run correctness and performance tests |
 | 4. Feedback | Me → Codex | Iterate until all tests pass |
 | 5. Integrate | Me | Merge into codebase with proper structure |
