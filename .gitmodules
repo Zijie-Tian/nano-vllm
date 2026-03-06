@@ -7,5 +7,5 @@
 	url = git@github.com:Zijie-Tian/flash-attention.git
 [submodule "3rdparty/nanovllm"]
 	path = 3rdparty/nanovllm
-	url = ssh://git@git.zijie-tian.site:2222/zijie-tian/nano-vllm.git
+	url = git@github.com:Zijie-Tian/nano-vllm.git
 	branch = tzj/minference
