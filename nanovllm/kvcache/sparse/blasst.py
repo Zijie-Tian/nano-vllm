@@ -19,7 +19,8 @@ import math
 import torch
 from typing import List, TYPE_CHECKING
 
-from nanovllm.ops.blasst_fused import blasst_fused_forward
+from nanovllm.ops.blasst_mask import blasst_mask_forward
+from nanovllm.ops.blasst_attn import blasst_attn_forward
 
 from .policy import SparsePolicy, PolicyContext
 
@@ -335,22 +336,31 @@ class BLASSTPolicy(SparsePolicy):
                 q_sub_kernel = q_sub.squeeze(0).permute(1, 0, 2).contiguous()
 
                 with torch.cuda.stream(compute_stream):
-                    # Single kernel call processes all KV blocks with BLASST skip logic
-                    fused_o, new_running_max, block_skipped, block_lse = blasst_fused_forward(
+                    # Step 1: Compute skip mask for precise statistics
+                    skip_mask = blasst_mask_forward(
                         q=q_sub_kernel,
                         k=k_all,
-                        v=v_all,
                         running_max=q_sub_running_max[q_sub_idx],
                         ln_lambda=ln_lambda,
                         softmax_scale=softmax_scale,
                         granularity=granularity,
-                        return_lse=True,
                     )
 
-                    # Update skip statistics
-                    # block_skipped is per (head, query) - count how many queries skipped
-                    total_subblocks += block_skipped.numel() * num_kv_subblocks * num_blocks
-                    skipped_subblocks += int(block_skipped.sum().item()) * num_kv_subblocks
+                    # Update skip statistics - precise counting from mask
+                    # skip_mask shape: [num_heads, sub_len, num_kv_blocks]
+                    total_subblocks += skip_mask.numel()
+                    skipped_subblocks += int(skip_mask.sum().item())
+
+                    # Step 2: Compute attention using skip mask
+                    fused_o, new_running_max, block_lse = blasst_attn_forward(
+                        q=q_sub_kernel,
+                        k=k_all,
+                        v=v_all,
+                        skip_mask=skip_mask,
+                        running_max=q_sub_running_max[q_sub_idx],
+                        softmax_scale=softmax_scale,
+                        granularity=granularity,
+                    )
 
                     # Convert kernel output to flash-attn format for merging with current chunk
                     sub_o = fused_o.permute(1, 0, 2).unsqueeze(0).contiguous()
