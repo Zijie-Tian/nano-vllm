@@ -19,6 +19,8 @@ import math
 import torch
 from typing import List, TYPE_CHECKING
 
+from nanovllm.ops.blasst_fused import blasst_fused_forward
+
 from .policy import SparsePolicy, PolicyContext
 
 if TYPE_CHECKING:
@@ -234,7 +236,8 @@ class BLASSTPolicy(SparsePolicy):
 
         # Prepare accumulators for each query sub-chunk
         q_sub_outputs = []  # List of (o_acc, lse_acc) for each sub-chunk
-        q_sub_running_max = []  # List of running_max tensors
+        q_sub_running_max = []  # List of running_max tensors [num_heads, sub_len]
+        num_heads = q.shape[1]
 
         for q_sub_idx in range(num_q_subchunks):
             q_start = q_sub_idx * granularity
@@ -244,7 +247,7 @@ class BLASSTPolicy(SparsePolicy):
             # Initialize accumulator and running_max for this sub-chunk
             q_sub_outputs.append((None, None))  # (o_acc, lse_acc)
             q_sub_running_max.append(torch.full(
-                (sub_len,),
+                (num_heads, sub_len),
                 float('-inf'),
                 device=q.device,
                 dtype=torch.float32
@@ -256,7 +259,7 @@ class BLASSTPolicy(SparsePolicy):
 
         # Get block size from offload engine
         block_size = offload_engine.block_size
-        num_kv_subblocks = block_size // granularity
+        num_kv_subblocks = (block_size + granularity - 1) // granularity
 
         # Load and compute attention on historical blocks with BLASST skipping
         cpu_block_table = selected_blocks
@@ -271,65 +274,9 @@ class BLASSTPolicy(SparsePolicy):
                            f"seq_len={total_seq_len}, λ={lambda_val:.4f}, "
                            f"blocks={num_blocks}, granularity={granularity}")
 
-            def process_block_for_subchunks(prev_k, prev_v):
-                """Process a loaded KV block for all query sub-chunks at sub-block granularity."""
-                nonlocal skipped_subblocks, total_subblocks
-
-                # Divide KV block into sub-blocks
-                for kv_sub_idx in range(num_kv_subblocks):
-                    kv_start = kv_sub_idx * granularity
-                    kv_end = min((kv_sub_idx + 1) * granularity, block_size)
-
-                    k_sub = prev_k[:, kv_start:kv_end, :, :]
-                    v_sub = prev_v[:, kv_start:kv_end, :, :]
-
-                    # Process each query sub-chunk with this KV sub-block
-                    for q_sub_idx in range(num_q_subchunks):
-                        q_start = q_sub_idx * granularity
-                        q_end = min((q_sub_idx + 1) * granularity, q_len)
-                        sub_len = q_end - q_start
-
-                        q_sub = q_batched[:, q_start:q_end, :, :]
-
-                        # Compute attention for this (q_sub, kv_sub) pair
-                        with torch.cuda.stream(compute_stream):
-                            sub_o, sub_lse = flash_attn_with_lse(
-                                q_sub, k_sub, v_sub,
-                                softmax_scale=softmax_scale,
-                                causal=False,
-                            )
-
-                            # Extract local_max from LSE
-                            lse_squeezed = sub_lse.squeeze(0)
-                            local_max = lse_squeezed.max(dim=0)[0]
-                            if local_max.shape[0] != sub_len:
-                                local_max = lse_squeezed.max(dim=-1)[0]
-                            if local_max.dim() == 0:
-                                local_max = local_max.unsqueeze(0)
-
-                            running_max_sub = q_sub_running_max[q_sub_idx]
-                            local_max = local_max.to(running_max_sub.dtype)
-
-                            # BLASST skip condition
-                            skip_mask = (local_max - running_max_sub) < ln_lambda
-                            total_subblocks += 1
-
-                            if skip_mask.all():
-                                # All queries in this sub-chunk skip this KV sub-block
-                                skipped_subblocks += 1
-                                # Still update running_max
-                                q_sub_running_max[q_sub_idx] = torch.maximum(running_max_sub, local_max)
-                            else:
-                                # Merge this sub-block's contribution
-                                o_acc, lse_acc = q_sub_outputs[q_sub_idx]
-                                if o_acc is None:
-                                    q_sub_outputs[q_sub_idx] = (sub_o, sub_lse)
-                                else:
-                                    q_sub_outputs[q_sub_idx] = merge_attention_outputs(
-                                        o_acc, lse_acc, sub_o, sub_lse
-                                    )
-                                # Update running_max
-                                q_sub_running_max[q_sub_idx] = torch.maximum(running_max_sub, local_max)
+            # Collect all KV blocks using ring buffer pipeline
+            k_blocks = []
+            v_blocks = []
 
             if len(load_slots) == 1:
                 # Only 1 slot - use synchronous mode
@@ -340,7 +287,11 @@ class BLASSTPolicy(SparsePolicy):
                     offload_engine.wait_slot_layer(slot)
 
                     prev_k, prev_v = offload_engine.get_kv_for_slot(slot)
-                    process_block_for_subchunks(prev_k, prev_v)
+                    # Reshape: [1, block_size, num_kv_heads, head_dim] -> [num_kv_heads, block_size, head_dim]
+                    k_block = prev_k.squeeze(0).permute(1, 0, 2).contiguous()
+                    v_block = prev_v.squeeze(0).permute(1, 0, 2).contiguous()
+                    k_blocks.append(k_block)
+                    v_blocks.append(v_block)
                     offload_engine.record_slot_compute_done(slot)
             else:
                 # Multiple slots - use pipeline
@@ -355,7 +306,11 @@ class BLASSTPolicy(SparsePolicy):
                     offload_engine.wait_slot_layer(current_slot)
 
                     prev_k, prev_v = offload_engine.get_kv_for_slot(current_slot)
-                    process_block_for_subchunks(prev_k, prev_v)
+                    # Reshape: [1, block_size, num_kv_heads, head_dim] -> [num_kv_heads, block_size, head_dim]
+                    k_block = prev_k.squeeze(0).permute(1, 0, 2).contiguous()
+                    v_block = prev_v.squeeze(0).permute(1, 0, 2).contiguous()
+                    k_blocks.append(k_block)
+                    v_blocks.append(v_block)
                     offload_engine.record_slot_compute_done(current_slot)
 
                     # Issue next transfer
@@ -364,6 +319,46 @@ class BLASSTPolicy(SparsePolicy):
                         next_slot = load_slots[next_block_idx % num_slots]
                         next_cpu_block_id = cpu_block_table[next_block_idx]
                         offload_engine.load_to_slot_layer(next_slot, layer_id, next_cpu_block_id, chunk_idx=next_cpu_block_id)
+
+            # Concatenate all KV blocks into single tensors
+            # Kernel will process all blocks internally with BLASST skip logic
+            k_all = torch.cat(k_blocks, dim=1)  # [num_kv_heads, total_kv_len, head_dim]
+            v_all = torch.cat(v_blocks, dim=1)  # [num_kv_heads, total_kv_len, head_dim]
+
+            # Process all query sub-chunks with the concatenated KV tensors
+            for q_sub_idx in range(num_q_subchunks):
+                q_start = q_sub_idx * granularity
+                q_end = min((q_sub_idx + 1) * granularity, q_len)
+
+                # [1, sub_len, num_heads, head_dim] -> [num_heads, sub_len, head_dim]
+                q_sub = q_batched[:, q_start:q_end, :, :]
+                q_sub_kernel = q_sub.squeeze(0).permute(1, 0, 2).contiguous()
+
+                with torch.cuda.stream(compute_stream):
+                    # Single kernel call processes all KV blocks with BLASST skip logic
+                    fused_o, new_running_max, block_skipped, block_lse = blasst_fused_forward(
+                        q=q_sub_kernel,
+                        k=k_all,
+                        v=v_all,
+                        running_max=q_sub_running_max[q_sub_idx],
+                        ln_lambda=ln_lambda,
+                        softmax_scale=softmax_scale,
+                        granularity=granularity,
+                        return_lse=True,
+                    )
+
+                    # Update skip statistics
+                    # block_skipped is per (head, query) - count how many queries skipped
+                    total_subblocks += block_skipped.numel() * num_kv_subblocks * num_blocks
+                    skipped_subblocks += int(block_skipped.sum().item()) * num_kv_subblocks
+
+                    # Convert kernel output to flash-attn format for merging with current chunk
+                    sub_o = fused_o.permute(1, 0, 2).unsqueeze(0).contiguous()
+                    sub_lse = block_lse.unsqueeze(0)
+
+                    # Store output for later merging with current (causal) chunk
+                    q_sub_outputs[q_sub_idx] = (sub_o, sub_lse)
+                    q_sub_running_max[q_sub_idx] = new_running_max
 
             # Update statistics
             self._stats_skipped_subblocks += skipped_subblocks
