@@ -138,7 +138,7 @@ fi
 
 # NanoVLLM parallel execution settings
 # GPU configuration for parallel execution
-GPU_LIST=${GPU_LIST:-"0"}  # Comma-separated GPU IDs to use (debug mode: single GPU)
+GPU_LIST=${GPU_LIST:-"2,3,4,5"}  # Comma-separated GPU IDs to use (4 GPUs for parallel testing)
 IFS=',' read -ra GPU_ARRAY <<< "$GPU_LIST"
 NUM_GPUS=${#GPU_ARRAY[@]}
 
@@ -160,6 +160,10 @@ for MAX_SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
         elif [[ -n ${AVGPOOL_TOPK} ]]; then
             SETTINGS_INFO+="topk_${AVGPOOL_TOPK##* }_"
         fi
+    elif [[ "${METRIC_NAME}" == "blasst" ]]; then
+        # For BLASST, include lambda in folder name
+        BLASST_LAMBDA_VAL="${BLASST_LAMBDA:-0.5}"
+        SETTINGS_INFO+="lambda${BLASST_LAMBDA_VAL}_"
     else
         # For xattn (nanovllm or other backends), include stride in folder name
         if [[ -n ${STRIDE} ]]; then

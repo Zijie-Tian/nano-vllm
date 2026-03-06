@@ -245,10 +245,8 @@ def get_llm(tokens_to_generate):
             sparse_threshold=float(os.environ.get('NANOVLLM_SPARSE_THRESHOLD',
                 float(args.threshold) if hasattr(args, 'threshold') and args.threshold else 0.9)),
             sparse_chunk_size=int(os.environ.get('NANOVLLM_SPARSE_CHUNK_SIZE', 16384)),
-            # BLASST specific parameters
-            blasst_a=int(os.environ.get('NANOVLLM_BLASST_A', 16384)),
-            blasst_fixed_lambda=float(os.environ.get('NANOVLLM_BLASST_FIXED_LAMBDA', 0.5)) if os.environ.get('NANOVLLM_BLASST_FIXED_LAMBDA') else None,
-            blasst_granularity=int(os.environ.get('NANOVLLM_BLASST_GRANULARITY', 128)),
+            # BLASST specific parameters (only lambda is configurable externally)
+            blasst_fixed_lambda=float(os.environ.get('BLASST_LAMBDA', 0.5)) if os.environ.get('BLASST_LAMBDA') else None,
             # NanoVLLM specific settings (can be overridden via env vars)
             max_model_len=int(os.environ.get('NANOVLLM_MAX_MODEL_LEN', 128 * 1024)),
             enable_cpu_offload=os.environ.get('NANOVLLM_CPU_OFFLOAD', 'true').lower() == 'true',
