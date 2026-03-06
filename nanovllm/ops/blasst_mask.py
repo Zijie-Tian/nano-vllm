@@ -14,6 +14,8 @@ The implementation follows the requested constraints:
 - BLOCK_N = 64 (KV tile used inside each granularity block)
 - FP16 input tensors, FP32 accumulation
 - GQA support (num_heads can be multiple of num_kv_heads)
+
+Entry point: `blasst_mask_forward` with explicit `running_max` input.
 """
 
 from __future__ import annotations

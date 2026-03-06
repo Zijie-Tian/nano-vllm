@@ -20,12 +20,8 @@ from nanovllm.ops.xattn import (
     create_causal_mask,
     compute_sparsity,
 )
-from nanovllm.ops.blasst_mask import (
-    blasst_mask_forward,
-)
-from nanovllm.ops.blasst_attn import (
-    blasst_attn_forward,
-)
+from nanovllm.ops.blasst_mask import blasst_mask_forward
+from nanovllm.ops.blasst_attn import blasst_attn_forward
 
 __all__ = [
     # chunked_attention
