@@ -72,7 +72,11 @@ def create_sparse_policy(policy_type: SparsePolicyType, **kwargs) -> SparsePolic
         return COMPASSPolicy()
 
     elif policy_type == SparsePolicyType.BLASST:
-        return BLASSTPolicy()
+        return BLASSTPolicy(
+            a=kwargs.get("a", 16384),
+            fixed_lambda=kwargs.get("fixed_lambda", 0.5),
+            granularity=kwargs.get("granularity", 128),
+        )
 
     else:
         raise ValueError(f"Unknown policy type: {policy_type}")

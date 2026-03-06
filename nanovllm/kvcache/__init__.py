@@ -67,7 +67,11 @@ def create_kvcache_manager(config: "Config") -> KVCacheManager:
             elif sparse_policy_type == SparsePolicyType.COMPASS:
                 policy_kwargs = {}  # COMPASS has no extra parameters
             elif sparse_policy_type == SparsePolicyType.BLASST:
-                policy_kwargs = {}  # BLASST has no extra parameters
+                policy_kwargs = {
+                    'a': getattr(config, 'blasst_a', 16384),
+                    'fixed_lambda': getattr(config, 'blasst_fixed_lambda', None),
+                    'granularity': getattr(config, 'blasst_granularity', 128),
+                }
 
             sparse_policy = create_sparse_policy(sparse_policy_type, **policy_kwargs)
         else:
@@ -85,20 +89,9 @@ def create_kvcache_manager(config: "Config") -> KVCacheManager:
     num_gpu_blocks = config.num_gpu_kvcache_blocks
     num_cpu_blocks = config.num_cpu_kvcache_blocks
 
-    if num_cpu_blocks <= 0:
-        # All blocks fit in GPU, use pure GPU mode
-        return GPUOnlyManager(
-            num_blocks=num_gpu_blocks,
-            block_size=config.kvcache_block_size,
-        )
-
-    # Need CPU offload: use hybrid manager
-    from nanovllm.kvcache.hybrid_manager import HybridKVCacheManager
-    from nanovllm.kvcache.policies import get_policy
+    # Create sparse policy first (needed for both GPU-only and hybrid paths)
     from nanovllm.kvcache.sparse import create_sparse_policy
     from nanovllm.config import SparsePolicyType
-
-    eviction_policy = get_policy(getattr(config, 'offload_policy', 'lru'))
 
     # Create sparse policy from config enum
     # Quest is decode-only: prefill returns all blocks (query=None), decode does Top-K
@@ -123,9 +116,28 @@ def create_kvcache_manager(config: "Config") -> KVCacheManager:
     elif sparse_policy_type == SparsePolicyType.COMPASS:
         policy_kwargs = {}  # COMPASS has no extra parameters
     elif sparse_policy_type == SparsePolicyType.BLASST:
-        policy_kwargs = {}  # BLASST has no extra parameters
+        policy_kwargs = {
+            'a': getattr(config, 'blasst_a', 16384),
+            'fixed_lambda': getattr(config, 'blasst_fixed_lambda', None),
+            'granularity': getattr(config, 'blasst_granularity', 128),
+        }
 
     sparse_policy = create_sparse_policy(sparse_policy_type, **policy_kwargs)
+
+    if num_cpu_blocks <= 0:
+        # All blocks fit in GPU, use pure GPU mode
+        # But still need sparse_policy for consistent API
+        return GPUOnlyManager(
+            num_blocks=num_gpu_blocks,
+            block_size=config.kvcache_block_size,
+            sparse_policy=sparse_policy,
+        )
+
+    # Need CPU offload: use hybrid manager
+    from nanovllm.kvcache.hybrid_manager import HybridKVCacheManager
+    from nanovllm.kvcache.policies import get_policy
+
+    eviction_policy = get_policy(getattr(config, 'offload_policy', 'lru'))
 
     return HybridKVCacheManager(
         num_gpu_slots=num_gpu_blocks,
