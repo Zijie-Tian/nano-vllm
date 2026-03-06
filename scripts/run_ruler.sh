@@ -11,6 +11,24 @@
 #   --stride N     Set XAttention stride (for nanovllm xattn)
 #   --task TASK    Run specific task(s) only
 #   --threshold N  Set XAttention threshold
+#
+# Environment Variables for nanovllm:
+#   NANOVLLM_SPARSE_STRIDE         XAttention stride (default: 8)
+#   NANOVLLM_SPARSE_THRESHOLD      XAttention threshold (default: 0.9)
+#   NANOVLLM_SPARSE_CHUNK_SIZE     XAttention chunk size (default: 16384)
+#   NANOVLLM_BLASST_A              BLASST inverse formula numerator (default: 16384)
+#   NANOVLLM_BLASST_FIXED_LAMBDA   BLASST fixed threshold (default: 0.5)
+#   NANOVLLM_BLASST_GRANULARITY    BLASST token granularity (default: 128)
+#   NANOVLLM_CPU_OFFLOAD           Enable CPU offload: true/false (default: true)
+#   NANOVLLM_NUM_GPU_BLOCKS        Number of GPU blocks for offload (default: 2)
+#   NANOVLLM_BLOCK_SIZE            KV cache block size (default: 4096)
+#   NANOVLLM_DTYPE                 Data type: float16, bfloat16, float32 (default: bfloat16)
+#
+# Examples with different metrics:
+#   ./scripts/run_ruler.sh llama3.1-8b-nanovllm synthetic full
+#   ./scripts/run_ruler.sh llama3.1-8b-nanovllm synthetic xattn
+#   ./scripts/run_ruler.sh llama3.1-8b-nanovllm synthetic blasst
+#   NANOVLLM_BLASST_FIXED_LAMBDA=0.3 ./scripts/run_ruler.sh llama3.1-8b-nanovllm synthetic blasst
 
 set -e
 
@@ -21,7 +39,7 @@ set -e
 # Model settings
 MODEL_NAME="${1:-llama3.1-8b-chat}"
 BENCHMARK="${2:-synthetic}"
-METRIC="${3:-full}"  # Options: full, xattn, avgpool, compass, minfer, flex
+METRIC="${3:-full}"  # Options: full, xattn, avgpool, compass, minfer, flex, blasst
 
 # Parse additional arguments (--task)
 EXTRA_ARGS=""
