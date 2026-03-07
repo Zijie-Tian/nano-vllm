@@ -225,22 +225,14 @@ class BLASSTPolicy(SparsePolicy):
         q_batched = q.unsqueeze(0)  # [1, seq_len, num_heads, head_dim]
         q_len = q.shape[0]
         num_heads = q.shape[1]
-        granularity = self.granularity
         compute_stream = offload_engine.compute_stream
 
-        # Initialize BLASST running state
-        running_max = torch.full(
-            (num_heads, q_len), -float("inf"),
-            device=q.device, dtype=torch.float32
-        )
+        # Prepare query in BLASST layout [batch, num_heads, q_len, head_dim]
+        q_input = q_batched.transpose(1, 2).contiguous()
 
         # Accumulators for historical attention
         historical_o = None
         historical_lse = None
-
-        # Track skip statistics
-        skipped_subblocks = 0
-        total_subblocks = 0
 
         cpu_block_table = selected_blocks
 
@@ -251,10 +243,9 @@ class BLASSTPolicy(SparsePolicy):
             if layer_id == 0:
                 logger.info(f"[BLASST] Chunk {current_chunk_idx}: "
                            f"seq_len={total_seq_len}, λ={lambda_val:.4f}, "
-                           f"blocks={num_blocks}, granularity={granularity}")
+                           f"blocks={num_blocks}")
 
-            # Prepare query in kernel layout [num_heads, q_len, head_dim]
-            q_kernel = q_batched.squeeze(0).permute(1, 0, 2).contiguous()
+            from nanovllm.ops.blasst_chunked_prefill import blasst_chunked_prefill
 
             if len(load_slots) == 1:
                 # Only 1 slot - synchronous mode
@@ -266,38 +257,21 @@ class BLASSTPolicy(SparsePolicy):
 
                     with torch.cuda.stream(compute_stream):
                         prev_k, prev_v = offload_engine.get_kv_for_slot(slot)
-                        # Reshape: [1, block_size, num_kv_heads, head_dim] -> [num_kv_heads, block_size, head_dim]
-                        k_block = prev_k.squeeze(0).permute(1, 0, 2).contiguous()
-                        v_block = prev_v.squeeze(0).permute(1, 0, 2).contiguous()
+                        # Reshape: [1, block_size, num_kv_heads, head_dim] -> [1, num_kv_heads, block_size, head_dim]
+                        k_input = prev_k.transpose(1, 2).contiguous()
+                        v_input = prev_v.transpose(1, 2).contiguous()
 
-                        # BLASST: compute skip mask for this block
-                        skip_mask = blasst_mask_forward(
-                            q=q_kernel,
-                            k=k_block,
-                            running_max=running_max,
-                            ln_lambda=ln_lambda,
-                            softmax_scale=softmax_scale,
-                            granularity=granularity,
-                        )  # [num_heads, q_len, num_kv_subblocks]
+                        # BLASST: compute attention with dynamic skipping and LSE
+                        out, lse = blasst_chunked_prefill(
+                            q=q_input,
+                            k=k_input,
+                            v=v_input,
+                            threshold_ln_lambda=ln_lambda
+                        )
 
-                        # Update statistics
-                        total_subblocks += skip_mask.numel()
-                        skipped_subblocks += int(skip_mask.sum().item())
-
-                        # BLASST: compute attention with skip mask
-                        block_o, running_max, block_lse = blasst_attn_forward(
-                            q=q_kernel,
-                            k=k_block,
-                            v=v_block,
-                            skip_mask=skip_mask,
-                            running_max=running_max,
-                            softmax_scale=softmax_scale,
-                            granularity=granularity,
-                        )  # block_o: [num_heads, q_len, head_dim]
-
-                        # Convert to flash-attn format for merging
-                        block_o = block_o.permute(1, 0, 2).unsqueeze(0).contiguous()
-                        block_lse = block_lse.unsqueeze(0)
+                        # Convert to flash-attn format for merging [1, q_len, num_heads, head_dim]
+                        block_o = out.transpose(1, 2).contiguous()
+                        block_lse = lse
 
                         # Online merge
                         if historical_o is None:
@@ -325,25 +299,16 @@ class BLASSTPolicy(SparsePolicy):
 
                     with torch.cuda.stream(compute_stream):
                         prev_k, prev_v = offload_engine.get_kv_for_slot(current_slot)
-                        k_block = prev_k.squeeze(0).permute(1, 0, 2).contiguous()
-                        v_block = prev_v.squeeze(0).permute(1, 0, 2).contiguous()
+                        k_input = prev_k.transpose(1, 2).contiguous()
+                        v_input = prev_v.transpose(1, 2).contiguous()
 
                         # BLASST mask + attention for this block
-                        skip_mask = blasst_mask_forward(
-                            q=q_kernel, k=k_block, running_max=running_max,
-                            ln_lambda=ln_lambda, softmax_scale=softmax_scale, granularity=granularity,
+                        out, lse = blasst_chunked_prefill(
+                            q=q_input, k=k_input, v=v_input, threshold_ln_lambda=ln_lambda
                         )
 
-                        total_subblocks += skip_mask.numel()
-                        skipped_subblocks += int(skip_mask.sum().item())
-
-                        block_o, running_max, block_lse = blasst_attn_forward(
-                            q=q_kernel, k=k_block, v=v_block, skip_mask=skip_mask,
-                            running_max=running_max, softmax_scale=softmax_scale, granularity=granularity,
-                        )
-
-                        block_o = block_o.permute(1, 0, 2).unsqueeze(0).contiguous()
-                        block_lse = block_lse.unsqueeze(0)
+                        block_o = out.transpose(1, 2).contiguous()
+                        block_lse = lse
 
                         if historical_o is None:
                             historical_o, historical_lse = block_o, block_lse
@@ -360,15 +325,6 @@ class BLASSTPolicy(SparsePolicy):
                         next_slot = load_slots[next_block_idx % num_slots]
                         next_cpu_block_id = cpu_block_table[next_block_idx]
                         offload_engine.load_to_slot_layer(next_slot, layer_id, next_cpu_block_id, chunk_idx=next_cpu_block_id)
-
-            # Update statistics
-            self._stats_skipped_subblocks += skipped_subblocks
-            self._stats_total_subblocks += total_subblocks
-
-            if layer_id == 0:
-                skip_rate = skipped_subblocks / total_subblocks if total_subblocks > 0 else 0.0
-                logger.info(f"[BLASST] Chunk {current_chunk_idx}: skipped {skipped_subblocks}/{total_subblocks} "
-                           f"({skip_rate:.1%}) sub-blocks (granularity={granularity})")
 
         # Process current chunk (causal mask) and merge with historical attention
         with torch.cuda.stream(compute_stream):
