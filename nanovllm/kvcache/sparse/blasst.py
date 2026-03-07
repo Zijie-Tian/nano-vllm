@@ -235,7 +235,8 @@ class BLASSTPolicy(SparsePolicy):
 
         # Density tracking per chunk for the first layer
         collect_density = (layer_id == 0)
-        chunk_density_accumulator = 0.0
+        compute_density_sum = 0.0
+        required_kv_density_sum = 0.0
         num_density_measurements = 0
 
         if cpu_block_table:
@@ -282,9 +283,13 @@ class BLASSTPolicy(SparsePolicy):
                         )
                         
                         if mask_buffer is not None:
-                            # Synchronize stream before reading mask_buffer
                             compute_stream.synchronize()
-                            chunk_density_accumulator += mask_buffer.float().mean().item()
+                            # 1. Compute Density (Average skip rate)
+                            compute_density_sum += mask_buffer.float().mean().item()
+                            # 2. Required KV Density (Logical OR along Q-axis)
+                            # Shape: [grid_1, num_kv_subblocks]
+                            required_kv_mask = mask_buffer.any(dim=0)
+                            required_kv_density_sum += required_kv_mask.float().mean().item()
                             num_density_measurements += 1
 
                         block_o = out.transpose(1, 2).contiguous()
@@ -324,9 +329,10 @@ class BLASSTPolicy(SparsePolicy):
                         )
                         
                         if mask_buffer is not None:
-                            # Synchronize stream before reading mask_buffer
                             compute_stream.synchronize()
-                            chunk_density_accumulator += mask_buffer.float().mean().item()
+                            compute_density_sum += mask_buffer.float().mean().item()
+                            required_kv_mask = mask_buffer.any(dim=0)
+                            required_kv_density_sum += required_kv_mask.float().mean().item()
                             num_density_measurements += 1
 
                         block_o = out.transpose(1, 2).contiguous()
@@ -349,8 +355,11 @@ class BLASSTPolicy(SparsePolicy):
 
         # Log density if collected
         if num_density_measurements > 0:
-            avg_density = chunk_density_accumulator / num_density_measurements
-            logger.info(f"[BLASST] Chunk {current_chunk_idx} Average Density: {avg_density*100:.2f}%")
+            avg_compute_density = compute_density_sum / num_density_measurements
+            avg_required_kv_density = required_kv_density_sum / num_density_measurements
+            logger.info(f"[BLASST] Chunk {current_chunk_idx} Stats: "
+                       f"Compute Density={avg_compute_density*100:.2f}%, "
+                       f"Required KV Density={avg_required_kv_density*100:.2f}%")
 
         # Process current chunk (causal mask)
         with torch.cuda.stream(compute_stream):

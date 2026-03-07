@@ -1,52 +1,44 @@
-# BLASST Performance Analysis and Sparsity Tracking
+# BLASST 性能分析与密度统计报告
 
-This document summarizes the findings from benchmarking and implementing sparsity tracking for the BLASST (Dynamic Blocked Attention Sparsity via Softmax Thresholding) operator.
+本文档汇总了 BLASST（基于 Softmax 阈值的动态块稀疏注意力）算子的基准测试结果及统计分析发现。
 
-## 1. Sparsity Tracking Methodologies
+## 1. 稀疏度统计机制：Mask Buffer
 
-We evaluated two primary methods for tracking block-level sparsity (skipping rate) within the Triton kernel.
+我们实现了基于 **Mask Buffer** 的统计方案，用于精准观测算子的行为：
+- **原理**：Triton Kernel 在计算过程中，将每个子块的“计算/跳过”决策写入一个布尔矩阵。
+- **维度**：`[Query_Blocks, Heads, KV_Blocks]`。
+- **优势**：线程安全、无原子竞争、不影响 Autotune、支持多维分析。
 
-### 1.1 Atomic Add
-- **Mechanism**: Use `tl.atomic_add` inside the kernel to increment a global counter whenever a block is skipped.
-- **Overhead**: Extremely low (~0.1% - 0.2%).
-- **Issues**: Highly susceptible to statistical errors when combined with Triton's `autotune`. Autotune runs multiple kernel configurations, often leading to double or triple counting. It can also suffer from race conditions or overflows if not carefully managed across many SMs.
+## 2. 核心实验：计算密度 vs. KV 需求密度
 
-### 1.2 Mask Buffer (Selected Solution)
-- **Mechanism**: Provide an optional `[grid_0, grid_1, num_blocks]` buffer to the kernel. Each Triton program writes its own compute/skip decisions (1 or 0) to its dedicated slice of the buffer.
-- **Overhead**: Very low (~0.5%).
-- **Benefits**:
-    - **Thread-safe**: No competition between SMs as each writes to unique memory addresses.
-    - **Robust**: Unaffected by `autotune` double-counting (as it overwrites instead of increments).
-    - **Detailed**: Allows for fine-grained analysis of *which* specific blocks were skipped, not just the total count.
-- **Implementation**: Integrated into `nanovllm/ops/blasst_chunked_prefill.py` and utilized by `BLASSTPolicy` at Layer 0.
+我们发现，虽然 BLASST 能显著降低 **计算量**，但对 **IO 带宽（数据传输）** 的节省具有挑战性。
 
-## 2. Sensitivity Analysis: Lambda ($\lambda$) vs. Density
+### 2.1 统计定义
+- **计算密度 (Compute Density)**：实际参与乘加运算的 (Q, K) 块比例。直接对应算力开销。
+- **KV 需求密度 (Required KV Density)**：当前 Query Chunk 中，只要有任意一个 Query 需要某个 KV 块，该 KV 块即被标记为“必需”。通过对 Mask 沿着 **Query (Q) 轴求并集 (Logical OR)** 获得。直接对应 IO 传输开销。
 
-The BLASST skip condition is defined as: `local_max - running_max < ln(λ)`. We tested various fixed $\lambda$ values using GLM-4-9B-Chat-1M on a 32K context task.
+### 2.2 实验数据 (GLM-4-9B, 32K Context, Chunk Size 8192)
 
-| Lambda ($\lambda$) | Average Density | Sparsity (Skipped) | Observations |
-| :--- | :--- | :--- | :--- |
-| **0.3** | ~94% | ~6% | Conservative pruning. High density ensures high precision but limited speedup. |
-| **0.5** | ~86% | ~14% | Balanced setting. Significant pruning with 100% accuracy. |
-| **0.8** | ~68% | ~32% | Aggressive pruning. Still maintained 100% accuracy on NIAH. |
+| Lambda ($\lambda$) | 计算密度 (Compute) | KV 需求密度 (Required) | NIAH 准确率 | 结论 |
+| :--- | :--- | :--- | :--- | :--- |
+| **0.5** | ~86% | ~99% | 100% | 均衡配置，少量剪枝。 |
+| **0.8** | ~70% | ~98% | 100% | 显著节省算力，IO 依然饱和。 |
+| **1.2** | **~32%** | **~95%** | **100%** | **算力节省 68%**，IO 依然需要加载 95% 数据。 |
 
-### Key Insight
-- **Inverse Relationship**: A **larger** $\lambda$ leads to **lower** density (more skipping). This is because `ln(λ)` becomes closer to 0, making the skip condition `local_max - running_max < ln(λ)` easier to satisfy.
-- **Stable Precision**: Even at ~30% skipping rate ($\lambda=0.8$), the model correctly retrieved information in the Needle-In-A-Haystack (NIAH) test.
+## 3. 关键发现：Q 轴上的“木桶效应”
 
-## 3. Real Data Statistics (GLM-4-9B)
+实验揭示了 BLASST 算子在当前架构下的一个关键特征：
 
-Using real KV cache traces from long-context sequences, we observed the following density patterns at $\lambda=0.5$:
+1. **计算侧的大捷**：模型对注意力剪枝表现出极高的容忍度。即使在 $\lambda=1.2$ 这种激进配置下（跳过 2/3 的计算），模型依然能在长文本中准确找回信息。
+2. **IO 侧的僵局**：由于 Query Chunk 较大（如 8192 tokens），不同 Query Token 关注的 KV 位置各不相同。虽然单个 Query 只需要极少量的 KV，但数千个 Query 的需求取并集后，几乎覆盖了整个历史 KV Cache。
+3. **优化建议**：
+    - **算力优化**：BLASST 是降低 GPU 算力压力的极佳工具，尤其是在 Prefill 阶段。
+    - **带宽优化**：若要节省 CPU -> GPU 的传输带宽，单纯依靠计算侧的动态判断是不够的。未来需要研究：
+        - 减小 Query Chunk 粒度（例如从 8192 降至 1024）。
+        - 引入跨 Query 的一致性剪枝（如基于 Block-level 预选）。
 
-- **16K Context**: ~9.8% Density (90%+ skipping).
-- **128K Context**: ~4.8% Density (95%+ skipping).
+## 4. 真实数据特征 (GLM-4-9B)
 
-*Note: Densities observed in synthetic Ruler tasks (85-90%) are generally higher than in real-world conversational data, where attention is often even more sparse.*
-
-## 4. Operational Recommendations
-
-1. **Monitoring**: Keep Mask Buffer tracking enabled at Layer 0 for continuous observability.
-2. **Tuning**:
-    - For **Safety**: Use $\lambda \in [0.3, 0.5]$.
-    - For **Throughput**: Use $\lambda \in [0.7, 0.8]$.
-3. **Dynamic Strategy**: The default formula $\lambda = a / L$ (with $a=16384$) effectively scales $\lambda$ down as sequence length $L$ increases, which we now know **increases density** (makes skipping harder) for very long sequences to preserve precision. This may need further tuning based on the density observations above.
+在真实对话数据（而非合成的 Needle 任务）中，注意力往往更加稀疏：
+- **128K Context / $\lambda=0.5$**: 计算密度通常低于 **5%**。
+- 即使在这种情况下，由于 OR 效应，Required KV Density 依然会高于计算密度，但存在更大的 IO 优化空间。
