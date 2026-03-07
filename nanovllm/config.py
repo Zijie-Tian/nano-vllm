@@ -57,7 +57,7 @@ class Config:
 
     # BLASST specific parameters
     blasst_a: int = 16384  # Inverse formula numerator (λ = a / L). Default 16384 gives λ=0.5 at 32K.
-    blasst_fixed_lambda: float | None = 1.2  # Fixed threshold instead of inverse formula (overrides a)
+    blasst_fixed_lambda: float | None = 0.1  # Fixed threshold instead of inverse formula (overrides a)
     blasst_granularity: int = 128  # Token granularity for skip decisions (default 128)
 
     def __post_init__(self):
