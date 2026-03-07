@@ -51,11 +51,7 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 | [`docs/select_blocks_ring_buffer_pipeline.md`](docs/select_blocks_ring_buffer_pipeline.md) | ⚡ PERF: select_blocks ring buffer pipeline 优化，128K prefill -9.5%，find_blocks -44.8% |
 | [`docs/changelog_2026-02-05.md`](docs/changelog_2026-02-05.md) | 📋 CHANGELOG: GQA buffer OOM 修复 (节省 16GB)，tests 目录清理 (-4306 行) |
 | [`docs/rope_data_collection_guide.md`](docs/rope_data_collection_guide.md) | 📊 DATA: RoPE 数据收集流程，pre/post RoPE QKV 保存、chunk 合并、上传备份，三模型七种 context |
-| [`docs/blasst_implementation_report.md`](docs/blasst_implementation_report.md) | 📊 BLASST: 基础实现报告，算法概述与 32K/128K 测试结果 |
-| [`docs/blasst_128_granularity.md`](docs/blasst_128_granularity.md) | ⚡️ BLASST: 128-token 细粒度实现，~98% 跳过率 vs ~83% block 粒度 |
-| [`docs/blasst_configuration_guide.md`](docs/blasst_configuration_guide.md) | ⚙️ BLASST 参数配置指南: `blasst_a`, `fixed_lambda`, `granularity` 详解 |
-| [`nanovllm/ops/blasst_mask.py`](nanovllm/ops/blasst_mask.py) | ⚡️ BLASST Mask Kernel: 计算 skip mask，精确统计 |
-| [`nanovllm/ops/blasst_attn.py`](nanovllm/ops/blasst_attn.py) | ⚡️ BLASST Attention Kernel: 使用 mask 计算 attention |
+| [`docs/sparse_attention_blasst.md`](docs/sparse_attention_blasst.md) | ⚡️ BLASST: Dynamic BLocked Attention Sparsity via Softmax Thresholding |
 
 ## Rules Index
 
@@ -67,6 +63,7 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 | [`.claude/rules/planning-with-files.md`](.claude/rules/planning-with-files.md) | Planning file management for complex tasks |
 | [`.claude/rules/gpu-monitor.md`](.claude/rules/gpu-monitor.md) | **GPU memory monitoring**: 必须使用 gpu-monitor agent，禁止手动 nvidia-smi 循环 |
 | [`.claude/rules/test-ruler.md`](.claude/rules/test-ruler.md) | **test_ruler.py 规则**: 禁止 --help，必须查阅文档，含快速参考和命令模板 |
+| **Documentation Sync** | Whenever a new document is added to `docs/`, its path and purpose **MUST** be immediately indexed in both `GEMINI.md` and `CLAUDE.md`. |
 
 ## GPU Mutex for Multi-Instance Debugging
 

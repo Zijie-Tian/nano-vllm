@@ -50,6 +50,7 @@ Nano-vLLM is a lightweight (~1,200 lines) implementation for fast offline LLM in
 ### 2.2 Environment & Testing
 *   **PYTHONPATH**: Use `PYTHONPATH=$(pwd):$PYTHONPATH` instead of `pip install -e .` to ensure isolation between worktrees.
 *   **test_ruler.py**: Read `docs/test_ruler_usage_guide.md` before running. Do not use `--help`. Match `data-dir` with appropriate `max-model-len`.
+*   **Documentation Indexing**: Whenever a new document is added to the `docs/` directory, its path and purpose **MUST** be immediately indexed in both `GEMINI.md` and `CLAUDE.md`.
 *   **Planning Files**: Use `findings.md` and `task_plan.md` for complex tasks. These are excluded from git. Clear old ones before starting a new task.
 
 ### 2.3 Monitoring
@@ -64,6 +65,7 @@ Nano-vLLM is a lightweight (~1,200 lines) implementation for fast offline LLM in
 | [`docs/architecture_guide.md`](docs/architecture_guide.md) | Core components, CPU offload design, ring buffer. |
 | [`docs/sparse_policy_architecture.md`](docs/sparse_policy_architecture.md) | SparsePolicy abstraction and pipeline modes. |
 | [`docs/sparse_attention_guide.md`](docs/sparse_attention_guide.md) | Block sparse attention methods (XAttention, MInference, etc.). |
+| [`docs/sparse_attention_blasst.md`](docs/sparse_attention_blasst.md) | BLASST sparse attention: dynamic pruning, online softmax thresholding. |
 | [`docs/xattention_algorithm_guide.md`](docs/xattention_algorithm_guide.md) | XAttention algorithm details & Triton kernels. |
 | [`docs/debugging_guide.md`](docs/debugging_guide.md) | PyTorch hooks, tensor comparison, memory profiling. |
 | [`docs/optimization_guide.md`](docs/optimization_guide.md) | Performance optimizations (sgDMA, Triton merge). |
