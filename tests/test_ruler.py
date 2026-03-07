@@ -336,7 +336,9 @@ def run_ruler_benchmark(
     sparse_samples: int = 128,
     sparse_block_size: int = 128,
     sparse_stride: int = 8,
-    dtype: Optional[str] = None,
+    blasst_lambda: float = None,
+    dtype: str = None,
+
 ) -> Dict:
     """
     Run RULER benchmark on multiple tasks.
@@ -415,6 +417,9 @@ def run_ruler_benchmark(
             llm_kwargs["sparse_threshold"] = sparse_threshold
             llm_kwargs["sparse_samples_per_chunk"] = sparse_samples
             llm_kwargs["sparse_stride"] = sparse_stride
+        elif sparse_policy_type == SparsePolicyType.BLASST:
+            if blasst_lambda is not None:
+                llm_kwargs["blasst_fixed_lambda"] = blasst_lambda
 
     # Factory function for fresh_llm mode
     def create_llm():
@@ -572,6 +577,8 @@ if __name__ == "__main__":
                         help="XAttention BSA: block size for estimation")
     parser.add_argument("--sparse-stride", type=int, default=8,
                         help="XAttention BSA: stride for Q/K downsampling")
+    parser.add_argument("--blasst-lambda", type=float, default=None,
+                        help="BLASST: fixed threshold lambda (overrides dynamic formula)")
     parser.add_argument("--dtype", type=str, default=None,
                         help="Model dtype (bfloat16, float16). Required for models with float32 default.")
 
@@ -611,6 +618,7 @@ if __name__ == "__main__":
         sparse_samples=args.sparse_samples,
         sparse_block_size=args.sparse_block_size,
         sparse_stride=args.sparse_stride,
+        blasst_lambda=args.blasst_lambda,
         dtype=args.dtype,
     )
 
