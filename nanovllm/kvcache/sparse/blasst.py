@@ -19,9 +19,6 @@ import math
 import torch
 from typing import List, TYPE_CHECKING
 
-from nanovllm.ops.blasst_mask import blasst_mask_forward
-from nanovllm.ops.blasst_attn import blasst_attn_forward
-
 from .policy import SparsePolicy, PolicyContext
 
 if TYPE_CHECKING:
