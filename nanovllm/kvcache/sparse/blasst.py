@@ -233,6 +233,11 @@ class BLASSTPolicy(SparsePolicy):
 
         cpu_block_table = selected_blocks
 
+        # Density tracking per chunk for the first layer
+        collect_density = (layer_id == 0)
+        chunk_density_accumulator = 0.0
+        num_density_measurements = 0
+
         if cpu_block_table:
             load_slots = list(range(offload_engine.num_ring_slots))
             num_blocks = len(cpu_block_table)
@@ -244,6 +249,18 @@ class BLASSTPolicy(SparsePolicy):
 
             from nanovllm.ops.blasst_chunked_prefill import blasst_chunked_prefill
 
+            # Determine mask buffer size if collecting density
+            # TRITON_BLOCK_M = 128, TRITON_BLOCK_N = 64
+            TRITON_BLOCK_M, TRITON_BLOCK_N = 128, 64
+            grid_0 = (q_len + TRITON_BLOCK_M - 1) // TRITON_BLOCK_M
+            grid_1 = 1 * num_heads # batch=1
+            num_kv_subblocks = kvcache_manager.block_size // TRITON_BLOCK_N
+            
+            def get_mask_buffer():
+                if collect_density:
+                    return torch.zeros((grid_0, grid_1, num_kv_subblocks), device=q.device, dtype=torch.int8)
+                return None
+
             if len(load_slots) == 1:
                 # Only 1 slot - synchronous mode
                 slot = load_slots[0]
@@ -254,23 +271,25 @@ class BLASSTPolicy(SparsePolicy):
 
                     with torch.cuda.stream(compute_stream):
                         prev_k, prev_v = offload_engine.get_kv_for_slot(slot)
-                        # Reshape: [1, block_size, num_kv_heads, head_dim] -> [1, num_kv_heads, block_size, head_dim]
                         k_input = prev_k.transpose(1, 2).contiguous()
                         v_input = prev_v.transpose(1, 2).contiguous()
 
-                        # BLASST: compute attention with dynamic skipping and LSE
+                        mask_buffer = get_mask_buffer()
                         out, lse = blasst_chunked_prefill(
-                            q=q_input,
-                            k=k_input,
-                            v=v_input,
-                            threshold_ln_lambda=ln_lambda
+                            q=q_input, k=k_input, v=v_input,
+                            threshold_ln_lambda=ln_lambda,
+                            mask_buffer=mask_buffer
                         )
+                        
+                        if mask_buffer is not None:
+                            # Synchronize stream before reading mask_buffer
+                            compute_stream.synchronize()
+                            chunk_density_accumulator += mask_buffer.float().mean().item()
+                            num_density_measurements += 1
 
-                        # Convert to flash-attn format for merging [1, q_len, num_heads, head_dim]
                         block_o = out.transpose(1, 2).contiguous()
                         block_lse = lse
 
-                        # Online merge
                         if historical_o is None:
                             historical_o, historical_lse = block_o, block_lse
                         else:
@@ -280,16 +299,14 @@ class BLASSTPolicy(SparsePolicy):
 
                         offload_engine.record_slot_compute_done(slot)
             else:
-                # Multiple slots - pipeline mode with IO-compute overlap
+                # Multiple slots - pipeline mode
                 num_slots = len(load_slots)
                 num_preload = min(num_slots, num_blocks)
 
-                # Pre-load initial blocks
                 for i in range(num_preload):
                     cpu_block_id = cpu_block_table[i]
                     offload_engine.load_to_slot_layer(load_slots[i], layer_id, cpu_block_id, chunk_idx=cpu_block_id)
 
-                # Process blocks with pipeline
                 for block_idx in range(num_blocks):
                     current_slot = load_slots[block_idx % num_slots]
                     offload_engine.wait_slot_layer(current_slot)
@@ -299,10 +316,18 @@ class BLASSTPolicy(SparsePolicy):
                         k_input = prev_k.transpose(1, 2).contiguous()
                         v_input = prev_v.transpose(1, 2).contiguous()
 
-                        # BLASST mask + attention for this block
+                        mask_buffer = get_mask_buffer()
                         out, lse = blasst_chunked_prefill(
-                            q=q_input, k=k_input, v=v_input, threshold_ln_lambda=ln_lambda
+                            q=q_input, k=k_input, v=v_input,
+                            threshold_ln_lambda=ln_lambda,
+                            mask_buffer=mask_buffer
                         )
+                        
+                        if mask_buffer is not None:
+                            # Synchronize stream before reading mask_buffer
+                            compute_stream.synchronize()
+                            chunk_density_accumulator += mask_buffer.float().mean().item()
+                            num_density_measurements += 1
 
                         block_o = out.transpose(1, 2).contiguous()
                         block_lse = lse
@@ -316,14 +341,18 @@ class BLASSTPolicy(SparsePolicy):
 
                         offload_engine.record_slot_compute_done(current_slot)
 
-                    # Start loading next block (overlap with computation)
                     next_block_idx = block_idx + num_slots
                     if next_block_idx < num_blocks:
                         next_slot = load_slots[next_block_idx % num_slots]
                         next_cpu_block_id = cpu_block_table[next_block_idx]
                         offload_engine.load_to_slot_layer(next_slot, layer_id, next_cpu_block_id, chunk_idx=next_cpu_block_id)
 
-        # Process current chunk (causal mask) and merge with historical attention
+        # Log density if collected
+        if num_density_measurements > 0:
+            avg_density = chunk_density_accumulator / num_density_measurements
+            logger.info(f"[BLASST] Chunk {current_chunk_idx} Average Density: {avg_density*100:.2f}%")
+
+        # Process current chunk (causal mask)
         with torch.cuda.stream(compute_stream):
             k_curr, v_curr = offload_engine.get_prefill_buffer_slice(layer_id, num_tokens)
             current_o, current_lse = flash_attn_with_lse(
@@ -350,31 +379,8 @@ class BLASSTPolicy(SparsePolicy):
         seq: "Sequence",
         selected_blocks: List[int],
     ) -> torch.Tensor:
-        """
-        Compute attention for chunked decode.
-
-        BLASST uses full attention on all prefilled blocks during decode
-        (since select_blocks returns all available blocks).
-
-        Args:
-            q: Query tensor [batch_size, num_heads, head_dim]
-            layer_id: Current layer index
-            softmax_scale: Softmax scaling factor
-            offload_engine: OffloadEngine for loading blocks
-            kvcache_manager: KVCacheManager for block management
-            seq: Sequence object
-            selected_blocks: List of CPU block IDs to process (already filtered)
-
-        Returns:
-            Attention output [batch_size, 1, num_heads, head_dim]
-        """
-        # BLASST uses FullAttentionPolicy for decode computation
-        # (select_blocks already returns all blocks)
+        """Compute attention for chunked decode."""
         from .full_policy import FullAttentionPolicy
-
-        logger.debug(f"[BLASST] compute_chunked_decode using FullAttentionPolicy, "
-                    f"layer={layer_id}, selected_blocks={len(selected_blocks)}")
-
         fallback_policy = FullAttentionPolicy()
         return fallback_policy.compute_chunked_decode(
             q, layer_id, softmax_scale, offload_engine, kvcache_manager, seq, selected_blocks

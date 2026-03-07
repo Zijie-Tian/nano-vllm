@@ -66,6 +66,7 @@ Nano-vLLM is a lightweight (~1,200 lines) implementation for fast offline LLM in
 | [`docs/sparse_policy_architecture.md`](docs/sparse_policy_architecture.md) | SparsePolicy abstraction and pipeline modes. |
 | [`docs/sparse_attention_guide.md`](docs/sparse_attention_guide.md) | Block sparse attention methods (XAttention, MInference, etc.). |
 | [`docs/sparse_attention_blasst.md`](docs/sparse_attention_blasst.md) | BLASST sparse attention: dynamic pruning, online softmax thresholding. |
+| [`docs/blasst_performance_analysis.md`](docs/blasst_performance_analysis.md) | Performance report for BLASST: λ vs density, accuracy stability. |
 | [`docs/xattention_algorithm_guide.md`](docs/xattention_algorithm_guide.md) | XAttention algorithm details & Triton kernels. |
 | [`docs/debugging_guide.md`](docs/debugging_guide.md) | PyTorch hooks, tensor comparison, memory profiling. |
 | [`docs/optimization_guide.md`](docs/optimization_guide.md) | Performance optimizations (sgDMA, Triton merge). |

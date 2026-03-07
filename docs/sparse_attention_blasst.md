@@ -38,17 +38,24 @@ BLASST 的核心逻辑实现在 `blasst_chunked_prefill` Triton kernel 中：
 - **动态判断**：在加载 $V$ 矩阵之前，先加载 $K$ 并计算 $m_{local}$。如果满足跳过条件，则直接进入下一个块，节省 $V$ 的读取和后续的 Dot Product + Softmax 更新开销。
 - **LSE 输出**：计算完成后返回每个 Query Token 的 Log-Sum-Exp (LSE)，用于与后续块（如 Causal Chunk）进行 Online Merge。
 
-### 2.2 Policy 集成 (`nanovllm/kvcache/sparse/blasst.py`)
-`BLASSTPolicy` 负责协调 CPU Offload 流程：
-- **IO 流水线**：通过 `OffloadEngine` 的 Ring Buffer 机制，在 GPU 计算当前块时并行从 CPU 加载下一个 KV 块。
-- **分块处理**：将长序列划分为多个 Chunk，每个 Chunk 调用一次 `blasst_chunked_prefill`。
-- **Fallback**：目前 Decode 阶段回退到 `FullAttentionPolicy`（由于 Decode 只有 1 个 Token，跳过收益较小且逻辑更复杂）。
+### 2.3 密度监控 (Density Tracking)
+从 v1.1 版本开始，BLASST 支持实时的密度监控：
+- **实现机制**：使用 **Mask Buffer** 方案。算子层可选地接收一个布尔掩码矩阵，记录每个子块的计算/跳过决策。
+- **日志输出**：`BLASSTPolicy` 默认在 **第 0 层 (Layer 0)** 统计并打印每个 Chunk 的平均密度。
+- **开销**：Mask Buffer 写入开销极低 (~0.5%)，且在多 SM 并行环境下是线程安全的。
 
 ---
 
 ## 3. 配置参数
+...
+| `blasst_granularity` | 128 | 剪枝判断的 Token 粒度 |
 
-在 `nanovllm/config.py` 中可以调整 BLASST 参数：
+### 3.1 调优参考
+根据实验数据（详见 [BLASST 性能分析报告](blasst_performance_analysis.md)）：
+- **λ = 0.3**: 高密度 (~94%)，最保守，适合追求极致精度。
+- **λ = 0.5**: 中密度 (~85%)，默认均衡配置。
+- **λ = 0.8**: 低密度 (~65%)，大幅剪枝，在 32K 任务下仍能保持 100% 精度。
+
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
