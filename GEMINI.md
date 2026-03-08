@@ -6,6 +6,16 @@ This file provides foundational mandates and guidance for Gemini CLI when workin
 
 Nano-vLLM is a lightweight (~1,200 lines) implementation for fast offline LLM inference. It supports models like Qwen2/3, Llama-3, and GLM-4, featuring a specialized CPU offload system for long-context inference on consumer GPUs (e.g., RTX 3090/4090).
 
+**Far-Term Architectural Vision (Infinite Context on Single RTX 3090)**
+The ultimate goal of this project is to achieve infinite context LLM inference on a single 24GB GPU through **CPU-GPU Heterogeneous Offloading** and **Dynamic Sparse Attention**.
+The system pipeline philosophy is: **GPU Fused Generation/Prediction Proxy -> CPU T-MAC Fast Coarse Filtering & Shared Masking -> PCIe On-Demand Delta Transfer -> GPU BLASST Zero-Overhead Fine-Grained Computation**.
+
+The architecture consists of 4 core modules:
+*   **Module A (GPU Fused Epilogue Kernel)**: Generates high-precision FP16 KV cache for offloading while simultaneously performing SRAM-level Warp mean-pooling, 2-bit quantization, and T-MAC bit-serial interleaving packing.
+*   **Module B (CPU T-MAC Coarse Predictor)**: Uses AVX instructions to build LUTs and perform multiplication-free mpGEMM on the compressed 2-bit KV cache, generating a globally shared coarse-grained mask.
+*   **Module C (I/O Scheduler & Delta Transfer)**: Compacts scattered FP16 KV blocks in pinned memory based on the CPU mask and initiates a single asynchronous bulk DMA transfer using a diff against the GPU cache.
+*   **Module D (Block-Sparse Attention Kernel)**: A Triton/CUDA kernel based on FlashInfer and BLASST that performs chunked prefill and dynamic pruning (skipping Softmax and PV operations) using LSE thresholds.
+
 ---
 
 ## 1. Engineering Standards & Mandates
@@ -94,3 +104,4 @@ Nano-vLLM is a lightweight (~1,200 lines) implementation for fast offline LLM in
 
 **Author**: Zijie Tian / Gemini CLI
 **Version**: 1.0 (Migrated from Claude Code)
+docs/tmac_tvm_qgemm_migration_guide.md
