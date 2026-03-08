@@ -21,3 +21,8 @@
     - `ruler_64k`: 72000
     - `ruler_128k`: 135000
 - **3090/4090**: Must use `--enable-offload`.
+- **Sparse Policy (BLASST)**:
+    - Use `--sparse-policy BLASST`.
+    - Use `--blasst-lambda X` to override dynamic threshold.
+    - **Recommended**: `0.3` for balanced speed/precision (validated up to 128K).
+    - **Note**: Correct LSE propagation is enabled by default in V2.
