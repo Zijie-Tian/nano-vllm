@@ -1,10 +1,10 @@
 # Implementation Plan: Optimize TMAC QGEMM and Implement KVCache Quantization and Packing
 
-## Phase 1: TMAC QGEMM Optimization
-- [x] Task: Review current T-MAC QGEMM implementation and identify bottlenecks.
-- [x] Task: Apply performance optimizations (e.g., memory layout, TVM schedule refinement).
-- [x] Task: Verify optimized QGEMM correctness and benchmark performance.
-- [~] Task: Conductor - User Manual Verification 'Phase 1: TMAC QGEMM Optimization' (Protocol in workflow.md)
+## Phase 1: TMAC QGEMM Optimization [checkpoint: 5c8dda7]
+- [x] Task: Review current T-MAC QGEMM implementation and identify bottlenecks. [5c8dda7]
+- [x] Task: Apply performance optimizations (e.g., memory layout, TVM schedule refinement). [5c8dda7]
+- [x] Task: Verify optimized QGEMM correctness and benchmark performance. [5c8dda7]
+- [x] Task: Conductor - User Manual Verification 'Phase 1: TMAC QGEMM Optimization' (Protocol in workflow.md) [5c8dda7]
 
 ## Phase 2: KV Cache Quantization
 - [ ] Task: Design and implement the 2-bit quantization algorithm (SRAM-level/Warp-level).
