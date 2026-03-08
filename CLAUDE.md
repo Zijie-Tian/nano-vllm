@@ -54,6 +54,7 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 | [`docs/sparse_attention_blasst.md`](docs/sparse_attention_blasst.md) | ⚡️ BLASST: Dynamic BLocked Attention Sparsity via Softmax Thresholding |
 | [`docs/blasst_performance_analysis.md`](docs/blasst_performance_analysis.md) | 📊 BLASST Performance: Density tracking and parameter sensitivity |
 | [`docs/blasst_mask_visualization_guide.md`](docs/blasst_mask_visualization_guide.md) | 🗺️ BLASST Visualization: Guide to export and plot attention masks |
+| [`docs/trtllm_skip_softmax_implementation_details.md`](docs/trtllm_skip_softmax_implementation_details.md) | 🔍 DEEP DIVE: Implementation details of Skip Softmax (BLASST) in TensorRT-LLM |
 
 ## Rules Index
 
