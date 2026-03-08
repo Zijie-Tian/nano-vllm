@@ -7,8 +7,8 @@
 - [x] Task: Conductor - User Manual Verification 'Phase 1: TMAC QGEMM Optimization' (Protocol in workflow.md) [5c8dda7]
 
 ## Phase 2: KV Cache Quantization
-- [ ] Task: Design and implement the 2-bit quantization algorithm (SRAM-level/Warp-level).
-- [ ] Task: Write unit tests for quantization correctness.
+- [x] Task: Design and implement the 2-bit quantization algorithm (SRAM-level/Warp-level). [b3de993]
+- [x] Task: Write unit tests for quantization correctness. [b3de993]
 - [ ] Task: Conductor - User Manual Verification 'Phase 2: KV Cache Quantization' (Protocol in workflow.md)
 
 ## Phase 3: KV Cache Packing
