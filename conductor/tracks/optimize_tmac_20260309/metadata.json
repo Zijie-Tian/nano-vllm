@@ -1,0 +1,8 @@
+{
+  "track_id": "optimize_tmac_20260309",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-03-08T19:08:01Z",
+  "updated_at": "2026-03-08T19:08:01Z",
+  "description": "Optimize TMAC QGEMM and Implement KVCache Quantization and Packing"
+}
