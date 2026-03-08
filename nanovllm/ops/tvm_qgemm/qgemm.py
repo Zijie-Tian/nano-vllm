@@ -67,6 +67,18 @@ class QGeMMLUTBitsCodegen(OpCodegen):
         """
         super().__init__(*args, **kwargs)
 
+        # Robustness: Auto-adjust out_dtype and cc_opts for x86
+        is_x86 = "x86_64" in str(self.target)
+        if is_x86:
+            if out_dtype == "float16":
+                logger.info("x86 detected: switching out_dtype from float16 to float32 for stability.")
+                out_dtype = "float32"
+            
+            # Default x86 cc_opts if not provided
+            if self.cc_opts is None:
+                self.cc_opts = ["-O3", "-march=native", "-mllvm", "-inline-threshold=10000"]
+                logger.info(f"x86 detected: using default cc_opts: {self.cc_opts}")
+
         self.out_dtype = out_dtype
         self.has_lut_scale = (self.dtype != self.out_dtype)
         self.weight_dtype = "uint8"
@@ -382,7 +394,7 @@ class QGeMMLUTBitsCodegen(OpCodegen):
         return c
 
     def get_template_name(self, M: int, N: int, K: int) -> str:
-        return super().get_template_name() + f"_m{M}_k{K}_n{N}_b{self.bits}"
+        return super().get_template_name() + f"_k{K}_n{N}_b{self.bits}"
 
 
 class QGeMMLUTBitsPreprocessorCodegen(OpCodegen):
@@ -410,6 +422,18 @@ class QGeMMLUTBitsPreprocessorCodegen(OpCodegen):
             Could be useful if the tuned parameters are different for different M.
         """
         super().__init__(*args, **kwargs)
+
+        # Robustness: Auto-adjust out_dtype and cc_opts for x86
+        is_x86 = "x86_64" in str(self.target)
+        if is_x86:
+            if out_dtype == "float16":
+                logger.info("x86 detected: switching out_dtype from float16 to float32 for stability.")
+                out_dtype = "float32"
+            
+            # Default x86 cc_opts if not provided
+            if self.cc_opts is None:
+                self.cc_opts = ["-O3", "-march=native", "-mllvm", "-inline-threshold=10000"]
+                logger.info(f"x86 detected: using default cc_opts: {self.cc_opts}")
 
         self.out_dtype = out_dtype
         if self.dtype == "int8":
@@ -581,4 +605,4 @@ class QGeMMLUTBitsPreprocessorCodegen(OpCodegen):
         return [lut_scales, lut_biases, qlut]
 
     def get_template_name(self, N: int, K: int) -> str:
-        return super().get_template_name() + f"_m{self.M}_k{K}_n{N}_b{self.bits}"
+        return super().get_template_name() + f"_k{K}_n{N}_b{self.bits}"

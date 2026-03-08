@@ -15,6 +15,8 @@ import re
 
 logger = logging.getLogger("ops")
 
+_GLOBAL_TEMPLATE_CACHE = {}
+
 
 class OpCodegen:
 
@@ -64,6 +66,9 @@ class OpCodegen:
             setattr(self, key, cfg[key].val)
 
     def template(self, template_name: str):
+        if template_name in _GLOBAL_TEMPLATE_CACHE:
+            return _GLOBAL_TEMPLATE_CACHE[template_name]
+
         @autotvm.template(template_name)
         def _func(*args):
             cfg = autotvm.get_config()
@@ -72,6 +77,7 @@ class OpCodegen:
             sch = self._schedule(tensors)
             return sch, tensors
 
+        _GLOBAL_TEMPLATE_CACHE[template_name] = _func
         return _func
 
     def get_template_name(self, *args) -> str:
@@ -249,16 +255,49 @@ typedef _Float16 half;
         
         with self.target:
             if not preserve_cfg:
-                template = self.template(template_name)
+                # Register the template to avoid "missing task" errors
+                self.template(template_name)
+                
                 if self.tune:
                     self.tuning(*args, n_trial=n_trial, thread_affinity=thread_affinity, **eval_kwargs)
-                    ctx = autotvm.apply_history_best(log_path)
+                
+                # Manual configuration application to ensure self.bm etc are set
+                task = autotvm.task.create(template_name, args=args, target=self.target)
+                if os.path.exists(log_path):
+                    best_config = None
+                    try:
+                        from tvm.autotvm.record import load_from_file
+                        for inp, res in load_from_file(log_path):
+                            # Logs are isolated by save_path (which includes target info implicitly)
+                            # so checking template_name is sufficient and avoids Target equality issues
+                            if inp.task.workload[0] == template_name:
+                                if best_config is None or res.costs[0] < best_config[1].costs[0]:
+                                    best_config = (inp.config, res)
+                        
+                        if best_config:
+                            logger.info(f"Applying best config for {template_name} from {log_path}")
+                            self._define_config(best_config[0], *args)
+                            ctx = autotvm.apply_history_best(log_path)
+                        else:
+                            logger.warning(f"No matching workload found in {log_path}, using fallback")
+                            self._define_config(task.config_space.get(0), *args)
+                            ctx = autotvm.FallbackContext()
+                    except Exception as e:
+                        logger.warning(f"Failed to load config: {e}, using fallback")
+                        self._define_config(task.config_space.get(0), *args)
+                        ctx = autotvm.FallbackContext()
                 else:
+                    self._define_config(task.config_space.get(0), *args)
                     ctx = autotvm.FallbackContext()
                 
+                # Still use ctx for the build phase if needed by some internal TVM logic
+                # although we manually set the attributes already.
                 with ctx:
-                    template(*args)
+                    # We don't call template(*args) here to avoid registration errors.
+                    # Instead we directly call _compute and _schedule.
+                    pass
             
+            # Re-run compute and schedule with the configured attributes
             tensors = self._compute(*args)
             s = self._schedule(tensors)
             

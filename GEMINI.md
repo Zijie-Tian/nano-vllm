@@ -87,6 +87,7 @@ The architecture consists of 4 core modules:
 | [`docs/known_issues.md`](docs/known_issues.md) | Documented bugs and resolution history. |
 | [`docs/trtllm_skip_softmax_implementation_details.md`](docs/trtllm_skip_softmax_implementation_details.md) | Deep dive into Skip Softmax (BLASST) in TensorRT-LLM: math, kernels, and ModelOpt. |
 | [`docs/sparse_policy_offload_control_guide.md`](docs/sparse_policy_offload_control_guide.md) | Guide for controlling KV cache offloading within custom SparsePolicies. |
+| [`docs/tvm_knowledge_base.md`](docs/tvm_knowledge_base.md) | TVM troubleshooting and optimization: fallback warnings, x86 stability, etc. |
 
 ---
 
