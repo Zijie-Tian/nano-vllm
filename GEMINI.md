@@ -51,7 +51,7 @@ Nano-vLLM is a lightweight (~1,200 lines) implementation for fast offline LLM in
 *   **PYTHONPATH**: Use `PYTHONPATH=$(pwd):$PYTHONPATH` instead of `pip install -e .` to ensure isolation between worktrees.
 *   **test_ruler.py**: Read `docs/test_ruler_usage_guide.md` before running. Do not use `--help`. Match `data-dir` with appropriate `max-model-len`.
 *   **Documentation Indexing**: Whenever a new document is added to the `docs/` directory, its path and purpose **MUST** be immediately indexed in both `GEMINI.md` and `CLAUDE.md`.
-*   **Planning Files**: Use `findings.md` and `task_plan.md` for complex tasks. These are excluded from git. Clear old ones before starting a new task.
+*   **Planning Files**: Use `findings.md`, `task_plan.md`, and `progress.md` for complex tasks. These are excluded from git. **At the beginning of every new task, you MUST automatically delete any existing `task_plan.md`, `findings.md`, and `progress.md` files to ensure a fresh state.**
 
 ### 2.3 Monitoring
 *   **GPU Monitoring**: For profiling or OOM debugging, run monitoring commands in the background. Prefer `nvidia-smi` queries or specialized profiling tools (nsys) directed to background output files.
