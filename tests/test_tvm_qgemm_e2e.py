@@ -123,10 +123,18 @@ for test_strategy in strategies_to_test:
         dequantized_weight = dequantize_weight_per_group(weight_quant, scales, group_size=group_size, zero_points=zp)
     elif test_strategy == QuantizationStrategy.PER_ROW:
         print(f"Using PER-ROW quantization strategy (each row has its own scale)")
-        row_group_size = K
-        weight_quant, scales, zp = quantize_weight_per_group(weight, bits=bits, group_size=row_group_size, sym=sym)
-        dequantized_weight = dequantize_weight_per_group(weight_quant, scales, group_size=row_group_size, zero_points=zp)
-        group_size = row_group_size
+        import torch
+        from nanovllm.kvcache.quant import quantize_kcache_per_token, dequantize_kcache_per_token
+        
+        weight_th = torch.from_numpy(weight)
+        weight_quant_th, scales_th, zp_th = quantize_kcache_per_token(weight_th, bits=bits, sym=sym)
+        dequantized_weight_th = dequantize_kcache_per_token(weight_quant_th, scales_th, zp_th, dtype=torch.float16)
+        
+        weight_quant = weight_quant_th.numpy()
+        scales = scales_th.numpy()
+        zp = zp_th.numpy() if zp_th is not None else None
+        dequantized_weight = dequantized_weight_th.numpy()
+        group_size = K
 
     print("Weight Quantization NMSE:", nmse(weight, dequantized_weight))
     print("Weight Quantization SQNR:", compute_sqnr(weight, dequantized_weight), "dB")
