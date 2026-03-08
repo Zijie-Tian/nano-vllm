@@ -88,6 +88,8 @@ The architecture consists of 4 core modules:
 | [`docs/trtllm_skip_softmax_implementation_details.md`](docs/trtllm_skip_softmax_implementation_details.md) | Deep dive into Skip Softmax (BLASST) in TensorRT-LLM: math, kernels, and ModelOpt. |
 | [`docs/sparse_policy_offload_control_guide.md`](docs/sparse_policy_offload_control_guide.md) | Guide for controlling KV cache offloading within custom SparsePolicies. |
 | [`docs/tvm_knowledge_base.md`](docs/tvm_knowledge_base.md) | TVM troubleshooting and optimization: fallback warnings, x86 stability, etc. |
+| [`docs/kcache_quantization_guide.md`](docs/kcache_quantization_guide.md) | 2-bit per-token K-cache quantization for T-MAC. |
+| [`docs/tmac_qgemm_deep_dive.md`](docs/tmac_qgemm_deep_dive.md) | Technical deep dive into T-MAC QGEMM: algorithm, layout, and Phase 1 optimizations. |
 
 ---
 
