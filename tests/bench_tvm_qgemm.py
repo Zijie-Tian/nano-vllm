@@ -15,12 +15,11 @@ from nanovllm.ops.tvm_qgemm.utils.math_utils import nmse
 # Setup logging
 logging.basicConfig(format='%(levelname)s: %(message)s')
 logger = logging.getLogger("bench_qgemm")
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.WARNING)
 
-def bench_qgemm(M, N, K, bits=2, num_threads=4, tune=False, n_trial=10):
+def bench_qgemm(M, N, K, bits=2, num_threads=4, tune=False, n_trial=1):
     target = "llvm -mtriple=x86_64-unknown-linux-gnu -mcpu=core-avx2"
     
-    # Initialize Codegen - Using defaults now, should auto-detect x86
     codegen = QGeMMLUTBitsCodegen(
         dtype="int8",
         target=target,
@@ -33,11 +32,9 @@ def bench_qgemm(M, N, K, bits=2, num_threads=4, tune=False, n_trial=10):
         reuse_tuned=True
     )
     
-    # Compile
-    print(f"\n[Bench] Compiling QGEMM (M={M}, N={N}, K={K}, bits={bits}, threads={num_threads})...")
+    print(f"\n[Bench] QGEMM (M={M}, N={N}, K={K}, bits={bits}, threads={num_threads})")
     func, _ = codegen.compile(M, N, K, n_trial=n_trial)
     
-    # Prepare data
     g = 4
     bm = codegen.bm
     _ngroups_per_elem = 8 // g
@@ -49,10 +46,7 @@ def bench_qgemm(M, N, K, bits=2, num_threads=4, tune=False, n_trial=10):
     LUT_Biases_shape = (N, K // codegen.act_group_size)
     C_shape = (N, M // bits)
     
-    # use the actual out_dtype from codegen (should be float32 on x86)
     out_dtype = codegen.out_dtype
-    print(f"  Using out_dtype: {out_dtype}")
-    
     dev = tvm.cpu(0)
     A_tvm = tvm.nd.array(np.random.randint(0, 256, size=A_shape, dtype="uint8"), dev)
     LUT_tvm = tvm.nd.array(np.random.normal(size=LUT_shape).astype("int8"), dev)
@@ -61,25 +55,21 @@ def bench_qgemm(M, N, K, bits=2, num_threads=4, tune=False, n_trial=10):
     LUT_Biases_tvm = tvm.nd.array(np.random.normal(size=LUT_Biases_shape).astype(out_dtype), dev)
     C_tvm = tvm.nd.array(np.zeros(C_shape, dtype=out_dtype), dev)
     
-    # Warmup
-    for _ in range(10):
+    for _ in range(5):
         func(A_tvm, LUT_tvm, Scales_tvm, LUT_Scales_tvm, LUT_Biases_tvm, C_tvm)
     
-    # Benchmark
-    num_runs = 100
+    num_runs = 10
     start_time = time.time()
     for _ in range(num_runs):
         func(A_tvm, LUT_tvm, Scales_tvm, LUT_Scales_tvm, LUT_Biases_tvm, C_tvm)
     end_time = time.time()
     
-    avg_time = (end_time - start_time) / num_runs
-    tps = (M // bits * N) / avg_time
-    print(f"  Avg Time: {avg_time*1000:.3f} ms")
-    print(f"  Throughput: {tps/1e6:.3f} M-tokens/s")
+    avg_latency = (end_time - start_time) / num_runs * 1000
+    print(f"  Latency: {avg_latency:.4f} ms")
     
-    return avg_time
+    return avg_latency
 
-def bench_preprocessor(N, K, bits=2, num_threads=4, tune=False, n_trial=10):
+def bench_preprocessor(N, K, bits=2, num_threads=4, tune=False, n_trial=1):
     target = "llvm -mtriple=x86_64-unknown-linux-gnu -mcpu=core-avx2"
     
     preprocessor = QGeMMLUTBitsPreprocessorCodegen(
@@ -94,11 +84,9 @@ def bench_preprocessor(N, K, bits=2, num_threads=4, tune=False, n_trial=10):
         reuse_tuned=True
     )
     
-    # Compile
-    print(f"\n[Bench] Compiling Preprocessor (N={N}, K={K}, bits={bits}, threads={num_threads})...")
+    print(f"\n[Bench] Preprocessor (N={N}, K={K}, bits={bits}, threads={num_threads})")
     func, _ = preprocessor.compile(N, K, n_trial=n_trial)
     
-    # Prepare data
     B_shape = (N, K)
     dev = tvm.cpu(0)
     out_dtype = preprocessor.out_dtype
@@ -112,21 +100,19 @@ def bench_preprocessor(N, K, bits=2, num_threads=4, tune=False, n_trial=10):
     LUT_Biases_tvm = tvm.nd.array(np.zeros(LUT_Biases_shape, dtype=out_dtype), dev)
     QLUT_tvm = tvm.nd.array(np.zeros(QLUT_shape, dtype="int8"), dev)
     
-    # Warmup
-    for _ in range(10):
+    for _ in range(5):
         func(B_tvm, LUT_Scales_tvm, LUT_Biases_tvm, QLUT_tvm)
     
-    # Benchmark
-    num_runs = 100
+    num_runs = 10
     start_time = time.time()
     for _ in range(num_runs):
         func(B_tvm, LUT_Scales_tvm, LUT_Biases_tvm, QLUT_tvm)
     end_time = time.time()
     
-    avg_time = (end_time - start_time) / num_runs
-    print(f"  Avg Time: {avg_time*1000:.3f} ms")
+    avg_latency = (end_time - start_time) / num_runs * 1000
+    print(f"  Latency: {avg_latency:.4f} ms")
     
-    return avg_time
+    return avg_latency
 
 if __name__ == "__main__":
     import argparse
@@ -134,11 +120,14 @@ if __name__ == "__main__":
     parser.add_argument("--tune", action="store_true", help="Run auto-tuning")
     args = parser.parse_args()
 
-    # Test cases representing potential real-world scenarios
-    # 2-bit, M=256, K=128, N=1
-    bench_qgemm(M=256, N=1, K=128, bits=2, tune=args.tune)
+    # N=4096 (query chunk size), K=1024 (hidden_dim), M=seq_len (32k to 1M)
+    K_dim = 1024
+    N_queries = 4096
+    seq_lengths = [32768, 65536, 131072, 262144, 524288, 1048576]
     
-    # 2-bit, M=256k*2, K=128, N=1
-    bench_qgemm(M=256*1024*2, N=1, K=128, bits=2, tune=args.tune)
+    print(f"=== Ultra-Fast QGEMM QK Bench (N={N_queries}, K={K_dim}, 2-bit) ===")
+    for m in seq_lengths:
+        bench_qgemm(M=m, N=N_queries, K=K_dim, bits=2, tune=args.tune)
     
-    bench_preprocessor(N=1, K=128, bits=2, tune=args.tune)
+    print("\n=== Ultra-Fast Preprocessor Bench (Query to LUT) ===")
+    bench_preprocessor(N=N_queries, K=K_dim, bits=2, tune=args.tune)

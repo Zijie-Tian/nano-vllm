@@ -38,3 +38,32 @@ def compute_sqnr(a: np.ndarray, b: np.ndarray) -> float:
     if noise_power == 0:
         return float('inf')  # Perfect reconstruction
     return 10 * np.log10(np.sum(np.square(a)) / noise_power)
+
+
+def compute_error(x: np.ndarray, y: np.ndarray) -> float:
+    """
+    Compute error in dB between two signals.
+
+    Args:
+        x: Original signal
+        y: Quantized/reconstructed signal
+
+    Returns:
+        Error in decibels (higher is better)
+    """
+    Ps = np.linalg.norm(x)
+    Pn = np.linalg.norm(x - y)
+    if Pn == 0:
+        return float('inf')
+    return 20 * np.log10(Ps / Pn)
+
+
+def print_binary(array: np.ndarray) -> None:
+    """
+    Print array elements in binary format.
+
+    Args:
+        array: NumPy array to print in binary
+    """
+    binary_array = np.vectorize(lambda x: format(x if x >= 0 else (1 << 8) + x, '08b'))(array)
+    print(binary_array)
