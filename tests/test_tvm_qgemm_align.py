@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import tvm
 from nanovllm.ops.tvm_qgemm.qgemm import QGeMMLUTBitsCodegen, QGeMMLUTBitsPreprocessorCodegen
 from nanovllm.ops.tvm_qgemm.utils.model_utils import preprocess_weights
-from nanovllm.ops.tvm_qgemm.utils.quant import quantize_weight_per_tensor, nmse
+from nanovllm.ops.tvm_qgemm.utils.math_utils import nmse
 
 # =============================================================================
 # Configuration
@@ -183,13 +183,20 @@ weight = np.random.randn(M // bits, K).astype(out_dtype)
 activation = np.random.randn(N, K).astype(out_dtype)
 
 sym = not zero_point
-weight_quant, scale, zp = quantize_weight_per_tensor(weight, bits=bits, sym=sym)
+
+import torch
+from nanovllm.kvcache.quant import quantize_kcache_per_token
+weight_th = torch.from_numpy(weight)
+weight_quant_th, scales_th, zp_th = quantize_kcache_per_token(weight_th, bits=bits, sym=sym)
+weight_quant = weight_quant_th.numpy()
+scales = scales_th.numpy()
+zp = zp_th.numpy() if zp_th is not None else None
 
 Aref = np.round(weight_quant + 2 ** (bits - 1)).astype("uint8")
-Sref = (scale * np.ones((M // bits, K // group_size))).astype(out_dtype)
+Sref = (scales * np.ones((M // bits, K // group_size))).astype(out_dtype)
 Bref = activation
 if zp is not None:
-    Zref = zp * np.ones((M // bits, K // group_size)).astype(out_dtype)
+    Zref = (zp * np.ones((M // bits, K // group_size))).astype(out_dtype)
 else:
     Zref = None
 
