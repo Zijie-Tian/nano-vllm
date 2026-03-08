@@ -2,3 +2,6 @@
 	path = 3rdparty/Block-SparseAttention
 	url = https://github.com/Zijie-Tian/Block-Sparse-Attention.git
 	branch = tzj/minference
+[submodule "3rdparty/tvm"]
+	path = 3rdparty/tvm
+	url = https://github.com/apache/tvm.git

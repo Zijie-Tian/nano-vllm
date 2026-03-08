@@ -10,7 +10,7 @@
 ## Running Tests
 
 - Always prefix with `CUDA_VISIBLE_DEVICES=X` (unless running CPU-only).
-- Always use `PYTHONPATH=$(pwd):$PYTHONPATH`.
+- **Environment**: Always `source build/nano-vllm-envs.sh` before running tests instead of manually setting `PYTHONPATH`. If the script doesn't exist, run `python3 scripts/setup_tvm.py` first.
 
 ## test_ruler.py Quick Reference
 
