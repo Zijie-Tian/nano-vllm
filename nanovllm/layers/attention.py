@@ -261,8 +261,8 @@ class Attention(nn.Module):
             if current_chunk_idx < len(cpu_block_ids):
                 cpu_block_id = cpu_block_ids[current_chunk_idx]
                 # Async offload - no waiting, fully parallel across layers
-                offload_engine.offload_prefill_buffer_async(
-                    self.layer_id, cpu_block_id, num_tokens
+                sparse_policy.offload_prefill_chunk(
+                    offload_engine, self.layer_id, cpu_block_id, num_tokens
                 )
 
         return final_o

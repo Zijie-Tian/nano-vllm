@@ -74,6 +74,7 @@ Nano-vLLM is a lightweight (~1,200 lines) implementation for fast offline LLM in
 | [`docs/test_ruler_usage_guide.md`](docs/test_ruler_usage_guide.md) | Comprehensive guide for `test_ruler.py`. |
 | [`docs/known_issues.md`](docs/known_issues.md) | Documented bugs and resolution history. |
 | [`docs/trtllm_skip_softmax_implementation_details.md`](docs/trtllm_skip_softmax_implementation_details.md) | Deep dive into Skip Softmax (BLASST) in TensorRT-LLM: math, kernels, and ModelOpt. |
+| [`docs/sparse_policy_offload_control_guide.md`](docs/sparse_policy_offload_control_guide.md) | Guide for controlling KV cache offloading within custom SparsePolicies. |
 
 ---
 

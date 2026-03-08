@@ -729,7 +729,9 @@ class ModelRunner:
                 # decode offload should be done per-layer in attention.forward.
                 # For now, offload all layers sequentially.
                 for layer_id in range(offload_engine.num_layers):
-                    offload_engine.offload_decode_slot_layer(layer_id, last_cpu_block)
+                    self.kvcache_manager.sparse_policy.offload_decode_chunk(
+                        offload_engine, layer_id, last_cpu_block
+                    )
                 offload_engine.wait_all_offload_done()
             # Reset decode start position for next block
             self.kvcache_manager.reset_decode_start_pos(seq)

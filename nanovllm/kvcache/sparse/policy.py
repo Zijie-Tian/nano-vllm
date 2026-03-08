@@ -226,6 +226,48 @@ class SparsePolicy(ABC):
         """
         pass
 
+    def offload_prefill_chunk(
+        self,
+        offload_engine: "OffloadEngine",
+        layer_id: int,
+        cpu_block_id: int,
+        num_tokens: int,
+        **kwargs,
+    ) -> None:
+        """
+        Offload the prefill buffer to CPU for a chunk.
+
+        Called after compute_chunked_prefill completes for a chunk.
+        Default implementation simply delegates to the offload_engine.
+
+        Args:
+            offload_engine: The OffloadEngine instance.
+            layer_id: Transformer layer index.
+            cpu_block_id: The CPU block ID to write to.
+            num_tokens: Number of valid tokens in this chunk.
+        """
+        offload_engine.offload_prefill_buffer_async(layer_id, cpu_block_id, num_tokens)
+
+    def offload_decode_chunk(
+        self,
+        offload_engine: "OffloadEngine",
+        layer_id: int,
+        cpu_block_id: int,
+        **kwargs,
+    ) -> None:
+        """
+        Offload the decode buffer to CPU for a block.
+
+        Called when a block is full during decode phase.
+        Default implementation simply delegates to the offload_engine.
+
+        Args:
+            offload_engine: The OffloadEngine instance.
+            layer_id: Transformer layer index.
+            cpu_block_id: The CPU block ID to write to.
+        """
+        offload_engine.offload_decode_slot_layer(layer_id, cpu_block_id)
+
     # =========================================================================
     # GPU-only methods (non-chunked)
     # These methods are used when all KV cache is on GPU, no CPU offload needed.

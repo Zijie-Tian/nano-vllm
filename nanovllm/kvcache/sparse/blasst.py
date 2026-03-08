@@ -268,6 +268,25 @@ class BLASSTPolicy(SparsePolicy):
             q, layer_id, softmax_scale, offload_engine, kvcache_manager, seq, selected_blocks
         )
 
+    def offload_prefill_chunk(
+        self,
+        offload_engine: "OffloadEngine",
+        layer_id: int,
+        cpu_block_id: int,
+        num_tokens: int,
+        **kwargs,
+    ) -> None:
+        super().offload_prefill_chunk(offload_engine, layer_id, cpu_block_id, num_tokens, **kwargs)
+
+    def offload_decode_chunk(
+        self,
+        offload_engine: "OffloadEngine",
+        layer_id: int,
+        cpu_block_id: int,
+        **kwargs,
+    ) -> None:
+        super().offload_decode_chunk(offload_engine, layer_id, cpu_block_id, **kwargs)
+
     def __repr__(self) -> str:
         if self.fixed_lambda is not None:
             return f"BLASSTPolicy(fixed_lambda={self.fixed_lambda}, granularity={self.granularity})"

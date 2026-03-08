@@ -481,5 +481,24 @@ class FullAttentionPolicy(SparsePolicy):
 
         return o_acc, lse_acc
 
+    def offload_prefill_chunk(
+        self,
+        offload_engine: "OffloadEngine",
+        layer_id: int,
+        cpu_block_id: int,
+        num_tokens: int,
+        **kwargs,
+    ) -> None:
+        super().offload_prefill_chunk(offload_engine, layer_id, cpu_block_id, num_tokens, **kwargs)
+
+    def offload_decode_chunk(
+        self,
+        offload_engine: "OffloadEngine",
+        layer_id: int,
+        cpu_block_id: int,
+        **kwargs,
+    ) -> None:
+        super().offload_decode_chunk(offload_engine, layer_id, cpu_block_id, **kwargs)
+
     def __repr__(self) -> str:
         return "FullAttentionPolicy()"
