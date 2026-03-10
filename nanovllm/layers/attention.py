@@ -3,7 +3,10 @@ import torch
 import torch.cuda.nvtx
 from torch import nn
 
-from flash_attn.flash_attn_interface import flash_attn_varlen_func, flash_attn_with_kvcache
+from flash_attn.flash_attn_interface import (
+    flash_attn_varlen_func,
+    flash_attn_with_kvcache,
+)
 from nanovllm.utils.context import get_context
 from nanovllm.kvcache.sparse.policy import PolicyContext
 
@@ -66,7 +69,6 @@ def store_kvcache(
 
 
 class Attention(nn.Module):
-
     def __init__(
         self,
         num_heads,
@@ -89,12 +91,12 @@ class Attention(nn.Module):
 
         # Determine if we're in chunked offload mode
         is_chunked_offload = (
-            context.is_chunked_prefill and
-            hasattr(context, 'kvcache_manager') and
-            context.kvcache_manager is not None and
-            hasattr(context.kvcache_manager, 'offload_engine')
+            context.is_chunked_prefill
+            and hasattr(context, "kvcache_manager")
+            and context.kvcache_manager is not None
+            and hasattr(context.kvcache_manager, "offload_engine")
         )
-        
+
         #! Ensure synchronization before accessing k_cache/v_cache
         # torch.cuda.synchronize()
         #! =======================================================
@@ -104,7 +106,11 @@ class Attention(nn.Module):
             # This enables fully async offloads since each layer has its own buffer.
             offload_engine = context.kvcache_manager.offload_engine
             compute_stream = offload_engine.compute_stream
-            chunk_idx = context.current_chunk_idx if hasattr(context, 'current_chunk_idx') else -1
+            chunk_idx = (
+                context.current_chunk_idx
+                if hasattr(context, "current_chunk_idx")
+                else -1
+            )
 
             # Wait for default stream to ensure slot_mapping tensor transfer is complete
             compute_stream.wait_stream(torch.cuda.default_stream())
@@ -113,7 +119,9 @@ class Attention(nn.Module):
                 # Write KV to per-layer prefill buffer via offload_engine
                 # k, v shape: [num_tokens, kv_heads, head_dim]
                 #! GPU 2 GPU
-                offload_engine.write_to_prefill_buffer(self.layer_id, k, v, chunk_idx=chunk_idx)
+                offload_engine.write_to_prefill_buffer(
+                    self.layer_id, k, v, chunk_idx=chunk_idx
+                )
         elif is_chunked_offload:
             # Chunked decode mode: write KV to per-layer decode buffer via offload_engine
             # KV will be written to decode buffer in the decode branch below
@@ -130,16 +138,25 @@ class Attention(nn.Module):
             # Warmup phase: use flash_attn directly
             if context.is_prefill:
                 return flash_attn_varlen_func(
-                    q, k, v,
-                    max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
-                    max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
-                    softmax_scale=self.scale, causal=True,
+                    q,
+                    k,
+                    v,
+                    max_seqlen_q=context.max_seqlen_q,
+                    cu_seqlens_q=context.cu_seqlens_q,
+                    max_seqlen_k=context.max_seqlen_k,
+                    cu_seqlens_k=context.cu_seqlens_k,
+                    softmax_scale=self.scale,
+                    causal=True,
                 )
             else:
                 return flash_attn_with_kvcache(
-                    q.unsqueeze(1), k_cache, v_cache,
-                    cache_seqlens=context.context_lens, block_table=context.block_tables,
-                    softmax_scale=self.scale, causal=True,
+                    q.unsqueeze(1),
+                    k_cache,
+                    v_cache,
+                    cache_seqlens=context.context_lens,
+                    block_table=context.block_tables,
+                    softmax_scale=self.scale,
+                    causal=True,
                 )
         sparse_policy = context.kvcache_manager.sparse_policy
         assert sparse_policy is not None, "sparse_policy must not be None"
@@ -156,13 +173,18 @@ class Attention(nn.Module):
                 else:
                     k_for_attn, v_for_attn = k, v
                 o = sparse_policy.compute_prefill(
-                    q, k_for_attn, v_for_attn,
-                    context.cu_seqlens_q, context.cu_seqlens_k,
-                    context.max_seqlen_q, context.max_seqlen_k,
-                    self.scale, self.layer_id,
+                    q,
+                    k_for_attn,
+                    v_for_attn,
+                    context.cu_seqlens_q,
+                    context.cu_seqlens_k,
+                    context.max_seqlen_q,
+                    context.max_seqlen_k,
+                    self.scale,
+                    self.layer_id,
                     context.block_tables,
                 )
-        else:    # decode
+        else:  # decode
             if context.is_chunked_prefill:
                 # Chunked decode: need to load all KV from CPU+GPU (CPU offload mode)
                 # Store current decode token to per-layer decode buffer
@@ -172,13 +194,19 @@ class Attention(nn.Module):
                 offload_engine = kvcache_manager.offload_engine
                 pos_in_block = context.decode_pos_in_block
                 # k, v shape: [1, kv_heads, head_dim]
-                offload_engine.write_to_decode_buffer(self.layer_id, pos_in_block, k.squeeze(0), v.squeeze(0))
+                offload_engine.write_to_decode_buffer(
+                    self.layer_id, pos_in_block, k.squeeze(0), v.squeeze(0)
+                )
                 o = self._chunked_decode_attention(q, k, v, context)
             else:
                 # GPU-only mode: use policy for attention
                 o = sparse_policy.compute_decode(
-                    q, k_cache, v_cache,
-                    context.context_lens, self.scale, self.layer_id,
+                    q,
+                    k_cache,
+                    v_cache,
+                    context.context_lens,
+                    self.scale,
+                    self.layer_id,
                     context.block_tables,
                 )
         return o
@@ -204,13 +232,17 @@ class Attention(nn.Module):
         4. Merging all results
         """
         current_chunk_idx = context.current_chunk_idx
-        torch.cuda.nvtx.range_push(f"ChunkedPrefill: L{self.layer_id} Chunk{current_chunk_idx}")
+        torch.cuda.nvtx.range_push(
+            f"ChunkedPrefill: L{self.layer_id} Chunk{current_chunk_idx}"
+        )
 
         num_tokens = k.shape[0]
 
         kvcache_manager = context.kvcache_manager
-        seq = context.chunked_seq if hasattr(context, 'chunked_seq') else None
-        offload_engine = kvcache_manager.offload_engine if kvcache_manager is not None else None
+        seq = context.chunked_seq if hasattr(context, "chunked_seq") else None
+        offload_engine = (
+            kvcache_manager.offload_engine if kvcache_manager is not None else None
+        )
 
         # Get sparse policy - required for chunked prefill
         sparse_policy = kvcache_manager.sparse_policy
@@ -230,18 +262,28 @@ class Attention(nn.Module):
             query=q,  # Pass query for sparse policies that need it
             is_prefill=True,
             block_size=kvcache_manager.block_size,
-            total_kv_len=len(cpu_block_table) * kvcache_manager.block_size if cpu_block_table else 0,
+            total_kv_len=len(cpu_block_table) * kvcache_manager.block_size
+            if cpu_block_table
+            else 0,
         )
-        selected_blocks = sparse_policy.select_blocks(cpu_block_table, offload_engine, policy_ctx, q, k)
-        logger.debug(f"[DEBUG] select_blocks: {len(cpu_block_table)} -> {len(selected_blocks)} blocks")
+        selected_blocks = sparse_policy.select_blocks(
+            cpu_block_table, offload_engine, policy_ctx, q, k
+        )
+        logger.debug(
+            f"[DEBUG] select_blocks: {len(cpu_block_table)} -> {len(selected_blocks)} blocks"
+        )
 
         # [DEBUG] Verify execution path
-        logger.debug(f"[DEBUG] Calling sparse_policy.compute_chunked_prefill, "
-                     f"policy={sparse_policy}, layer={self.layer_id}, chunk={current_chunk_idx}")
+        logger.debug(
+            f"[DEBUG] Calling sparse_policy.compute_chunked_prefill, "
+            f"policy={sparse_policy}, layer={self.layer_id}, chunk={current_chunk_idx}"
+        )
 
         # Delegate computation to policy with pre-selected blocks
         final_o = sparse_policy.compute_chunked_prefill(
-            q, k, v,
+            q,
+            k,
+            v,
             self.layer_id,
             self.scale,
             offload_engine,
@@ -300,9 +342,12 @@ class Attention(nn.Module):
         # If not, fallback to FullAttentionPolicy (e.g., XAttentionBSAPolicy only supports prefill)
         if not sparse_policy.supports_decode:
             from nanovllm.kvcache.sparse import FullAttentionPolicy
+
             sparse_policy = FullAttentionPolicy()
-            logger.debug(f"[DEBUG] {kvcache_manager.sparse_policy} doesn't support decode, "
-                         f"falling back to FullAttentionPolicy")
+            logger.debug(
+                f"[DEBUG] {kvcache_manager.sparse_policy} doesn't support decode, "
+                f"falling back to FullAttentionPolicy"
+            )
 
         # Step 1: Get prefilled CPU blocks
         cpu_block_table = kvcache_manager.get_prefilled_cpu_blocks(seq)
@@ -319,12 +364,18 @@ class Attention(nn.Module):
                 block_size=kvcache_manager.block_size,
                 total_kv_len=len(cpu_block_table) * kvcache_manager.block_size,
             )
-            selected_blocks = sparse_policy.select_blocks(cpu_block_table, offload_engine, policy_ctx, q, k)
-            logger.debug(f"[DEBUG] decode select_blocks: {len(cpu_block_table)} -> {len(selected_blocks)} blocks")
+            selected_blocks = sparse_policy.select_blocks(
+                cpu_block_table, offload_engine, policy_ctx, q, k
+            )
+            logger.debug(
+                f"[DEBUG] decode select_blocks: {len(cpu_block_table)} -> {len(selected_blocks)} blocks"
+            )
 
         # [DEBUG] Verify execution path
-        logger.debug(f"[DEBUG] Calling sparse_policy.compute_chunked_decode, "
-                     f"policy={sparse_policy}, layer={self.layer_id}")
+        logger.debug(
+            f"[DEBUG] Calling sparse_policy.compute_chunked_decode, "
+            f"policy={sparse_policy}, layer={self.layer_id}"
+        )
 
         # Delegate computation to policy with pre-selected blocks
         return sparse_policy.compute_chunked_decode(

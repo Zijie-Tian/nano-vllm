@@ -51,7 +51,7 @@ def convert_glm4_weight_name(weight_name: str) -> tuple[str, str | None]:
         # Handle packed modules (QKV and gate_up)
         for glm_subname, nano_subname in GLM4_LAYER_MAPPING.items():
             if remainder.startswith(glm_subname):
-                suffix = remainder[len(glm_subname):]  # .weight or .bias
+                suffix = remainder[len(glm_subname) :]  # .weight or .bias
                 new_name = f"model.layers.{layer_idx}.{nano_subname}{suffix}"
 
                 # Determine shard_id for packed modules
@@ -73,8 +73,8 @@ def convert_glm4_weight_name(weight_name: str) -> tuple[str, str | None]:
 def load_glm4_qkv(param: nn.Parameter, loaded_weight: torch.Tensor, config):
     """Load GLM-4 merged QKV weights by splitting into q, k, v."""
     num_heads = config.num_attention_heads
-    num_kv_heads = getattr(config, 'multi_query_group_num', num_heads)
-    head_dim = getattr(config, 'kv_channels', config.hidden_size // num_heads)
+    num_kv_heads = getattr(config, "multi_query_group_num", num_heads)
+    head_dim = getattr(config, "kv_channels", config.hidden_size // num_heads)
 
     q_size = num_heads * head_dim
     kv_size = num_kv_heads * head_dim
@@ -91,7 +91,9 @@ def load_glm4_qkv(param: nn.Parameter, loaded_weight: torch.Tensor, config):
 
 def load_glm4_gate_up(param: nn.Parameter, loaded_weight: torch.Tensor, config):
     """Load GLM-4 merged gate_up weights by splitting into gate, up."""
-    ffn_hidden_size = getattr(config, 'ffn_hidden_size', getattr(config, 'intermediate_size', None))
+    ffn_hidden_size = getattr(
+        config, "ffn_hidden_size", getattr(config, "intermediate_size", None)
+    )
 
     # Split gate_up: [ffn_hidden_size * 2, hidden_size]
     gate, up = loaded_weight.split([ffn_hidden_size, ffn_hidden_size], dim=0)
@@ -99,7 +101,7 @@ def load_glm4_gate_up(param: nn.Parameter, loaded_weight: torch.Tensor, config):
     # Load each part using the weight_loader
     weight_loader = getattr(param, "weight_loader")
     weight_loader(param, gate, 0)  # gate_proj is shard 0
-    weight_loader(param, up, 1)    # up_proj is shard 1
+    weight_loader(param, up, 1)  # up_proj is shard 1
 
 
 def is_glm4_model(model: nn.Module) -> bool:
@@ -136,7 +138,9 @@ def load_model(model: nn.Module, path: str):
                     else:
                         # Regular weight, use converted name
                         param = model.get_parameter(param_name)
-                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
                         weight_loader(param, loaded_weight)
                         continue
 
@@ -151,5 +155,7 @@ def load_model(model: nn.Module, path: str):
                         break
                 else:
                     param = model.get_parameter(weight_name)
-                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
                     weight_loader(param, loaded_weight)

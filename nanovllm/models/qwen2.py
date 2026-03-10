@@ -6,7 +6,11 @@ from transformers import Qwen2Config
 from nanovllm.layers.activation import SiluAndMul
 from nanovllm.layers.attention import Attention
 from nanovllm.layers.layernorm import RMSNorm
-from nanovllm.layers.linear import QKVParallelLinear, MergedColumnParallelLinear, RowParallelLinear
+from nanovllm.layers.linear import (
+    QKVParallelLinear,
+    MergedColumnParallelLinear,
+    RowParallelLinear,
+)
 from nanovllm.layers.rotary_embedding import get_rope
 from nanovllm.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
 from nanovllm.models.registry import register_model
@@ -36,7 +40,7 @@ class Qwen2Attention(nn.Module):
         self.head_dim = head_dim or hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim ** -0.5
+        self.scaling = self.head_dim**-0.5
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -83,7 +87,6 @@ class Qwen2Attention(nn.Module):
 
 
 class Qwen2MLP(nn.Module):
-
     def __init__(
         self,
         hidden_size: int,
@@ -112,7 +115,6 @@ class Qwen2MLP(nn.Module):
 
 
 class Qwen2DecoderLayer(nn.Module):
-
     def __init__(
         self,
         config: Qwen2Config,
@@ -123,7 +125,7 @@ class Qwen2DecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
             max_position=config.max_position_embeddings,
-            head_dim=getattr(config, 'head_dim', None),
+            head_dim=getattr(config, "head_dim", None),
             rope_theta=getattr(config, "rope_theta", 1000000),
             rope_scaling=getattr(config, "rope_scaling", None),
         )
@@ -133,7 +135,9 @@ class Qwen2DecoderLayer(nn.Module):
             hidden_act=config.hidden_act,
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
     def forward(
         self,
@@ -152,14 +156,17 @@ class Qwen2DecoderLayer(nn.Module):
 
 
 class Qwen2Model(nn.Module):
-
     def __init__(
         self,
         config: Qwen2Config,
     ) -> None:
         super().__init__()
-        self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
-        self.layers = nn.ModuleList([Qwen2DecoderLayer(config) for _ in range(config.num_hidden_layers)])
+        self.embed_tokens = VocabParallelEmbedding(
+            config.vocab_size, config.hidden_size
+        )
+        self.layers = nn.ModuleList(
+            [Qwen2DecoderLayer(config) for _ in range(config.num_hidden_layers)]
+        )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
@@ -185,10 +192,7 @@ class Qwen2ForCausalLM(nn.Module):
         "up_proj": ("gate_up_proj", 1),
     }
 
-    def __init__(
-        self,
-        config: Qwen2Config
-    ) -> None:
+    def __init__(self, config: Qwen2Config) -> None:
         super().__init__()
         self.model = Qwen2Model(config)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)

@@ -17,8 +17,6 @@ from typing import List, Tuple, Dict, Set, Optional
 import torch
 from torch import Tensor
 
-logger = logging.getLogger(__name__)
-
 from nanovllm.engine.sequence import Sequence
 from nanovllm.kvcache.base_manager import KVCacheManager
 from nanovllm.kvcache.offload_engine import OffloadEngine
@@ -27,15 +25,21 @@ from nanovllm.kvcache.policies.lru_policy import LRUPolicy
 
 # Type checking import for sparse policy
 from typing import TYPE_CHECKING
+
 if TYPE_CHECKING:
     from nanovllm.kvcache.sparse.policy import SparsePolicy
+
+logger = logging.getLogger(__name__)
 
 
 class BlockLocation(Enum):
     """Where a logical block's data currently resides."""
+
+    # fmt: off
     GPU = auto()
     CPU = auto()
     INVALID = auto()  # Not yet written / deallocated
+    # fmt: on
 
 
 @dataclass
@@ -46,10 +50,11 @@ class LogicalBlock:
     Sequences reference logical blocks. Physical blocks are the actual
     storage locations (GPU slots or CPU blocks).
     """
+
     logical_id: int
     location: BlockLocation = BlockLocation.INVALID
-    gpu_slot: int = -1          # GPU buffer slot ID (if on GPU)
-    cpu_block_id: int = -1      # CPU pool block ID (if on CPU)
+    gpu_slot: int = -1  # GPU buffer slot ID (if on GPU)
+    cpu_block_id: int = -1  # CPU pool block ID (if on CPU)
     ref_count: int = 0
     hash: int = -1
     token_ids: List[int] = field(default_factory=list)
@@ -126,7 +131,9 @@ class HybridKVCacheManager(KVCacheManager):
 
         # GPU slot management (kept for potential future use, but not used in CPU-primary mode)
         self.free_gpu_slots: deque[int] = deque(range(num_gpu_slots))
-        self.gpu_slot_to_logical: Dict[int, int] = {}  # gpu_slot -> logical_id (unused in CPU-primary mode)
+        self.gpu_slot_to_logical: Dict[
+            int, int
+        ] = {}  # gpu_slot -> logical_id (unused in CPU-primary mode)
 
         # CPU block management
         self.free_cpu_blocks: deque[int] = deque(range(num_cpu_blocks))
@@ -134,8 +141,8 @@ class HybridKVCacheManager(KVCacheManager):
 
         # Prefix cache (uses logical block IDs)
         # NOTE: Currently WRITE-ONLY in offload mode - hashes are stored but never
-        #> used for cache hit detection. This is intentional: offload mode always
-        #> allocates new blocks and doesn't reuse existing ones.
+        # > used for cache hit detection. This is intentional: offload mode always
+        # > allocates new blocks and doesn't reuse existing ones.
         self.hash_to_logical_id: Dict[int, int] = {}
 
         # Step counter for policy
@@ -241,14 +248,14 @@ class HybridKVCacheManager(KVCacheManager):
 
     def can_append(self, seq: Sequence) -> bool:
         """Check if we can append a token."""
-        need_new_block = (len(seq) % self._block_size == 1)
+        need_new_block = len(seq) % self._block_size == 1
         return len(self.free_logical_ids) >= int(need_new_block)
 
     def may_append(self, seq: Sequence) -> None:
         """Handle potential new block allocation during decode."""
         block_table = seq.block_table
         last_logical_id = block_table[-1]
-        last_block = self.logical_blocks[last_logical_id]
+        self.logical_blocks[last_logical_id]
 
         seq_len = len(seq)
         pos_in_block = seq_len % self._block_size

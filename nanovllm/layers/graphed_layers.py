@@ -55,7 +55,9 @@ class EmbedGraph(nn.Module):
         """Capture CUDA Graph."""
         # Allocate placeholders outside inference_mode
         self.ids_in = torch.zeros(self.seq_len, dtype=torch.long, device="cuda")
-        self.h_out = torch.zeros(self.seq_len, self.hidden_size, dtype=self.dtype, device="cuda")
+        self.h_out = torch.zeros(
+            self.seq_len, self.hidden_size, dtype=self.dtype, device="cuda"
+        )
 
         with torch.inference_mode():
             # Warmup
@@ -156,13 +158,31 @@ class FirstGraph(nn.Module):
     def capture_graph(self, graph_pool=None):
         """Capture CUDA Graph."""
         # Allocate placeholders
-        self.h_in = torch.zeros(self.seq_len, self.hidden_size, dtype=self.dtype, device="cuda")
+        self.h_in = torch.zeros(
+            self.seq_len, self.hidden_size, dtype=self.dtype, device="cuda"
+        )
         self.pos_in = torch.zeros(self.seq_len, dtype=torch.long, device="cuda")
 
-        self.q_out = torch.zeros(self.seq_len, self.num_heads, self.head_dim, dtype=self.dtype, device="cuda")
-        self.k_out = torch.zeros(self.seq_len, self.num_kv_heads, self.head_dim, dtype=self.dtype, device="cuda")
-        self.v_out = torch.zeros(self.seq_len, self.num_kv_heads, self.head_dim, dtype=self.dtype, device="cuda")
-        self.r_out = torch.zeros(self.seq_len, self.hidden_size, dtype=self.dtype, device="cuda")
+        self.q_out = torch.zeros(
+            self.seq_len, self.num_heads, self.head_dim, dtype=self.dtype, device="cuda"
+        )
+        self.k_out = torch.zeros(
+            self.seq_len,
+            self.num_kv_heads,
+            self.head_dim,
+            dtype=self.dtype,
+            device="cuda",
+        )
+        self.v_out = torch.zeros(
+            self.seq_len,
+            self.num_kv_heads,
+            self.head_dim,
+            dtype=self.dtype,
+            device="cuda",
+        )
+        self.r_out = torch.zeros(
+            self.seq_len, self.hidden_size, dtype=self.dtype, device="cuda"
+        )
 
         with torch.inference_mode():
             # Warmup
@@ -191,11 +211,20 @@ class FirstGraph(nn.Module):
         positions: torch.Tensor,
         use_graph: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        if use_graph and self.graph is not None and hidden_states.shape[0] == self.seq_len:
+        if (
+            use_graph
+            and self.graph is not None
+            and hidden_states.shape[0] == self.seq_len
+        ):
             self.h_in.copy_(hidden_states)
             self.pos_in.copy_(positions)
             self.graph.replay()
-            return self.q_out.clone(), self.k_out.clone(), self.v_out.clone(), self.r_out.clone()
+            return (
+                self.q_out.clone(),
+                self.k_out.clone(),
+                self.v_out.clone(),
+                self.r_out.clone(),
+            )
         else:
             return self._compute(hidden_states, positions)
 
@@ -259,8 +288,8 @@ class InterGraph(nn.Module):
     def _compute(
         self,
         attn_output: torch.Tensor,  # [seq_len, num_heads, head_dim]
-        residual: torch.Tensor,      # [seq_len, hidden_size]
-        positions: torch.Tensor,     # [seq_len]
+        residual: torch.Tensor,  # [seq_len, hidden_size]
+        positions: torch.Tensor,  # [seq_len]
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Inter-layer computation:
@@ -299,14 +328,34 @@ class InterGraph(nn.Module):
     def capture_graph(self, graph_pool=None):
         """Capture CUDA Graph."""
         # Allocate placeholders
-        self.attn_in = torch.zeros(self.seq_len, self.num_heads, self.head_dim, dtype=self.dtype, device="cuda")
-        self.r_in = torch.zeros(self.seq_len, self.hidden_size, dtype=self.dtype, device="cuda")
+        self.attn_in = torch.zeros(
+            self.seq_len, self.num_heads, self.head_dim, dtype=self.dtype, device="cuda"
+        )
+        self.r_in = torch.zeros(
+            self.seq_len, self.hidden_size, dtype=self.dtype, device="cuda"
+        )
         self.pos_in = torch.zeros(self.seq_len, dtype=torch.long, device="cuda")
 
-        self.q_out = torch.zeros(self.seq_len, self.num_heads, self.head_dim, dtype=self.dtype, device="cuda")
-        self.k_out = torch.zeros(self.seq_len, self.num_kv_heads, self.head_dim, dtype=self.dtype, device="cuda")
-        self.v_out = torch.zeros(self.seq_len, self.num_kv_heads, self.head_dim, dtype=self.dtype, device="cuda")
-        self.r_out = torch.zeros(self.seq_len, self.hidden_size, dtype=self.dtype, device="cuda")
+        self.q_out = torch.zeros(
+            self.seq_len, self.num_heads, self.head_dim, dtype=self.dtype, device="cuda"
+        )
+        self.k_out = torch.zeros(
+            self.seq_len,
+            self.num_kv_heads,
+            self.head_dim,
+            dtype=self.dtype,
+            device="cuda",
+        )
+        self.v_out = torch.zeros(
+            self.seq_len,
+            self.num_kv_heads,
+            self.head_dim,
+            dtype=self.dtype,
+            device="cuda",
+        )
+        self.r_out = torch.zeros(
+            self.seq_len, self.hidden_size, dtype=self.dtype, device="cuda"
+        )
 
         with torch.inference_mode():
             # Warmup
@@ -336,12 +385,21 @@ class InterGraph(nn.Module):
         positions: torch.Tensor,
         use_graph: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        if use_graph and self.graph is not None and attn_output.shape[0] == self.seq_len:
+        if (
+            use_graph
+            and self.graph is not None
+            and attn_output.shape[0] == self.seq_len
+        ):
             self.attn_in.copy_(attn_output)
             self.r_in.copy_(residual)
             self.pos_in.copy_(positions)
             self.graph.replay()
-            return self.q_out.clone(), self.k_out.clone(), self.v_out.clone(), self.r_out.clone()
+            return (
+                self.q_out.clone(),
+                self.k_out.clone(),
+                self.v_out.clone(),
+                self.r_out.clone(),
+            )
         else:
             return self._compute(attn_output, residual, positions)
 
@@ -404,9 +462,15 @@ class LastGraph(nn.Module):
     def capture_graph(self, graph_pool=None):
         """Capture CUDA Graph."""
         # Allocate placeholders
-        self.attn_in = torch.zeros(self.seq_len, self.num_heads, self.head_dim, dtype=self.dtype, device="cuda")
-        self.r_in = torch.zeros(self.seq_len, self.hidden_size, dtype=self.dtype, device="cuda")
-        self.h_out = torch.zeros(self.seq_len, self.hidden_size, dtype=self.dtype, device="cuda")
+        self.attn_in = torch.zeros(
+            self.seq_len, self.num_heads, self.head_dim, dtype=self.dtype, device="cuda"
+        )
+        self.r_in = torch.zeros(
+            self.seq_len, self.hidden_size, dtype=self.dtype, device="cuda"
+        )
+        self.h_out = torch.zeros(
+            self.seq_len, self.hidden_size, dtype=self.dtype, device="cuda"
+        )
 
         with torch.inference_mode():
             # Warmup
@@ -429,7 +493,11 @@ class LastGraph(nn.Module):
         residual: torch.Tensor,
         use_graph: bool = False,
     ) -> torch.Tensor:
-        if use_graph and self.graph is not None and attn_output.shape[0] == self.seq_len:
+        if (
+            use_graph
+            and self.graph is not None
+            and attn_output.shape[0] == self.seq_len
+        ):
             self.attn_in.copy_(attn_output)
             self.r_in.copy_(residual)
             self.graph.replay()
@@ -509,20 +577,22 @@ class OffloadGraphManager:
         # Create InterGraphs: o_proj_i → post_norm_i → mlp_i → input_norm_{i+1} → qkv_proj_{i+1} → rotary_{i+1}
         self.inter_graphs = nn.ModuleList()
         for i in range(num_layers - 1):
-            self.inter_graphs.append(InterGraph(
-                o_proj=layers[i].self_attn.o_proj,
-                post_norm=layers[i].post_attention_layernorm,
-                mlp=layers[i].mlp,
-                next_input_norm=layers[i + 1].input_layernorm,
-                next_qkv_proj=layers[i + 1].self_attn.qkv_proj,
-                next_rotary_emb=layers[i + 1].self_attn.rotary_emb,
-                seq_len=seq_len,
-                hidden_size=hidden_size,
-                num_heads=num_heads,
-                num_kv_heads=num_kv_heads,
-                head_dim=head_dim,
-                dtype=dtype,
-            ))
+            self.inter_graphs.append(
+                InterGraph(
+                    o_proj=layers[i].self_attn.o_proj,
+                    post_norm=layers[i].post_attention_layernorm,
+                    mlp=layers[i].mlp,
+                    next_input_norm=layers[i + 1].input_layernorm,
+                    next_qkv_proj=layers[i + 1].self_attn.qkv_proj,
+                    next_rotary_emb=layers[i + 1].self_attn.rotary_emb,
+                    seq_len=seq_len,
+                    hidden_size=hidden_size,
+                    num_heads=num_heads,
+                    num_kv_heads=num_kv_heads,
+                    head_dim=head_dim,
+                    dtype=dtype,
+                )
+            )
 
         # Create LastGraph: o_proj_{N-1} → post_norm_{N-1} → mlp_{N-1} → final_norm
         self.last_graph = LastGraph(

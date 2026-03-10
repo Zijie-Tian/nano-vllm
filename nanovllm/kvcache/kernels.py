@@ -13,10 +13,10 @@ import triton.language as tl
 
 @triton.jit
 def gathered_copy_kernel(
-    src_ptr,            # Source tensor base pointer (CPU pinned or GPU)
-    dst_ptr,            # Destination tensor base pointer (GPU)
-    indices_ptr,        # Gather indices [num_dst_blocks]
-    num_dst_blocks,     # Number of destination blocks
+    src_ptr,  # Source tensor base pointer (CPU pinned or GPU)
+    dst_ptr,  # Destination tensor base pointer (GPU)
+    indices_ptr,  # Gather indices [num_dst_blocks]
+    num_dst_blocks,  # Number of destination blocks
     block_numel: tl.constexpr,  # Elements per block (block_size * kv_heads * head_dim)
     BLOCK_SIZE: tl.constexpr = 1024,
 ):
@@ -67,12 +67,12 @@ def gathered_copy_kernel(
 
 @triton.jit
 def gathered_copy_kv_kernel(
-    k_src_ptr,          # K cache source [num_src_blocks, block_size, kv_heads, head_dim]
-    v_src_ptr,          # V cache source
-    k_dst_ptr,          # K cache destination
-    v_dst_ptr,          # V cache destination
-    indices_ptr,        # Gather indices [num_dst_blocks]
-    num_dst_blocks,     # Number of destination blocks
+    k_src_ptr,  # K cache source [num_src_blocks, block_size, kv_heads, head_dim]
+    v_src_ptr,  # V cache source
+    k_dst_ptr,  # K cache destination
+    v_dst_ptr,  # V cache destination
+    indices_ptr,  # Gather indices [num_dst_blocks]
+    num_dst_blocks,  # Number of destination blocks
     block_numel: tl.constexpr,  # Elements per block
     BLOCK_SIZE: tl.constexpr = 1024,
 ):

@@ -8,15 +8,19 @@ import torch
 
 class BreakpointType(Enum):
     """Types of breakpoints in the model forward pass."""
+
+    # fmt: off
     EMBEDDING = auto()      # After embed_tokens
     LAYER_OUTPUT = auto()   # After each decoder layer
     FINAL_NORM = auto()     # After final RMSNorm
     LM_HEAD = auto()        # After lm_head (logits)
+    # fmt: on
 
 
 @dataclass
 class Breakpoint:
     """A captured breakpoint with tensor data."""
+
     bp_type: BreakpointType
     layer_idx: Optional[int]  # None for EMBEDDING, FINAL_NORM, LM_HEAD
     tensor: torch.Tensor

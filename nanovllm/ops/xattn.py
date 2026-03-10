@@ -52,13 +52,16 @@ def _is_triton_supported() -> bool:
         props = torch.cuda.get_device_properties(torch.cuda.current_device())
         _CACHED_TRITON_SUPPORTED = props.major >= 8
         if not _CACHED_TRITON_SUPPORTED:
-            print(f"Triton kernel requires SM 80+, got SM {props.major}{props.minor}. Falling back to PyTorch.")
+            print(
+                f"Triton kernel requires SM 80+, got SM {props.major}{props.minor}. Falling back to PyTorch."
+            )
     return _CACHED_TRITON_SUPPORTED
 
 
 # ============================================================
 # Triton Kernels
 # ============================================================
+
 
 @triton.jit
 def softmax_fuse_block_sum_kernel_causal(
@@ -105,18 +108,34 @@ def softmax_fuse_block_sum_kernel_causal(
     offs_k = tl.arange(0, segment_size)
 
     num_iters = k_len // segment_size
-    num_iters_before_causal = (chunk_start + (block_id + 1) * block_size - 1) // segment_size
+    num_iters_before_causal = (
+        chunk_start + (block_id + 1) * block_size - 1
+    ) // segment_size
 
     # Online softmax state
     m_i = tl.zeros([block_size], dtype=tl.float32) - float("inf")  # running max
     l_i = tl.zeros([block_size], dtype=tl.float32) + 1.0  # running sum
 
     # Input pointer setup
-    input_ptr = In + batch_id * input_stride_0 + head_id * input_stride_1 + block_id * block_size * input_stride_2
-    input_ptr = input_ptr + tl.arange(0, segment_size) + tl.arange(0, block_size)[:, None] * input_stride_2
+    input_ptr = (
+        In
+        + batch_id * input_stride_0
+        + head_id * input_stride_1
+        + block_id * block_size * input_stride_2
+    )
+    input_ptr = (
+        input_ptr
+        + tl.arange(0, segment_size)
+        + tl.arange(0, block_size)[:, None] * input_stride_2
+    )
 
     # Output pointer setup
-    output_ptr = Out + batch_id * output_stride_0 + head_id * output_stride_1 + block_id * output_stride_2
+    output_ptr = (
+        Out
+        + batch_id * output_stride_0
+        + head_id * output_stride_1
+        + block_id * output_stride_2
+    )
     output_ptr = output_ptr + tl.arange(0, segment_size // block_size)
 
     # Pass 1: Compute global max and sum (before causal boundary)
@@ -159,7 +178,9 @@ def softmax_fuse_block_sum_kernel_causal(
         X = tl.reshape(X, (block_size, segment_size // block_size, block_size))
         X = tl.sum(X, 2)
         X = tl.sum(X, 0)
-        tl.store(output_ptr + iter * segment_size // block_size, X.to(Out.type.element_ty))
+        tl.store(
+            output_ptr + iter * segment_size // block_size, X.to(Out.type.element_ty)
+        )
 
     # Pass 2 continued: Handle causal boundary
     for iter in range(num_iters_before_causal, num_iters_before_causal + 1):
@@ -171,12 +192,16 @@ def softmax_fuse_block_sum_kernel_causal(
         X = tl.reshape(X, (block_size, segment_size // block_size, block_size))
         X = tl.sum(X, 2)
         X = tl.sum(X, 0)
-        tl.store(output_ptr + iter * segment_size // block_size, X.to(Out.type.element_ty))
+        tl.store(
+            output_ptr + iter * segment_size // block_size, X.to(Out.type.element_ty)
+        )
 
     # Pass 2 continued: Zero out future blocks
     for iter in range(num_iters_before_causal + 1, num_iters):
         X = tl.zeros([segment_size // block_size], dtype=tl.float32)
-        tl.store(output_ptr + iter * segment_size // block_size, X.to(Out.type.element_ty))
+        tl.store(
+            output_ptr + iter * segment_size // block_size, X.to(Out.type.element_ty)
+        )
 
 
 @triton.jit
@@ -207,17 +232,31 @@ def softmax_fuse_block_sum_kernel_non_causal(
     batch_id = tl.program_id(2)
 
     offs_q = tl.arange(0, block_size) + chunk_start + block_id * block_size
-    offs_k = tl.arange(0, segment_size)
+    tl.arange(0, segment_size)
 
     num_iters = k_len // segment_size
 
     m_i = tl.zeros([block_size], dtype=tl.float32) - float("inf")
     l_i = tl.zeros([block_size], dtype=tl.float32) + 1.0
 
-    input_ptr = In + batch_id * input_stride_0 + head_id * input_stride_1 + block_id * block_size * input_stride_2
-    input_ptr = input_ptr + tl.arange(0, segment_size) + tl.arange(0, block_size)[:, None] * input_stride_2
+    input_ptr = (
+        In
+        + batch_id * input_stride_0
+        + head_id * input_stride_1
+        + block_id * block_size * input_stride_2
+    )
+    input_ptr = (
+        input_ptr
+        + tl.arange(0, segment_size)
+        + tl.arange(0, block_size)[:, None] * input_stride_2
+    )
 
-    output_ptr = Out + batch_id * output_stride_0 + head_id * output_stride_1 + block_id * output_stride_2
+    output_ptr = (
+        Out
+        + batch_id * output_stride_0
+        + head_id * output_stride_1
+        + block_id * output_stride_2
+    )
     output_ptr = output_ptr + tl.arange(0, segment_size // block_size)
 
     # Pass 1: Compute global max and sum
@@ -245,12 +284,15 @@ def softmax_fuse_block_sum_kernel_non_causal(
         X = tl.reshape(X, (block_size, segment_size // block_size, block_size))
         X = tl.sum(X, 2)
         X = tl.sum(X, 0)
-        tl.store(output_ptr + iter * segment_size // block_size, X.to(Out.type.element_ty))
+        tl.store(
+            output_ptr + iter * segment_size // block_size, X.to(Out.type.element_ty)
+        )
 
 
 # ============================================================
 # KV Chunking Support Kernels
 # ============================================================
+
 
 @triton.jit
 def softmax_partial_stats_kernel(
@@ -265,7 +307,7 @@ def softmax_partial_stats_kernel(
     stats_stride_1,
     k_len,
     chunk_start,  # Q start position (for causal)
-    kv_offset,    # KV chunk offset (for causal)
+    kv_offset,  # KV chunk offset (for causal)
     segment_size: tl.constexpr,
     block_size: tl.constexpr,
     is_causal: tl.constexpr,
@@ -296,7 +338,9 @@ def softmax_partial_stats_kernel(
         # causal boundary: Q position where this KV chunk starts to be valid
         # Q[i] can attend K[j] if i >= j
         # For KV chunk at kv_offset, Q[i] can attend if i >= kv_offset
-        num_iters_before_causal = (chunk_start + (block_id + 1) * block_size - 1 - kv_offset) // segment_size
+        num_iters_before_causal = (
+            chunk_start + (block_id + 1) * block_size - 1 - kv_offset
+        ) // segment_size
         num_iters_before_causal = tl.minimum(num_iters_before_causal, num_iters)
         num_iters_before_causal = tl.maximum(num_iters_before_causal, 0)
     else:
@@ -307,8 +351,17 @@ def softmax_partial_stats_kernel(
     l_i = tl.zeros([block_size], dtype=tl.float32)
 
     # Input pointer
-    input_ptr = In + batch_id * input_stride_0 + head_id * input_stride_1 + block_id * block_size * input_stride_2
-    input_ptr = input_ptr + tl.arange(0, segment_size) + tl.arange(0, block_size)[:, None] * input_stride_2
+    input_ptr = (
+        In
+        + batch_id * input_stride_0
+        + head_id * input_stride_1
+        + block_id * block_size * input_stride_2
+    )
+    input_ptr = (
+        input_ptr
+        + tl.arange(0, segment_size)
+        + tl.arange(0, block_size)[:, None] * input_stride_2
+    )
 
     # Compute max and sum (before causal boundary)
     for iter in range(0, num_iters_before_causal):
@@ -329,7 +382,9 @@ def softmax_partial_stats_kernel(
             if iter < num_iters:
                 X = tl.load(input_ptr + iter * segment_size).to(tl.float32) * scale
                 # causal mask: Q[i] >= K[j] + kv_offset
-                mask = offs_q[:, None] >= (offs_k[None, :] + iter * segment_size + kv_offset)
+                mask = offs_q[:, None] >= (
+                    offs_k[None, :] + iter * segment_size + kv_offset
+                )
                 X = tl.where(mask, X, -1.0e6)
                 m_local = tl.max(X, 1)
                 m_new = tl.maximum(m_i, m_local)
@@ -342,8 +397,18 @@ def softmax_partial_stats_kernel(
                 m_i = m_new
 
     # Output pointers
-    m_ptr = M_out + batch_id * stats_stride_0 + head_id * stats_stride_1 + block_id * block_size
-    l_ptr = L_out + batch_id * stats_stride_0 + head_id * stats_stride_1 + block_id * block_size
+    m_ptr = (
+        M_out
+        + batch_id * stats_stride_0
+        + head_id * stats_stride_1
+        + block_id * block_size
+    )
+    l_ptr = (
+        L_out
+        + batch_id * stats_stride_0
+        + head_id * stats_stride_1
+        + block_id * block_size
+    )
 
     offs = tl.arange(0, block_size)
     tl.store(m_ptr + offs, m_i.to(M_out.type.element_ty))
@@ -393,15 +458,27 @@ def softmax_normalize_block_sum_kernel(
 
     # For causal: compute boundary
     if is_causal:
-        num_iters_before_causal = (chunk_start + (block_id + 1) * block_size - 1 - kv_offset) // segment_size
+        num_iters_before_causal = (
+            chunk_start + (block_id + 1) * block_size - 1 - kv_offset
+        ) // segment_size
         num_iters_before_causal = tl.minimum(num_iters_before_causal, num_iters)
         num_iters_before_causal = tl.maximum(num_iters_before_causal, 0)
     else:
         num_iters_before_causal = num_iters
 
     # Load global stats
-    m_ptr = M_global + batch_id * stats_stride_0 + head_id * stats_stride_1 + block_id * block_size
-    l_ptr = L_global + batch_id * stats_stride_0 + head_id * stats_stride_1 + block_id * block_size
+    m_ptr = (
+        M_global
+        + batch_id * stats_stride_0
+        + head_id * stats_stride_1
+        + block_id * block_size
+    )
+    l_ptr = (
+        L_global
+        + batch_id * stats_stride_0
+        + head_id * stats_stride_1
+        + block_id * block_size
+    )
 
     offs = tl.arange(0, block_size)
     m_global = tl.load(m_ptr + offs).to(tl.float32)
@@ -411,11 +488,25 @@ def softmax_normalize_block_sum_kernel(
     l_global_inv = 1.0 / l_global_safe
 
     # Input pointer
-    input_ptr = In + batch_id * input_stride_0 + head_id * input_stride_1 + block_id * block_size * input_stride_2
-    input_ptr = input_ptr + tl.arange(0, segment_size) + tl.arange(0, block_size)[:, None] * input_stride_2
+    input_ptr = (
+        In
+        + batch_id * input_stride_0
+        + head_id * input_stride_1
+        + block_id * block_size * input_stride_2
+    )
+    input_ptr = (
+        input_ptr
+        + tl.arange(0, segment_size)
+        + tl.arange(0, block_size)[:, None] * input_stride_2
+    )
 
     # Output pointer
-    output_ptr = Out + batch_id * output_stride_0 + head_id * output_stride_1 + block_id * output_stride_2
+    output_ptr = (
+        Out
+        + batch_id * output_stride_0
+        + head_id * output_stride_1
+        + block_id * output_stride_2
+    )
     output_ptr = output_ptr + tl.arange(0, segment_size // block_size)
 
     sum_mask = offs_q[:, None] < real_q_len
@@ -428,7 +519,9 @@ def softmax_normalize_block_sum_kernel(
         X = tl.reshape(X, (block_size, segment_size // block_size, block_size))
         X = tl.sum(X, 2)
         X = tl.sum(X, 0)
-        tl.store(output_ptr + iter * segment_size // block_size, X.to(Out.type.element_ty))
+        tl.store(
+            output_ptr + iter * segment_size // block_size, X.to(Out.type.element_ty)
+        )
 
     # Handle causal boundary
     if is_causal:
@@ -436,28 +529,45 @@ def softmax_normalize_block_sum_kernel(
             if iter < num_iters:
                 X = tl.load(input_ptr + iter * segment_size).to(tl.float32) * scale
                 # causal mask: Q[i] >= K[j] + kv_offset
-                causal_mask = offs_q[:, None] >= (offs_k[None, :] + iter * segment_size + kv_offset)
+                causal_mask = offs_q[:, None] >= (
+                    offs_k[None, :] + iter * segment_size + kv_offset
+                )
                 X = tl.where(causal_mask, X, -1.0e6)
                 X = tl.exp2(X - m_global[:, None]) * l_global_inv[:, None]
                 X = tl.where(sum_mask, X, 0)
                 X = tl.reshape(X, (block_size, segment_size // block_size, block_size))
                 X = tl.sum(X, 2)
                 X = tl.sum(X, 0)
-                tl.store(output_ptr + iter * segment_size // block_size, X.to(Out.type.element_ty))
+                tl.store(
+                    output_ptr + iter * segment_size // block_size,
+                    X.to(Out.type.element_ty),
+                )
 
         # Zero out future blocks
         for iter in range(num_iters_before_causal + 1, num_iters):
             X = tl.zeros([segment_size // block_size], dtype=tl.float32)
-            tl.store(output_ptr + iter * segment_size // block_size, X.to(Out.type.element_ty))
+            tl.store(
+                output_ptr + iter * segment_size // block_size,
+                X.to(Out.type.element_ty),
+            )
 
 
 @triton.jit
 def flat_group_gemm_fuse_reshape_kernel(
-    Q, K, Out,
-    stride_qz, stride_qh, stride_qn,
-    stride_kz, stride_kh, stride_kn,
-    stride_oz, stride_oh, stride_on,
-    chunk_start, chunk_end,
+    Q,
+    K,
+    Out,
+    stride_qz,
+    stride_qh,
+    stride_qn,
+    stride_kz,
+    stride_kh,
+    stride_kn,
+    stride_oz,
+    stride_oh,
+    stride_on,
+    chunk_start,
+    chunk_end,
     H: tl.constexpr,
     STRIDE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
@@ -502,12 +612,31 @@ def flat_group_gemm_fuse_reshape_kernel(
             return
 
     # Q pointer: sample from (stride-1) position, step backwards
-    Q_ptrs = Q + batch_id * stride_qz + head_id * stride_qh + block_m * BLOCK_M * STRIDE * stride_qn
-    Q_ptrs = Q_ptrs + tl.arange(0, BLOCK_M)[:, None] * (stride_qn * STRIDE) + tl.arange(0, HEAD_DIM)[None, :] + stride_qn * (STRIDE - 1)
+    Q_ptrs = (
+        Q
+        + batch_id * stride_qz
+        + head_id * stride_qh
+        + block_m * BLOCK_M * STRIDE * stride_qn
+    )
+    Q_ptrs = (
+        Q_ptrs
+        + tl.arange(0, BLOCK_M)[:, None] * (stride_qn * STRIDE)
+        + tl.arange(0, HEAD_DIM)[None, :]
+        + stride_qn * (STRIDE - 1)
+    )
 
     # K pointer: sample from 0 position, step forwards
-    K_ptrs = K + batch_id * stride_kz + head_id * stride_kh + block_n * BLOCK_N * STRIDE * stride_kn
-    K_ptrs = K_ptrs + tl.arange(0, BLOCK_N)[None, :] * (stride_kn * STRIDE) + tl.arange(0, HEAD_DIM)[:, None]
+    K_ptrs = (
+        K
+        + batch_id * stride_kz
+        + head_id * stride_kh
+        + block_n * BLOCK_N * STRIDE * stride_kn
+    )
+    K_ptrs = (
+        K_ptrs
+        + tl.arange(0, BLOCK_N)[None, :] * (stride_kn * STRIDE)
+        + tl.arange(0, HEAD_DIM)[:, None]
+    )
 
     o = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
 
@@ -518,8 +647,18 @@ def flat_group_gemm_fuse_reshape_kernel(
         o += tl.dot(q, k)
 
     # Store output
-    O_ptrs = Out + batch_id * stride_oz + head_id * stride_oh + block_m * BLOCK_M * stride_on + block_n * BLOCK_N
-    O_ptrs = O_ptrs + tl.arange(0, BLOCK_M)[:, None] * stride_on + tl.arange(0, BLOCK_N)[None, :]
+    O_ptrs = (
+        Out
+        + batch_id * stride_oz
+        + head_id * stride_oh
+        + block_m * BLOCK_M * stride_on
+        + block_n * BLOCK_N
+    )
+    O_ptrs = (
+        O_ptrs
+        + tl.arange(0, BLOCK_M)[:, None] * stride_on
+        + tl.arange(0, BLOCK_N)[None, :]
+    )
 
     tl.store(O_ptrs, o.to(Out.type.element_ty))
 
@@ -527,6 +666,7 @@ def flat_group_gemm_fuse_reshape_kernel(
 # ============================================================
 # Triton Kernel Wrappers
 # ============================================================
+
 
 def softmax_fuse_block_sum(
     attn_weights_slice: torch.Tensor,
@@ -560,15 +700,26 @@ def softmax_fuse_block_sum(
     """
     batch_size, num_heads, q_len, k_len = attn_weights_slice.shape
 
-    assert q_len % reshaped_block_size == 0, f"q_len {q_len} must be divisible by reshaped_block_size {reshaped_block_size}"
-    assert k_len % segment_size == 0, f"k_len {k_len} must be divisible by segment_size {segment_size}"
-    assert segment_size % reshaped_block_size == 0, f"segment_size {segment_size} must be divisible by reshaped_block_size {reshaped_block_size}"
+    assert q_len % reshaped_block_size == 0, (
+        f"q_len {q_len} must be divisible by reshaped_block_size {reshaped_block_size}"
+    )
+    assert k_len % segment_size == 0, (
+        f"k_len {k_len} must be divisible by segment_size {segment_size}"
+    )
+    assert segment_size % reshaped_block_size == 0, (
+        f"segment_size {segment_size} must be divisible by reshaped_block_size {reshaped_block_size}"
+    )
     assert attn_weights_slice.stride(-1) == 1, "Last dimension must be contiguous"
 
     output = torch.empty(
-        (batch_size, num_heads, q_len // reshaped_block_size, k_len // reshaped_block_size),
+        (
+            batch_size,
+            num_heads,
+            q_len // reshaped_block_size,
+            k_len // reshaped_block_size,
+        ),
         dtype=attn_weights_slice.dtype,
-        device=attn_weights_slice.device
+        device=attn_weights_slice.device,
     )
 
     grid = (q_len // reshaped_block_size, num_heads, batch_size)
@@ -656,12 +807,12 @@ def softmax_compute_partial_stats(
     m_out = torch.empty(
         (batch_size, num_heads, q_len),
         dtype=torch.float32,
-        device=attn_weights_slice.device
+        device=attn_weights_slice.device,
     )
     l_out = torch.empty(
         (batch_size, num_heads, q_len),
         dtype=torch.float32,
-        device=attn_weights_slice.device
+        device=attn_weights_slice.device,
     )
 
     grid = (q_len // reshaped_block_size, num_heads, batch_size)
@@ -709,7 +860,6 @@ def merge_softmax_stats(
     assert len(m_chunks) > 0
 
     # Use log2 scale to match kernel (exp2)
-    LOG2E = 1.4426950408889634
 
     m_global = m_chunks[0].clone()
     l_global = l_chunks[0].clone()
@@ -720,7 +870,9 @@ def merge_softmax_stats(
 
         m_new = torch.maximum(m_global, m_chunk)
         # exp2(m - m_new) = 2^(m - m_new)
-        l_global = l_global * torch.pow(2.0, m_global - m_new) + l_chunk * torch.pow(2.0, m_chunk - m_new)
+        l_global = l_global * torch.pow(2.0, m_global - m_new) + l_chunk * torch.pow(
+            2.0, m_chunk - m_new
+        )
         m_global = m_new
 
     return m_global, l_global
@@ -768,9 +920,14 @@ def softmax_normalize_and_block_sum(
     assert attn_weights_slice.stride(-1) == 1
 
     output = torch.empty(
-        (batch_size, num_heads, q_len // reshaped_block_size, k_len // reshaped_block_size),
+        (
+            batch_size,
+            num_heads,
+            q_len // reshaped_block_size,
+            k_len // reshaped_block_size,
+        ),
         dtype=attn_weights_slice.dtype,
-        device=attn_weights_slice.device
+        device=attn_weights_slice.device,
     )
 
     grid = (q_len // reshaped_block_size, num_heads, batch_size)
@@ -845,16 +1002,24 @@ def flat_group_gemm_fuse_reshape(
     output = torch.zeros(
         (batch_size, num_heads, q_len // stride, kv_len // stride),
         dtype=query_states.dtype,
-        device=query_states.device
+        device=query_states.device,
     )
 
     # Use cached block size (avoids repeated GPU property queries)
     BLOCK_M, BLOCK_N = _get_gemm_block_size()
 
-    assert q_len % (stride * BLOCK_M) == 0, f"q_len {q_len} must be divisible by stride*BLOCK_M {stride * BLOCK_M}"
-    assert kv_len % (stride * BLOCK_N) == 0, f"kv_len {kv_len} must be divisible by stride*BLOCK_N {stride * BLOCK_N}"
+    assert q_len % (stride * BLOCK_M) == 0, (
+        f"q_len {q_len} must be divisible by stride*BLOCK_M {stride * BLOCK_M}"
+    )
+    assert kv_len % (stride * BLOCK_N) == 0, (
+        f"kv_len {kv_len} must be divisible by stride*BLOCK_N {stride * BLOCK_N}"
+    )
 
-    grid = (q_len // stride // BLOCK_M, kv_len // stride // BLOCK_N, batch_size * num_heads)
+    grid = (
+        q_len // stride // BLOCK_M,
+        kv_len // stride // BLOCK_N,
+        batch_size * num_heads,
+    )
 
     flat_group_gemm_fuse_reshape_kernel[grid](
         query_states,
@@ -885,6 +1050,7 @@ def flat_group_gemm_fuse_reshape(
 # ============================================================
 # Block Selection Utilities
 # ============================================================
+
 
 def find_blocks_chunked(
     input_tensor: torch.Tensor,
@@ -920,7 +1086,9 @@ def find_blocks_chunked(
     Returns:
         Boolean mask [batch, heads, q_blocks, k_blocks] indicating selected blocks
     """
-    assert threshold is None or num_to_choose is None, "Only one of threshold or num_to_choose can be specified"
+    assert threshold is None or num_to_choose is None, (
+        "Only one of threshold or num_to_choose can be specified"
+    )
 
     batch_size, head_num, chunk_num, block_num = input_tensor.shape
 
@@ -933,13 +1101,19 @@ def find_blocks_chunked(
         mask = torch.ones_like(input_tensor, dtype=torch.bool)
         if causal:
             mask[:, :, :, current_index : current_index + chunk_num] = torch.tril(
-                torch.ones(1, head_num, chunk_num, chunk_num, device=input_tensor.device)
+                torch.ones(
+                    1, head_num, chunk_num, chunk_num, device=input_tensor.device
+                )
             )
             mask[:, :, current_index + chunk_num :, :] = 0
             return torch.cat(
                 [
-                    torch.ones_like(input_tensor, dtype=torch.bool)[:, :, 0 : current_index + 1],
-                    torch.zeros_like(input_tensor, dtype=torch.bool)[:, :, current_index + 1 :],
+                    torch.ones_like(input_tensor, dtype=torch.bool)[
+                        :, :, 0 : current_index + 1
+                    ],
+                    torch.zeros_like(input_tensor, dtype=torch.bool)[
+                        :, :, current_index + 1 :
+                    ],
                 ],
                 dim=-1,
             )
@@ -954,9 +1128,9 @@ def find_blocks_chunked(
         total_sum = input_tensor.sum(dim=-1, keepdim=True)
         if isinstance(threshold, torch.Tensor):
             threshold = threshold.to(torch.float32)
-            required_sum = total_sum * threshold.unsqueeze(0).unsqueeze(-1).unsqueeze(-1).expand(
-                (batch_size, head_num, chunk_num, 1)
-            ).to(input_tensor.device)
+            required_sum = total_sum * threshold.unsqueeze(0).unsqueeze(-1).unsqueeze(
+                -1
+            ).expand((batch_size, head_num, chunk_num, 1)).to(input_tensor.device)
         else:
             required_sum = total_sum * threshold
 
@@ -981,7 +1155,9 @@ def find_blocks_chunked(
             # Prepend mandatory blocks' contribution
             sorted_values = torch.cat(
                 [
-                    torch.zeros((batch_size, head_num, chunk_num, 1), device=input_tensor.device),
+                    torch.zeros(
+                        (batch_size, head_num, chunk_num, 1), device=input_tensor.device
+                    ),
                     torch.where(mask, input_tensor, 0).sum(dim=-1, keepdim=True),
                     sorted_values[:, :, :, :-2],
                 ],
@@ -998,7 +1174,9 @@ def find_blocks_chunked(
             # Compute cumulative sum (excluding current block)
             cumulative_sum_without_self = torch.cat(
                 [
-                    torch.zeros((batch_size, head_num, chunk_num, 1), device=input_tensor.device),
+                    torch.zeros(
+                        (batch_size, head_num, chunk_num, 1), device=input_tensor.device
+                    ),
                     sorted_values[:, :, :, 0:-1],
                 ],
                 dim=-1,
@@ -1013,7 +1191,11 @@ def find_blocks_chunked(
             index = index.view(batch_size, head_num * chunk_num, block_num)
 
             # Mark selected blocks
-            mask[:, torch.arange(mask.shape[1], device=mask.device).unsqueeze(dim=-1), index] = True
+            mask[
+                :,
+                torch.arange(mask.shape[1], device=mask.device).unsqueeze(dim=-1),
+                index,
+            ] = True
             mask = mask.view(batch_size, head_num, chunk_num, block_num)
         else:
             # Non-causal: simple threshold-based selection
@@ -1023,7 +1205,9 @@ def find_blocks_chunked(
 
             cumulative_sum_without_self = torch.cat(
                 [
-                    torch.zeros((batch_size, head_num, chunk_num, 1), device=input_tensor.device),
+                    torch.zeros(
+                        (batch_size, head_num, chunk_num, 1), device=input_tensor.device
+                    ),
                     sorted_values[:, :, :, 0:-1],
                 ],
                 dim=-1,
@@ -1034,7 +1218,11 @@ def find_blocks_chunked(
 
             mask = mask.view(batch_size, head_num * chunk_num, block_num)
             index = index.view(batch_size, head_num * chunk_num, block_num)
-            mask[:, torch.arange(mask.shape[1], device=mask.device).unsqueeze(dim=-1), index] = True
+            mask[
+                :,
+                torch.arange(mask.shape[1], device=mask.device).unsqueeze(dim=-1),
+                index,
+            ] = True
             mask = mask.view(batch_size, head_num, chunk_num, block_num)
     else:
         raise NotImplementedError("Block num selection (num_to_choose) not implemented")
@@ -1105,6 +1293,7 @@ def create_causal_mask(
 # Main Estimation Function
 # ============================================================
 
+
 def xattn_estimate(
     query_states: torch.Tensor,
     key_states: torch.Tensor,
@@ -1155,7 +1344,9 @@ def xattn_estimate(
     """
     batch_size, num_kv_head, k_len, head_dim = key_states.shape
     batch_size, num_q_head, q_len, head_dim = query_states.shape
-    assert num_q_head == num_kv_head, "GQA not supported in estimation (heads must match)"
+    assert num_q_head == num_kv_head, (
+        "GQA not supported in estimation (heads must match)"
+    )
 
     # Compute padding to align with chunk_size
     k_num_to_pad = ((k_len + chunk_size - 1) // chunk_size) * chunk_size - k_len
@@ -1172,7 +1363,9 @@ def xattn_estimate(
     else:
         pad_key_states = key_states
     if q_num_to_pad > 0:
-        pad_query_states = F.pad(query_states, (0, 0, 0, q_num_to_pad), value=0).to("cuda")
+        pad_query_states = F.pad(query_states, (0, 0, 0, q_num_to_pad), value=0).to(
+            "cuda"
+        )
     else:
         pad_query_states = query_states
 
@@ -1195,7 +1388,10 @@ def xattn_estimate(
         )
         # Q reshape (inverse): concat([Q[:,:,(stride-1-q)::stride,:] for q in range(stride)])
         reshaped_query = torch.cat(
-            [(pad_query_states[:, :, (stride - 1 - q)::stride, :]) for q in range(stride)],
+            [
+                (pad_query_states[:, :, (stride - 1 - q) :: stride, :])
+                for q in range(stride)
+            ],
             dim=-1,
         )
 
@@ -1210,13 +1406,19 @@ def xattn_estimate(
                 pad_query_states[
                     :,
                     :,
-                    (chunk_idx * reshaped_chunk_size) * stride : (chunk_idx * reshaped_chunk_size + reshaped_chunk_size) * stride,
+                    (chunk_idx * reshaped_chunk_size) * stride : (
+                        chunk_idx * reshaped_chunk_size + reshaped_chunk_size
+                    )
+                    * stride,
                     :,
                 ],
                 pad_key_states,
                 stride,
-                (k_block_num - q_block_num) * reshaped_block_size + chunk_idx * reshaped_chunk_size,
-                (k_block_num - q_block_num) * reshaped_block_size + chunk_idx * reshaped_chunk_size + reshaped_chunk_size,
+                (k_block_num - q_block_num) * reshaped_block_size
+                + chunk_idx * reshaped_chunk_size,
+                (k_block_num - q_block_num) * reshaped_block_size
+                + chunk_idx * reshaped_chunk_size
+                + reshaped_chunk_size,
                 is_causal=causal,
             )
 
@@ -1227,8 +1429,11 @@ def xattn_estimate(
                 attn_weights_slice,
                 reshaped_block_size,
                 min(4096, reshaped_block_size),
-                (k_block_num - q_block_num) * reshaped_block_size + chunk_idx * reshaped_chunk_size,
-                (k_block_num - q_block_num) * reshaped_block_size + chunk_idx * reshaped_chunk_size + reshaped_chunk_size,
+                (k_block_num - q_block_num) * reshaped_block_size
+                + chunk_idx * reshaped_chunk_size,
+                (k_block_num - q_block_num) * reshaped_block_size
+                + chunk_idx * reshaped_chunk_size
+                + reshaped_chunk_size,
                 k_reshaped_seq_len - k_reshaped_num_to_pad,
                 1.4426950408889634 / math.sqrt(head_dim) / stride / norm,
                 is_causal=causal,
@@ -1236,8 +1441,11 @@ def xattn_estimate(
         else:
             # PyTorch fallback path
             chunked_query = reshaped_query[
-                :, :,
-                chunk_idx * reshaped_chunk_size : (chunk_idx * reshaped_chunk_size + reshaped_chunk_size),
+                :,
+                :,
+                chunk_idx * reshaped_chunk_size : (
+                    chunk_idx * reshaped_chunk_size + reshaped_chunk_size
+                ),
                 :,
             ]
 
@@ -1245,37 +1453,58 @@ def xattn_estimate(
             attn_weights_slice = torch.matmul(
                 chunked_query, reshaped_key.transpose(2, 3)
             ).to("cuda")
-            attn_weights_slice = attn_weights_slice / math.sqrt(head_dim) / stride / norm
+            attn_weights_slice = (
+                attn_weights_slice / math.sqrt(head_dim) / stride / norm
+            )
 
             # Apply causal mask
             if causal:
                 offset_token_chunk_num = k_chunk_num - q_chunk_num
                 causal_mask = torch.zeros(
-                    (batch_size, num_q_head, reshaped_chunk_size, reshaped_chunk_size * k_chunk_num),
+                    (
+                        batch_size,
+                        num_q_head,
+                        reshaped_chunk_size,
+                        reshaped_chunk_size * k_chunk_num,
+                    ),
                     device=key_states.device,
                 )
                 causal_mask[:, :, :, (-k_reshaped_num_to_pad):] = float("-inf")
                 chunk_start = (chunk_idx + offset_token_chunk_num) * reshaped_chunk_size
                 chunk_end = chunk_start + reshaped_chunk_size
                 causal_mask[:, :, :, chunk_start:chunk_end] = torch.triu(
-                    torch.ones(1, num_q_head, reshaped_chunk_size, reshaped_chunk_size, device=key_states.device) * float("-inf"),
+                    torch.ones(
+                        1,
+                        num_q_head,
+                        reshaped_chunk_size,
+                        reshaped_chunk_size,
+                        device=key_states.device,
+                    )
+                    * float("-inf"),
                     diagonal=1,
                 )
                 if chunk_idx == q_chunk_num - 1 and q_num_to_pad // stride != 0:
-                    causal_mask[:, :, (-(q_num_to_pad // stride)):, :] = float("-inf")
+                    causal_mask[:, :, (-(q_num_to_pad // stride)) :, :] = float("-inf")
                 causal_mask[:, :, :, chunk_end:] = float("-inf")
                 attn_weights_slice = attn_weights_slice + causal_mask
 
             # Softmax
-            attn_weights_slice = F.softmax(attn_weights_slice, dim=-1, dtype=torch.float32).to(pad_query_states.dtype)
+            attn_weights_slice = F.softmax(
+                attn_weights_slice, dim=-1, dtype=torch.float32
+            ).to(pad_query_states.dtype)
 
             if chunk_idx == q_chunk_num - 1 and q_num_to_pad // stride != 0:
-                attn_weights_slice[:, :, (-(q_num_to_pad // stride)):, :] = 0
+                attn_weights_slice[:, :, (-(q_num_to_pad // stride)) :, :] = 0
 
             # Block sum
             attn_sum = (
                 attn_weights_slice.view(
-                    batch_size, num_kv_head, num_blocks_per_chunk, reshaped_block_size, -1, reshaped_block_size
+                    batch_size,
+                    num_kv_head,
+                    num_blocks_per_chunk,
+                    reshaped_block_size,
+                    -1,
+                    reshaped_block_size,
                 )
                 .sum(dim=-1)
                 .sum(dim=-2)
@@ -1308,7 +1537,12 @@ def xattn_estimate(
     # Apply causal mask to final output
     if causal:
         simple_masks[:, :, -q_block_num:, -q_block_num:] = torch.where(
-            torch.tril(torch.ones(q_block_num, q_block_num, dtype=bool, device=key_states.device), diagonal=0),
+            torch.tril(
+                torch.ones(
+                    q_block_num, q_block_num, dtype=bool, device=key_states.device
+                ),
+                diagonal=0,
+            ),
             simple_masks[:, :, -q_block_num:, -q_block_num:],
             False,
         )
@@ -1320,7 +1554,11 @@ def xattn_estimate(
     # Always keep diagonal (recent) blocks
     if keep_recent:
         eye_matrix = torch.eye(q_block_num, device=simple_masks.device, dtype=bool)
-        eye_matrix_expanded = eye_matrix.unsqueeze(0).unsqueeze(0).expand(1, num_kv_head, q_block_num, q_block_num)
+        eye_matrix_expanded = (
+            eye_matrix.unsqueeze(0)
+            .unsqueeze(0)
+            .expand(1, num_kv_head, q_block_num, q_block_num)
+        )
         simple_masks[:, :, -q_block_num:, -q_block_num:] = torch.where(
             eye_matrix_expanded, True, simple_masks[:, :, -q_block_num:, -q_block_num:]
         )
@@ -1343,7 +1581,9 @@ def compute_sparsity(mask: torch.Tensor, causal: bool = True) -> float:
 
     if causal:
         # Only count lower triangle
-        causal_mask = torch.tril(torch.ones(q_blocks, k_blocks, device=mask.device, dtype=torch.bool))
+        causal_mask = torch.tril(
+            torch.ones(q_blocks, k_blocks, device=mask.device, dtype=torch.bool)
+        )
         total_blocks = causal_mask.sum().item() * batch * heads
         selected_blocks = (mask & causal_mask.unsqueeze(0).unsqueeze(0)).sum().item()
     else:
@@ -1356,6 +1596,7 @@ def compute_sparsity(mask: torch.Tensor, causal: bool = True) -> float:
 # ============================================================
 # Chunked Estimation Function (for Chunked Prefill)
 # ============================================================
+
 
 def xattn_estimate_chunked(
     query_states: torch.Tensor,
@@ -1411,7 +1652,9 @@ def xattn_estimate_chunked(
 
     # Validate inputs
     assert k_len >= q_len, f"K length ({k_len}) must be >= Q length ({q_len})"
-    assert q_start_pos + q_len <= k_len, f"Q end position ({q_start_pos + q_len}) exceeds K length ({k_len})"
+    assert q_start_pos + q_len <= k_len, (
+        f"Q end position ({q_start_pos + q_len}) exceeds K length ({k_len})"
+    )
 
     # Calculate block counts
     q_block_num = (q_len + block_size - 1) // block_size
@@ -1447,7 +1690,7 @@ def xattn_estimate_chunked(
 
     # Calculate valid lengths in reshaped space (for masking padding)
     valid_q_reshaped = (original_q_len + stride - 1) // stride
-    valid_k_reshaped = (original_k_len + stride - 1) // stride
+    (original_k_len + stride - 1) // stride
 
     if use_triton:
         # Compute chunk boundaries in reshaped space
@@ -1461,7 +1704,7 @@ def xattn_estimate_chunked(
             key_states,
             stride,
             chunk_start,  # q_start in reshaped space
-            chunk_end,    # q_end in reshaped space (padded)
+            chunk_end,  # q_end in reshaped space (padded)
             is_causal=causal,
         )
 
@@ -1497,7 +1740,10 @@ def xattn_estimate_chunked(
 
         # Reshape Q (inverse mode)
         reshaped_query = torch.cat(
-            [(query_states[:, :, (stride - 1 - q)::stride, :]) for q in range(stride)],
+            [
+                (query_states[:, :, (stride - 1 - q) :: stride, :])
+                for q in range(stride)
+            ],
             dim=-1,
         )
 
@@ -1510,9 +1756,9 @@ def xattn_estimate_chunked(
         reshaped_key_f32 = reshaped_key.to(torch.float32)
 
         # Compute attention weights: (B, H, q_len/stride, k_len/stride)
-        attn_weights = torch.matmul(
-            reshaped_query_f32, reshaped_key_f32.transpose(2, 3)
-        ) * scale
+        attn_weights = (
+            torch.matmul(reshaped_query_f32, reshaped_key_f32.transpose(2, 3)) * scale
+        )
 
         # Apply causal mask (matching Triton's logic exactly)
         if causal:
@@ -1521,11 +1767,15 @@ def xattn_estimate_chunked(
             chunk_start = q_start_block * reshaped_block_size
 
             # Create position indices in reshaped space
-            q_positions = torch.arange(reshaped_q_len, device=attn_weights.device) + chunk_start
+            q_positions = (
+                torch.arange(reshaped_q_len, device=attn_weights.device) + chunk_start
+            )
             k_positions = torch.arange(reshaped_k_len, device=attn_weights.device)
 
             # Triton causal mask: q_pos >= k_pos
-            causal_mask = q_positions[:, None] >= k_positions[None, :]  # (reshaped_q_len, reshaped_k_len)
+            causal_mask = (
+                q_positions[:, None] >= k_positions[None, :]
+            )  # (reshaped_q_len, reshaped_k_len)
 
             # Apply causal mask: set future positions to -1e6 (matching Triton)
             attn_weights = attn_weights.masked_fill(
@@ -1546,21 +1796,27 @@ def xattn_estimate_chunked(
         # real_q_len = chunk_start + valid_q_reshaped
         chunk_start = q_start_block * reshaped_block_size
         real_q_len = chunk_start + valid_q_reshaped
-        q_positions = torch.arange(reshaped_q_len, device=attn_weights.device) + chunk_start
+        q_positions = (
+            torch.arange(reshaped_q_len, device=attn_weights.device) + chunk_start
+        )
         valid_q_mask = q_positions < real_q_len  # (reshaped_q_len,)
 
         # Zero out invalid Q positions
         attn_weights = attn_weights * valid_q_mask.view(1, 1, -1, 1).float()
 
         # Aggregate to block level (keep in float32)
-        attn_sum = attn_weights.view(
-            batch_size,
-            num_heads,
-            q_block_num,
-            reshaped_block_size,
-            k_block_num,
-            reshaped_block_size,
-        ).sum(dim=-1).sum(dim=-2)
+        attn_sum = (
+            attn_weights.view(
+                batch_size,
+                num_heads,
+                q_block_num,
+                reshaped_block_size,
+                k_block_num,
+                reshaped_block_size,
+            )
+            .sum(dim=-1)
+            .sum(dim=-2)
+        )
 
         # Convert back to input dtype for consistency
         attn_sum = attn_sum.to(query_states.dtype)
@@ -1582,6 +1838,6 @@ def xattn_estimate_chunked(
         for q_blk_idx in range(q_block_num):
             q_blk_global = q_start_block + q_blk_idx
             if q_blk_global + 1 < k_block_num:
-                simple_mask[:, :, q_blk_idx, q_blk_global + 1:] = False
+                simple_mask[:, :, q_blk_idx, q_blk_global + 1 :] = False
 
     return attn_sum, simple_mask

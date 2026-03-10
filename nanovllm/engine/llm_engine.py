@@ -15,7 +15,6 @@ from nanovllm.utils.memory_observer import MemoryObserver
 
 
 class LLMEngine:
-
     def __init__(self, model, **kwargs):
         config_fields = {field.name for field in fields(Config)}
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
@@ -30,10 +29,12 @@ class LLMEngine:
             self.ps.append(process)
             self.events.append(event)
         self.model_runner = ModelRunner(config, 0, self.events)
-        self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True, trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            config.model, use_fast=True, trust_remote_code=True
+        )
         # Get EOS token(s) from config (may be int or list, e.g., GLM-4 uses list)
         # Prefer hf_config.eos_token_id which contains full list, fallback to tokenizer
-        eos_from_config = getattr(config.hf_config, 'eos_token_id', None)
+        eos_from_config = getattr(config.hf_config, "eos_token_id", None)
         if eos_from_config is not None:
             config.eos = eos_from_config
         else:
@@ -57,7 +58,8 @@ class LLMEngine:
 
     def step(self):
         import os
-        debug_enabled = os.environ.get('NANOVLLM_LOG_LEVEL', 'INFO').upper() == 'DEBUG'
+
+        debug_enabled = os.environ.get("NANOVLLM_LOG_LEVEL", "INFO").upper() == "DEBUG"
 
         seqs, is_prefill = self.scheduler.schedule()
         if debug_enabled:
@@ -67,7 +69,9 @@ class LLMEngine:
         if not is_prefill:
             # Decode mode: calculate TPOT from previous decode step
             if InferenceObserver.tpot_start != 0:
-                InferenceObserver.tpot = perf_counter_ns() - InferenceObserver.tpot_start
+                InferenceObserver.tpot = (
+                    perf_counter_ns() - InferenceObserver.tpot_start
+                )
             InferenceObserver.tpot_start = perf_counter_ns()
 
         token_ids = self.model_runner.call("run", seqs, is_prefill)
@@ -75,16 +79,22 @@ class LLMEngine:
         if is_prefill:
             # Calculate TTFT after prefill completes (including chunked prefill)
             if InferenceObserver.ttft_start != 0:
-                InferenceObserver.ttft = perf_counter_ns() - InferenceObserver.ttft_start
+                InferenceObserver.ttft = (
+                    perf_counter_ns() - InferenceObserver.ttft_start
+                )
                 InferenceObserver.reset_ttft()
         self.scheduler.postprocess(seqs, token_ids)
-        outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
+        outputs = [
+            (seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished
+        ]
 
         if debug_enabled and outputs:
             for seq_id, tokens in outputs:
-                print(f"[DEBUG LLMEngine.step] Sequence {seq_id} finished, {len(tokens)} tokens generated")
+                print(
+                    f"[DEBUG LLMEngine.step] Sequence {seq_id} finished, {len(tokens)} tokens generated"
+                )
 
-        #> Calculate number of tokens processed
+        # > Calculate number of tokens processed
         num_tokens = sum(len(seq) for seq in seqs) if is_prefill else -len(seqs)
         return outputs, num_tokens
 
@@ -98,8 +108,9 @@ class LLMEngine:
         use_tqdm: bool = True,
     ) -> list[str]:
         import os
-        log_level = os.environ.get('NANOVLLM_LOG_LEVEL', 'INFO')
-        debug_enabled = log_level.upper() == 'DEBUG'
+
+        log_level = os.environ.get("NANOVLLM_LOG_LEVEL", "INFO")
+        debug_enabled = log_level.upper() == "DEBUG"
 
         InferenceObserver.complete_reset()
         MemoryObserver.complete_reset()
@@ -110,23 +121,28 @@ class LLMEngine:
         for prompt, sp in zip(prompts, sampling_params):
             self.add_request(prompt, sp)
         outputs = {}
-        prefill_throughput = decode_throughput = 0.
+        prefill_throughput = decode_throughput = 0.0
         iteration = 0
-        last_output_count = 0
 
         while not self.is_finished():
             if debug_enabled and iteration % 100 == 0:
-                print(f"[DEBUG LLMEngine] Iteration {iteration}, finished_sequences={len(outputs)}, total_prompts={len(prompts)}")
+                print(
+                    f"[DEBUG LLMEngine] Iteration {iteration}, finished_sequences={len(outputs)}, total_prompts={len(prompts)}"
+                )
 
             # Timeout check (32K sample should finish within 20 minutes = 1200 seconds)
             if iteration == 0:
                 import time
+
                 start_time = time.time()
             elif debug_enabled and iteration % 100 == 0:
                 elapsed = time.time() - start_time
                 if elapsed > 1200:  # 20 minutes
-                    print(f"[WARNING] Test exceeded 20 minutes timeout! Iteration={iteration}, forcing exit.")
+                    print(
+                        f"[WARNING] Test exceeded 20 minutes timeout! Iteration={iteration}, forcing exit."
+                    )
                     import sys
+
                     sys.exit(1)
 
             t = perf_counter()
@@ -136,18 +152,23 @@ class LLMEngine:
                     prefill_throughput = num_tokens / (perf_counter() - t)
                 else:
                     decode_throughput = -num_tokens / (perf_counter() - t)
-                pbar.set_postfix({
-                    "Prefill": f"{int(prefill_throughput)}tok/s",
-                    "Decode": f"{int(decode_throughput)}tok/s",
-                    "ttft": f"{float(InferenceObserver.ttft) / 1e6}ms",
-                    "tpot": f"{float(InferenceObserver.tpot) / 1e6}ms",
-                })
+                pbar.set_postfix(
+                    {
+                        "Prefill": f"{int(prefill_throughput)}tok/s",
+                        "Decode": f"{int(decode_throughput)}tok/s",
+                        "ttft": f"{float(InferenceObserver.ttft) / 1e6}ms",
+                        "tpot": f"{float(InferenceObserver.tpot) / 1e6}ms",
+                    }
+                )
             for seq_id, token_ids in output:
                 outputs[seq_id] = token_ids
                 if use_tqdm:
                     pbar.update(1)
         outputs = [outputs[seq_id] for seq_id in sorted(outputs.keys())]
-        outputs = [{"text": self.tokenizer.decode(token_ids), "token_ids": token_ids} for token_ids in outputs]
+        outputs = [
+            {"text": self.tokenizer.decode(token_ids), "token_ids": token_ids}
+            for token_ids in outputs
+        ]
         if use_tqdm:
             pbar.close()
         return outputs

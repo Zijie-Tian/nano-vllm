@@ -29,11 +29,11 @@ Usage:
 """
 
 import os
+
 os.environ["NANOVLLM_LOG_LEVEL"] = "INFO"
 
 import argparse
 import json
-import re
 import gc
 import time
 import torch
@@ -54,6 +54,7 @@ DEFAULT_DATA_DIR = Path(__file__).parent / "data/ruler_64k"
 # ============================================================
 # Chat Template Conversion
 # ============================================================
+
 
 def convert_llama_to_glm4_format(prompt: str) -> str:
     """
@@ -96,8 +97,9 @@ def convert_llama_to_glm4_format(prompt: str) -> str:
 def is_glm_model(model_path: str) -> bool:
     """Check if the model is a GLM model based on config."""
     from transformers import AutoConfig
+
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-    return getattr(config, 'model_type', '') == 'chatglm'
+    return getattr(config, "model_type", "") == "chatglm"
 
 
 def convert_prompt_for_model(prompt: str, model_path: str) -> str:
@@ -105,6 +107,8 @@ def convert_prompt_for_model(prompt: str, model_path: str) -> str:
     if is_glm_model(model_path):
         return convert_llama_to_glm4_format(prompt)
     return prompt  # Keep original format for Llama and other models
+
+
 DEFAULT_MODEL = os.path.expanduser("~/models/Llama-3.1-8B-Instruct")
 # Note: max_model_len must be > max_input_len to leave room for output tokens
 # 64k benchmark has inputs up to 65536 tokens, so we need 65536 + 128 = 65664
@@ -112,9 +116,16 @@ DEFAULT_MAX_MODEL_LEN = 65664
 DEFAULT_MAX_NEW_TOKENS = 16  # Sufficient for NIAH single-value answers
 
 # Task categories for evaluation
-NIAH_TASKS = ["niah_single_1", "niah_single_2", "niah_single_3",
-              "niah_multikey_1", "niah_multikey_2", "niah_multikey_3",
-              "niah_multiquery", "niah_multivalue"]
+NIAH_TASKS = [
+    "niah_single_1",
+    "niah_single_2",
+    "niah_single_3",
+    "niah_multikey_1",
+    "niah_multikey_2",
+    "niah_multikey_3",
+    "niah_multiquery",
+    "niah_multivalue",
+]
 QA_TASKS = ["qa_1", "qa_2"]
 RECALL_TASKS = ["cwe", "fwe", "vt"]
 
@@ -124,6 +135,7 @@ ALL_TASKS = NIAH_TASKS + QA_TASKS + RECALL_TASKS
 # ============================================================
 # Data Loading
 # ============================================================
+
 
 def load_samples(filepath: Path, indices: Optional[List[int]] = None) -> List[dict]:
     """Load samples from a JSONL file."""
@@ -151,6 +163,7 @@ def count_samples(filepath: Path) -> int:
 # Ref: https://github.com/NVIDIA/RULER/blob/main/scripts/eval/synthetic/constants.py
 # ============================================================
 
+
 def string_match_all(output_text: str, expected_list: List[str]) -> float:
     """
     RULER official metric for NIAH, VT, CWE, FWE tasks.
@@ -159,13 +172,17 @@ def string_match_all(output_text: str, expected_list: List[str]) -> float:
 
     Returns recall score (0.0 to 1.0): fraction of expected values found in output.
     """
-    output_clean = output_text.replace('<|im_end|>', '').replace('\r', ' ').replace('\n', ' ')
+    output_clean = (
+        output_text.replace("<|im_end|>", "").replace("\r", " ").replace("\n", " ")
+    )
     output_lower = output_clean.lower()
 
     if not expected_list:
         return 1.0
 
-    found = sum(1.0 if exp.strip().lower() in output_lower else 0.0 for exp in expected_list)
+    found = sum(
+        1.0 if exp.strip().lower() in output_lower else 0.0 for exp in expected_list
+    )
     return found / len(expected_list)
 
 
@@ -177,16 +194,22 @@ def string_match_part(output_text: str, expected_list: List[str]) -> float:
 
     Returns 1.0 if ANY expected value is found, 0.0 otherwise.
     """
-    output_clean = output_text.replace('<|im_end|>', '').replace('\r', ' ').replace('\n', ' ')
+    output_clean = (
+        output_text.replace("<|im_end|>", "").replace("\r", " ").replace("\n", " ")
+    )
     output_lower = output_clean.lower()
 
     if not expected_list:
         return 1.0
 
-    return max(1.0 if exp.strip().lower() in output_lower else 0.0 for exp in expected_list)
+    return max(
+        1.0 if exp.strip().lower() in output_lower else 0.0 for exp in expected_list
+    )
 
 
-def evaluate_output(output_text: str, expected_outputs: List[str], task_name: str) -> Tuple[bool, float]:
+def evaluate_output(
+    output_text: str, expected_outputs: List[str], task_name: str
+) -> Tuple[bool, float]:
     """
     Evaluate model output using RULER official metrics.
 
@@ -208,6 +231,7 @@ def evaluate_output(output_text: str, expected_outputs: List[str], task_name: st
 # ============================================================
 # Test Runner
 # ============================================================
+
 
 def run_task_test(
     llm: LLM,
@@ -282,19 +306,23 @@ def run_task_test(
             correct += 1
         total_score += score
 
-        results.append({
-            "index": idx,
-            "expected": expected,
-            "output": output_text[:200],
-            "passed": passed,
-            "score": score,
-        })
+        results.append(
+            {
+                "index": idx,
+                "expected": expected,
+                "output": output_text[:200],
+                "passed": passed,
+                "score": score,
+            }
+        )
 
         if verbose:
             status = "✓ PASS" if passed else "✗ FAIL"
             exp_preview = str(expected[0])[:30] if expected else "N/A"
-            out_preview = output_text[:50].replace('\n', ' ')
-            print(f"    [{idx:3d}] {status} (score={score:.2f}) exp={exp_preview}... | out={out_preview}...")
+            out_preview = output_text[:50].replace("\n", " ")
+            print(
+                f"    [{idx:3d}] {status} (score={score:.2f}) exp={exp_preview}... | out={out_preview}..."
+            )
 
     # Cleanup last LLM instance in fresh mode
     if fresh_llm and current_llm is not None:
@@ -338,7 +366,6 @@ def run_ruler_benchmark(
     sparse_stride: int = 8,
     blasst_lambda: float = None,
     dtype: str = None,
-
 ) -> Dict:
     """
     Run RULER benchmark on multiple tasks.
@@ -370,19 +397,23 @@ def run_ruler_benchmark(
     else:
         indices = None
 
-    samples_desc = str(sample_indices) if sample_indices else (str(num_samples) if num_samples else 'all')
+    samples_desc = (
+        str(sample_indices)
+        if sample_indices
+        else (str(num_samples) if num_samples else "all")
+    )
 
     if not json_output:
-        print(f"\n{'='*60}")
-        print(f"RULER Benchmark")
-        print(f"{'='*60}")
+        print(f"\n{'=' * 60}")
+        print("RULER Benchmark")
+        print(f"{'=' * 60}")
         print(f"Model: {model_path}")
         print(f"Data dir: {data_dir}")
         print(f"Tasks: {len(tasks)}")
         print(f"Samples: {samples_desc}")
         print(f"CPU offload: {enable_cpu_offload}")
         print(f"Fresh LLM mode: {fresh_llm}")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
     # Enable DensityObserver for XAttention BSA
     if sparse_policy and sparse_policy.upper() == "XATTN_BSA":
@@ -410,6 +441,7 @@ def run_ruler_benchmark(
         llm_kwargs["num_kv_buffers"] = num_kv_buffers
     if sparse_policy:
         from nanovllm.config import SparsePolicyType
+
         sparse_policy_type = SparsePolicyType[sparse_policy]
         llm_kwargs["sparse_policy"] = sparse_policy_type
         # XAttention BSA specific parameters
@@ -451,8 +483,10 @@ def run_ruler_benchmark(
         task_results.append(result)
 
         if verbose and not json_output:
-            print(f"  -> {task_name}: {result['correct']}/{result['total']} "
-                  f"({result['accuracy']*100:.1f}%) avg_score={result['avg_score']:.3f}")
+            print(
+                f"  -> {task_name}: {result['correct']}/{result['total']} "
+                f"({result['accuracy'] * 100:.1f}%) avg_score={result['avg_score']:.3f}"
+            )
 
     total_time = time.time() - start_time
 
@@ -466,7 +500,11 @@ def run_ruler_benchmark(
     total_correct = sum(r["correct"] for r in task_results)
     total_samples = sum(r["total"] for r in task_results)
     overall_accuracy = total_correct / total_samples if total_samples > 0 else 0.0
-    avg_score = sum(r["avg_score"] for r in task_results) / len(task_results) if task_results else 0.0
+    avg_score = (
+        sum(r["avg_score"] for r in task_results) / len(task_results)
+        if task_results
+        else 0.0
+    )
 
     # Collect failed samples
     failed_samples = {}
@@ -477,25 +515,33 @@ def run_ruler_benchmark(
 
     # Print summary
     if not json_output:
-        print(f"\n{'='*60}")
-        print(f"RULER Benchmark Results")
-        print(f"{'='*60}")
+        print(f"\n{'=' * 60}")
+        print("RULER Benchmark Results")
+        print(f"{'=' * 60}")
         print(f"\n{'Task':<20} {'Correct':<10} {'Accuracy':<12} {'Avg Score':<12}")
-        print(f"{'-'*54}")
+        print(f"{'-' * 54}")
         for r in task_results:
-            print(f"{r['task']:<20} {r['correct']}/{r['total']:<7} {r['accuracy']*100:>6.1f}%      {r['avg_score']:.3f}")
-        print(f"{'-'*54}")
-        print(f"{'TOTAL':<20} {total_correct}/{total_samples:<7} {overall_accuracy*100:>6.1f}%      {avg_score:.3f}")
+            print(
+                f"{r['task']:<20} {r['correct']}/{r['total']:<7} {r['accuracy'] * 100:>6.1f}%      {r['avg_score']:.3f}"
+            )
+        print(f"{'-' * 54}")
+        print(
+            f"{'TOTAL':<20} {total_correct}/{total_samples:<7} {overall_accuracy * 100:>6.1f}%      {avg_score:.3f}"
+        )
         print(f"\nTime: {total_time:.1f}s")
 
         # Print DensityObserver summary if enabled
-        if sparse_policy and sparse_policy.upper() == "XATTN_BSA" and DensityObserver.is_enabled():
-            print(f"\n{'='*60}")
+        if (
+            sparse_policy
+            and sparse_policy.upper() == "XATTN_BSA"
+            and DensityObserver.is_enabled()
+        ):
+            print(f"\n{'=' * 60}")
             print("Density Statistics (XAttention BSA)")
-            print(f"{'='*60}")
+            print(f"{'=' * 60}")
             DensityObserver.print_summary()
 
-        print(f"{'='*60}\n")
+        print(f"{'=' * 60}\n")
 
     results = {
         "total_correct": total_correct,
@@ -515,8 +561,14 @@ def run_ruler_benchmark(
             "overall_accuracy": overall_accuracy,
             "avg_score": avg_score,
             "time": total_time,
-            "tasks": {r["task"]: {"correct": r["correct"], "total": r["total"], "accuracy": r["accuracy"]}
-                      for r in task_results},
+            "tasks": {
+                r["task"]: {
+                    "correct": r["correct"],
+                    "total": r["total"],
+                    "accuracy": r["accuracy"],
+                }
+                for r in task_results
+            },
             "failed_samples": failed_samples,
         }
         print(json.dumps(json_results, indent=2))
@@ -534,53 +586,131 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    parser.add_argument("--model", "-m", type=str, default=DEFAULT_MODEL,
-                        help=f"Path to model (default: {DEFAULT_MODEL})")
-    parser.add_argument("--data-dir", type=str, default=str(DEFAULT_DATA_DIR),
-                        help=f"Path to data directory (default: {DEFAULT_DATA_DIR})")
-    parser.add_argument("--datasets", type=str, default="",
-                        help="Comma-separated list of datasets to test (default: all)")
-    parser.add_argument("--num-samples", type=int, default=0,
-                        help="Number of samples per dataset (default: 0 = all)")
-    parser.add_argument("--sample-indices", type=str, default="",
-                        help="Comma-separated specific sample indices (e.g., 28,33,40)")
-    parser.add_argument("--max-model-len", type=int, default=DEFAULT_MAX_MODEL_LEN,
-                        help=f"Maximum model context length (default: {DEFAULT_MAX_MODEL_LEN})")
-    parser.add_argument("--max-new-tokens", type=int, default=DEFAULT_MAX_NEW_TOKENS,
-                        help=f"Maximum tokens to generate (default: {DEFAULT_MAX_NEW_TOKENS})")
-    parser.add_argument("--enable-offload", action="store_true",
-                        help="Enable CPU offload mode")
-    parser.add_argument("--num-gpu-blocks", type=int, default=4,
-                        help="Number of GPU blocks for CPU offload (default: 4)")
-    parser.add_argument("--block-size", type=int, default=4096,
-                        help="KV cache block size (default: 4096)")
-    parser.add_argument("--num-kv-buffers", type=int, default=4,
-                        help="Number of KV buffers for ring buffer (default: 4)")
-    parser.add_argument("--gpu-utilization", type=float, default=0.9,
-                        help="GPU memory utilization (default: 0.9)")
-    parser.add_argument("--use-cuda-graph", action="store_true",
-                        help="Enable CUDA graph")
-    parser.add_argument("--quiet", "-q", action="store_true",
-                        help="Quiet mode")
-    parser.add_argument("--fresh-llm", action="store_true",
-                        help="Reinitialize LLM for each sample (avoids state leakage)")
-    parser.add_argument("--json-output", action="store_true",
-                        help="Output results in JSON format")
-    parser.add_argument("--sparse-policy", type=str, default="",
-                        help="Sparse attention policy (FULL, QUEST, XATTN_BSA)")
+    parser.add_argument(
+        "--model",
+        "-m",
+        type=str,
+        default=DEFAULT_MODEL,
+        help=f"Path to model (default: {DEFAULT_MODEL})",
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default=str(DEFAULT_DATA_DIR),
+        help=f"Path to data directory (default: {DEFAULT_DATA_DIR})",
+    )
+    parser.add_argument(
+        "--datasets",
+        type=str,
+        default="",
+        help="Comma-separated list of datasets to test (default: all)",
+    )
+    parser.add_argument(
+        "--num-samples",
+        type=int,
+        default=0,
+        help="Number of samples per dataset (default: 0 = all)",
+    )
+    parser.add_argument(
+        "--sample-indices",
+        type=str,
+        default="",
+        help="Comma-separated specific sample indices (e.g., 28,33,40)",
+    )
+    parser.add_argument(
+        "--max-model-len",
+        type=int,
+        default=DEFAULT_MAX_MODEL_LEN,
+        help=f"Maximum model context length (default: {DEFAULT_MAX_MODEL_LEN})",
+    )
+    parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=DEFAULT_MAX_NEW_TOKENS,
+        help=f"Maximum tokens to generate (default: {DEFAULT_MAX_NEW_TOKENS})",
+    )
+    parser.add_argument(
+        "--enable-offload", action="store_true", help="Enable CPU offload mode"
+    )
+    parser.add_argument(
+        "--num-gpu-blocks",
+        type=int,
+        default=4,
+        help="Number of GPU blocks for CPU offload (default: 4)",
+    )
+    parser.add_argument(
+        "--block-size",
+        type=int,
+        default=4096,
+        help="KV cache block size (default: 4096)",
+    )
+    parser.add_argument(
+        "--num-kv-buffers",
+        type=int,
+        default=4,
+        help="Number of KV buffers for ring buffer (default: 4)",
+    )
+    parser.add_argument(
+        "--gpu-utilization",
+        type=float,
+        default=0.9,
+        help="GPU memory utilization (default: 0.9)",
+    )
+    parser.add_argument(
+        "--use-cuda-graph", action="store_true", help="Enable CUDA graph"
+    )
+    parser.add_argument("--quiet", "-q", action="store_true", help="Quiet mode")
+    parser.add_argument(
+        "--fresh-llm",
+        action="store_true",
+        help="Reinitialize LLM for each sample (avoids state leakage)",
+    )
+    parser.add_argument(
+        "--json-output", action="store_true", help="Output results in JSON format"
+    )
+    parser.add_argument(
+        "--sparse-policy",
+        type=str,
+        default="",
+        help="Sparse attention policy (FULL, QUEST, XATTN_BSA)",
+    )
     # XAttention BSA specific parameters
-    parser.add_argument("--sparse-threshold", type=float, default=0.9,
-                        help="XAttention BSA: cumulative attention threshold (0-1)")
-    parser.add_argument("--sparse-samples", type=int, default=128,
-                        help="XAttention BSA: samples per chunk for estimation")
-    parser.add_argument("--sparse-block-size", type=int, default=128,
-                        help="XAttention BSA: block size for estimation")
-    parser.add_argument("--sparse-stride", type=int, default=8,
-                        help="XAttention BSA: stride for Q/K downsampling")
-    parser.add_argument("--blasst-lambda", type=float, default=None,
-                        help="BLASST: fixed threshold lambda (overrides dynamic formula)")
-    parser.add_argument("--dtype", type=str, default=None,
-                        help="Model dtype (bfloat16, float16). Required for models with float32 default.")
+    parser.add_argument(
+        "--sparse-threshold",
+        type=float,
+        default=0.9,
+        help="XAttention BSA: cumulative attention threshold (0-1)",
+    )
+    parser.add_argument(
+        "--sparse-samples",
+        type=int,
+        default=128,
+        help="XAttention BSA: samples per chunk for estimation",
+    )
+    parser.add_argument(
+        "--sparse-block-size",
+        type=int,
+        default=128,
+        help="XAttention BSA: block size for estimation",
+    )
+    parser.add_argument(
+        "--sparse-stride",
+        type=int,
+        default=8,
+        help="XAttention BSA: stride for Q/K downsampling",
+    )
+    parser.add_argument(
+        "--blasst-lambda",
+        type=float,
+        default=None,
+        help="BLASST: fixed threshold lambda (overrides dynamic formula)",
+    )
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        default=None,
+        help="Model dtype (bfloat16, float16). Required for models with float32 default.",
+    )
 
     args = parser.parse_args()
 
@@ -627,5 +757,7 @@ if __name__ == "__main__":
         if results["overall_accuracy"] >= 0.5:
             print("test_ruler: PASSED")
         else:
-            print(f"test_ruler: FAILED (accuracy={results['overall_accuracy']*100:.1f}%)")
+            print(
+                f"test_ruler: FAILED (accuracy={results['overall_accuracy'] * 100:.1f}%)"
+            )
             exit(1)

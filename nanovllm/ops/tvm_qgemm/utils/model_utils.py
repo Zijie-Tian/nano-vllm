@@ -3,10 +3,8 @@
 from typing import Optional, List, Tuple, Dict, Any
 from pathlib import Path
 
-import os
 import logging
 import json
-import configparser
 import numpy as np
 
 logger = logging.getLogger("model_utils")
@@ -53,12 +51,12 @@ _PRESET_KERNELS = {
         [2, 8640, 3200, 1, 1],
         [2, 3200, 3200, 1, 1],
     ],
-    "hf-bitnet-large-intn": [    # 700M
+    "hf-bitnet-large-intn": [  # 700M
         [2, 1536, 4096, 1, 1],
         [2, 4096, 1536, 1, 1],
         [2, 1536, 1536, 1, 1],
     ],
-    "hf-bitnet-large-tq": [    # 700M
+    "hf-bitnet-large-tq": [  # 700M
         [2, 1536, 4096, 1, -1],
         [2, 4096, 1536, 1, -1],
         [2, 1536, 1536, 1, -1],
@@ -90,28 +88,28 @@ _PRESET_KERNELS = {
     ],
     "kvcache-2bit": [
         # K cache decode: M=seq_len, K=head_dim(128), N=1, m_groups=-1
-        [2, 128, 128, 1, -1],   # seq_len=128 (shared with V cache due to same shape)
-        [2, 512, 128, 1, -1],   # seq_len=512
+        [2, 128, 128, 1, -1],  # seq_len=128 (shared with V cache due to same shape)
+        [2, 512, 128, 1, -1],  # seq_len=512
         [2, 1024, 128, 1, -1],  # seq_len=1024
         [2, 4096, 128, 1, -1],  # seq_len=4096
         [2, 8192, 128, 1, -1],  # seq_len=8192
         # V cache decode: M=head_dim(128), K=seq_len, N=1, m_groups=-1
         # Note: [2, 128, 128, 1, -1] is same as K cache seq_len=128, so skipped
-        [2, 128, 512, 1, -1],   # seq_len=512
+        [2, 128, 512, 1, -1],  # seq_len=512
         [2, 128, 1024, 1, -1],  # seq_len=1024
         [2, 128, 4096, 1, -1],  # seq_len=4096
         [2, 128, 8192, 1, -1],  # seq_len=8192
     ],
     "kvcache-4bit": [
         # K cache decode: M=seq_len, K=head_dim(128), N=1, m_groups=-1
-        [4, 128, 128, 1, -1],   # seq_len=128 (shared with V cache due to same shape)
-        [4, 512, 128, 1, -1],   # seq_len=512
+        [4, 128, 128, 1, -1],  # seq_len=128 (shared with V cache due to same shape)
+        [4, 512, 128, 1, -1],  # seq_len=512
         [4, 1024, 128, 1, -1],  # seq_len=1024
         [4, 4096, 128, 1, -1],  # seq_len=4096
         [4, 8192, 128, 1, -1],  # seq_len=8192
         # V cache decode: M=head_dim(128), K=seq_len, N=1, m_groups=-1
         # Note: [4, 128, 128, 1, -1] is same as K cache seq_len=128, so skipped
-        [4, 128, 512, 1, -1],   # seq_len=512
+        [4, 128, 512, 1, -1],  # seq_len=512
         [4, 128, 1024, 1, -1],  # seq_len=1024
         [4, 128, 4096, 1, -1],  # seq_len=4096
         [4, 128, 8192, 1, -1],  # seq_len=8192
@@ -130,14 +128,16 @@ def get_preset_models() -> List[str]:
     return list(_PRESET_KERNELS.keys())
 
 
-def extract_kernel_shapes(model_name: str, model_dir: Optional[str] = None) -> List[Tuple[int, int, int, int, int]]:
+def extract_kernel_shapes(
+    model_name: str, model_dir: Optional[str] = None
+) -> List[Tuple[int, int, int, int, int]]:
     """
     Extract kernel shapes for a given model.
-    
+
     Args:
         model_name: Name of the preset model or 'gptq-auto'
         model_dir: Directory containing model files (for auto-detection)
-    
+
     Returns:
         List of (bits, M, K, N, m_groups) tuples
     """
@@ -154,25 +154,25 @@ def extract_kernel_shapes(model_name: str, model_dir: Optional[str] = None) -> L
 def get_quantization_config(model_dir: str) -> Optional[Dict[str, Any]]:
     """
     Get quantization configuration from model directory.
-    
+
     Args:
         model_dir: Directory containing model files
-    
+
     Returns:
         Dictionary with quantization configuration or None
     """
     model_path = Path(model_dir)
-    
+
     # Look for quantization config files
     config_files = ["quantize_config.json", "config.json", "quant_config.json"]
-    
+
     for config_file in config_files:
         config_path = model_path / config_file
         if config_path.exists():
             try:
                 with open(config_path) as f:
                     config = json.load(f)
-                    
+
                     # GPTQ format
                     if "bits" in config:
                         return {
@@ -182,7 +182,7 @@ def get_quantization_config(model_dir: str) -> Optional[Dict[str, Any]]:
                             "sym": config.get("sym", True),
                             "desc_act": config.get("desc_act", False),
                         }
-                    
+
                     # GPTQ v2 format
                     if "quantization_config" in config:
                         quant_config = config["quantization_config"]
@@ -194,129 +194,140 @@ def get_quantization_config(model_dir: str) -> Optional[Dict[str, Any]]:
                                 "sym": quant_config.get("sym", True),
                                 "desc_act": quant_config.get("desc_act", False),
                             }
-                    
+
                     # BitNet format
-                    if config.get("quantization_config", {}).get("quant_method") == "bitnet":
+                    if (
+                        config.get("quantization_config", {}).get("quant_method")
+                        == "bitnet"
+                    ):
                         return {
                             "quant_method": "bitnet",
                             "bits": 2,
                             "group_size": -1,  # Unified scale
                             "sym": True,
                         }
-                    
+
             except Exception as e:
                 logger.warning(f"Failed to parse config file {config_path}: {e}")
-    
+
     return None
 
 
 def auto_detect_kernel_shapes(model_dir: str) -> List[Tuple[int, int, int, int, int]]:
     """
     Auto-detect kernel shapes from model weights.
-    
+
     Args:
         model_dir: Directory containing model files
-    
+
     Returns:
         List of (bits, M, K, N, m_groups) tuples
     """
     model_path = Path(model_dir)
     kernel_shapes = []
-    
+
     # Get quantization config
     quant_config = get_quantization_config(model_dir)
     if not quant_config:
         logger.error(f"Cannot detect quantization config from {model_dir}")
         return []
-    
+
     bits = quant_config.get("bits", 4)
-    
+
     # Try to load model config to get dimensions
     config_path = model_path / "config.json"
     if config_path.exists():
         try:
             with open(config_path) as f:
                 model_config = json.load(f)
-                
+
                 # Extract dimensions based on model architecture
                 arch = model_config.get("model_type", "").lower()
-                
+
                 if "llama" in arch:
                     hidden_size = model_config.get("hidden_size", 4096)
                     intermediate_size = model_config.get("intermediate_size", 11008)
-                    
+
                     # Standard Llama shapes
                     kernel_shapes = [
                         (bits, hidden_size, hidden_size, 1, -1),
                         (bits, intermediate_size, hidden_size, 1, -1),
                         (bits, hidden_size, intermediate_size, 1, -1),
                     ]
-                    
+
                     # Add head dimension if available
                     if "num_attention_heads" in model_config:
                         num_heads = model_config["num_attention_heads"]
                         head_dim = hidden_size // num_heads
                         if head_dim * num_heads != hidden_size:
-                            kernel_shapes.append((bits, head_dim * num_heads, hidden_size, 1, -1))
-                
+                            kernel_shapes.append(
+                                (bits, head_dim * num_heads, hidden_size, 1, -1)
+                            )
+
                 elif "phi" in arch:
                     hidden_size = model_config.get("hidden_size", 3072)
                     intermediate_size = model_config.get("intermediate_size", 8192)
-                    
+
                     kernel_shapes = [
                         (bits, hidden_size, hidden_size, 1, -1),
                         (bits, intermediate_size, hidden_size, 1, -1),
                         (bits, hidden_size, intermediate_size, 1, -1),
                     ]
-                
+
                 elif "bitnet" in arch:
                     hidden_size = model_config.get("hidden_size", 3200)
                     intermediate_size = model_config.get("intermediate_size", 8640)
-                    
+
                     # BitNet uses unified scale (m_groups = 1)
                     kernel_shapes = [
                         (bits, hidden_size, hidden_size, 1, 1),
                         (bits, intermediate_size, hidden_size, 1, 1),
                         (bits, hidden_size, intermediate_size, 1, 1),
                     ]
-                
+
                 else:
                     logger.warning(f"Unknown architecture: {arch}")
-                    
+
         except Exception as e:
             logger.error(f"Failed to parse model config: {e}")
-    
+
     # Try to detect from weight files if config parsing failed
     if not kernel_shapes:
         kernel_shapes = detect_from_weight_files(model_path, bits)
-    
+
     return kernel_shapes
 
 
-def detect_from_weight_files(model_path: Path, bits: int) -> List[Tuple[int, int, int, int, int]]:
+def detect_from_weight_files(
+    model_path: Path, bits: int
+) -> List[Tuple[int, int, int, int, int]]:
     """
     Detect kernel shapes from weight file names and sizes.
-    
+
     Args:
         model_path: Path to model directory
         bits: Quantization bits
-    
+
     Returns:
         List of (bits, M, K, N, m_groups) tuples
     """
     kernel_shapes = set()
-    
+
     # Look for safetensors or pytorch bin files
-    weight_files = list(model_path.glob("*.safetensors")) + list(model_path.glob("*.bin"))
-    
+    weight_files = list(model_path.glob("*.safetensors")) + list(
+        model_path.glob("*.bin")
+    )
+
     if not weight_files:
         logger.warning(f"No weight files found in {model_path}")
         return []
-    
+
     # This is a simplified detection - in practice would need to load and inspect weights
     # For now, return empty list
-    logger.info("Weight file inspection not fully implemented - please specify model preset")
-    
+    logger.info(
+        "Weight file inspection not fully implemented - please specify model preset"
+    )
+
     return list(kernel_shapes)
 
 
@@ -333,7 +344,7 @@ def preprocess_weights(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Offline preprocess the weights before inference.
-    
+
     Parameters
     ----------
     w : np.ndarray
@@ -360,7 +371,7 @@ def preprocess_weights(
         Number of SIMD lanes for input (16 for ARM NEON/AVX2 with uint8)
     simd_n_out: int
         Number of SIMD lanes for output (8 for ARM NEON with float16, AVX2 with float32/int32)
-    
+
     Returns
     -------
     w: np.ndarray
@@ -368,49 +379,61 @@ def preprocess_weights(
     scales: np.ndarray
         Permuted scales with adjusted shape for TVM API
     """
-    assert(w.dtype == "uint8")
-    
+    assert w.dtype == "uint8"
+
     M, K = w.shape
     M = M * bits  # Total number of weight values after bit expansion
     ngroups_per_elem = 8 // g  # Number of groups that can be packed into one uint8
-    
+
     # Step 1 - Extract individual bits from quantized weights
     # Convert each weight element into its bit representation
     # Example: if bits=4 and w[i,j]=11 (binary: 1011), extract [1,1,0,1]
     w = np.stack([(w >> ib) & 1 for ib in range(bits)], axis=-1)
-    
+
     # Step 2 - Reorganize bits for group processing
     # Transpose and reshape to group consecutive elements together
     w = w.transpose(0, 2, 1).reshape(M // bits, bits, K // g, g)
-    
+
     # Step 3 - Pack groups into single elements for LUT indexing
     # Packing multiple bits allows using them as direct LUT indices
     # Example: if g=4, pack 4 bits [b0,b1,b2,b3] into value b0 + 2*b1 + 4*b2 + 8*b3
     w = sum([(w[:, :, :, ig] << ig) for ig in range(g)])
-    
+
     # Step 4 - Reshape for SIMD processing
     # Reorganize data layout for efficient SIMD instruction execution
-    w = w.reshape(M // bits // simd_n_out, simd_n_out, bits, K // g).transpose(0, 2, 1, 3)
+    w = w.reshape(M // bits // simd_n_out, simd_n_out, bits, K // g).transpose(
+        0, 2, 1, 3
+    )
     mgroup = ngroups_per_elem * simd_n_in
-    w = w.reshape(M // mgroup, ngroups_per_elem, simd_n_in, K // g).transpose(0, 2, 1, 3)
-    
+    w = w.reshape(M // mgroup, ngroups_per_elem, simd_n_in, K // g).transpose(
+        0, 2, 1, 3
+    )
+
     # Step 5 - Final tiling for optimized memory access
     # Create hierarchical tiling structure for cache optimization
-    w = w.reshape(M // bm, bm // mgroup, simd_n_in, ngroups_per_elem, K // g // kfactor, kfactor).transpose(0, 4, 1, 5, 2, 3)
+    w = w.reshape(
+        M // bm, bm // mgroup, simd_n_in, ngroups_per_elem, K // g // kfactor, kfactor
+    ).transpose(0, 4, 1, 5, 2, 3)
     w = sum([(w[:, :, :, :, :, ng] << (ng * g)) for ng in range(ngroups_per_elem)])
     w = w.reshape(M // bm, K // g // kfactor, bm // mgroup, kfactor, simd_n_in)
-    
+
     # Final reshape to match TVM API requirements
     w = w.reshape(M // bm, K // g, bm // ngroups_per_elem)
-    
+
     # Process scales for group-wise quantization
     if scales.size >= M // bits:
         group_size = K // scales.shape[1]
         scales = scales.reshape(M // bm, bm // bits, K // group_size).transpose(0, 2, 1)
-        scales = scales.reshape(M // bm, K // group_size, bm // bits // simd_n_out, simd_n_out)
+        scales = scales.reshape(
+            M // bm, K // group_size, bm // bits // simd_n_out, simd_n_out
+        )
         if zeros is not None:
-            zeros = zeros.reshape(M // bm, bm // bits, K // group_size).transpose(0, 2, 1)
-            zeros = zeros.reshape(M // bm, K // group_size, bm // bits // simd_n_out, simd_n_out)
+            zeros = zeros.reshape(M // bm, bm // bits, K // group_size).transpose(
+                0, 2, 1
+            )
+            zeros = zeros.reshape(
+                M // bm, K // group_size, bm // bits // simd_n_out, simd_n_out
+            )
             scales = np.stack([scales, zeros], axis=-2)
         # Input size of current TVM API
         scales = scales.reshape(M // bm, K // group_size, -1)
@@ -418,7 +441,7 @@ def preprocess_weights(
         # Per-tensor quantization
         if zeros is not None:
             scales = np.concatenate([scales, zeros])
-    
+
     return w, scales
 
 
@@ -597,13 +620,15 @@ def preprocess_kvcache(
 
     if is_key:
         # K cache: scales [batch, n_head, chunk_size, 1] (per-token)
-        assert scales.shape[2] == chunk_size and scales.shape[3] == 1, \
+        assert scales.shape[2] == chunk_size and scales.shape[3] == 1, (
             f"K cache scales shape mismatch: expected [*, *, {chunk_size}, 1], got {scales.shape}"
+        )
         M, K = chunk_size, head_dim
     else:
         # V cache: scales [batch, n_head, n_groups, head_dim] (per-channel)
-        assert scales.shape[3] == head_dim, \
+        assert scales.shape[3] == head_dim, (
             f"V cache scales shape mismatch: expected [*, *, *, {head_dim}], got {scales.shape}"
+        )
         M, K = head_dim, chunk_size  # Note: transposed!
 
     # -------------------------------------------------------------------------
@@ -618,7 +643,7 @@ def preprocess_kvcache(
 
     if K % (g * kfactor) != 0:
         raise ValueError(
-            f"{'K' if is_key else 'V'} cache: K={K} must be divisible by g*kfactor={g*kfactor}.\n"
+            f"{'K' if is_key else 'V'} cache: K={K} must be divisible by g*kfactor={g * kfactor}.\n"
             f"  K={'head_dim' if is_key else 'chunk_size'}={K}, g={g}, kfactor={kfactor}"
         )
 
@@ -641,7 +666,9 @@ def preprocess_kvcache(
                 # kv_head: [chunk_size, head_dim] -> M=chunk_size, K=head_dim
                 # scales: [chunk_size] -> [chunk_size, 1] for preprocess_weights
                 scales_head = scales[b, h, :, 0][:, np.newaxis]  # [M, 1]
-                zeros_head = zeros[b, h, :, 0][:, np.newaxis] if zeros is not None else None
+                zeros_head = (
+                    zeros[b, h, :, 0][:, np.newaxis] if zeros is not None else None
+                )
             else:
                 # ----- V cache: transpose! -----
                 # kv_head: [chunk_size, head_dim] -> transpose -> [head_dim, chunk_size]
@@ -656,15 +683,21 @@ def preprocess_kvcache(
             # Call preprocess_weights
             try:
                 packed_w, packed_s = preprocess_weights(
-                    kv_head, scales_head, zeros_head,
-                    bits=bits, g=g, bm=bm, kfactor=kfactor,
-                    simd_n_in=simd_n_in, simd_n_out=simd_n_out
+                    kv_head,
+                    scales_head,
+                    zeros_head,
+                    bits=bits,
+                    g=g,
+                    bm=bm,
+                    kfactor=kfactor,
+                    simd_n_in=simd_n_in,
+                    simd_n_out=simd_n_out,
                 )
                 batch_packed.append(packed_w)
                 batch_scales.append(packed_s)
 
             except Exception as e:
-                cache_type = 'K' if is_key else 'V'
+                cache_type = "K" if is_key else "V"
                 raise RuntimeError(
                     f"Failed to pack {cache_type} cache (batch={b}, head={h}):\n"
                     f"  kv_head.shape={kv_head.shape} (M={M}, K={K})\n"

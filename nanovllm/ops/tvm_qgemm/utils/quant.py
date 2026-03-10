@@ -133,10 +133,9 @@ from typing import Tuple, Optional
 #                        Basic Weight Quantization
 # =============================================================================
 
+
 def quantize_weight_per_tensor(
-    weight: np.ndarray,
-    bits: int,
-    sym: bool = True
+    weight: np.ndarray, bits: int, sym: bool = True
 ) -> Tuple[np.ndarray, float, Optional[float]]:
     """
     Per-tensor quantization: entire tensor uses a single scale.
@@ -175,15 +174,14 @@ def quantize_weight_per_tensor(
         scale = max(scale, 1e-8)
         zero_point = q_min * scale - w_min
 
-        weight_q = np.round((weight + zero_point) / scale).clip(q_min, q_max).astype(np.int8)
+        weight_q = (
+            np.round((weight + zero_point) / scale).clip(q_min, q_max).astype(np.int8)
+        )
         return weight_q, scale, zero_point
 
 
 def quantize_weight_per_group(
-    weight: np.ndarray,
-    bits: int,
-    group_size: int,
-    sym: bool = True
+    weight: np.ndarray, bits: int, group_size: int, sym: bool = True
 ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """
     Per-group quantization: groups along K dimension, each group has its own scale.
@@ -227,8 +225,12 @@ def quantize_weight_per_group(
         weight_q = np.zeros_like(weight, dtype=np.int8)
         for i in range(n_groups):
             start, end = i * group_size, (i + 1) * group_size
-            scale = scales[:, i:i+1]
-            weight_q[:, start:end] = np.round(weight[:, start:end] / scale).clip(-q_max, q_max).astype(np.int8)
+            scale = scales[:, i : i + 1]
+            weight_q[:, start:end] = (
+                np.round(weight[:, start:end] / scale)
+                .clip(-q_max, q_max)
+                .astype(np.int8)
+            )
 
         return weight_q, scales, None
     else:
@@ -248,9 +250,13 @@ def quantize_weight_per_group(
         weight_q = np.zeros_like(weight, dtype=np.int8)
         for i in range(n_groups):
             start, end = i * group_size, (i + 1) * group_size
-            scale = scales[:, i:i+1]
-            zp = zero_points[:, i:i+1]
-            weight_q[:, start:end] = np.round((weight[:, start:end] + zp) / scale).clip(q_min, q_max).astype(np.int8)
+            scale = scales[:, i : i + 1]
+            zp = zero_points[:, i : i + 1]
+            weight_q[:, start:end] = (
+                np.round((weight[:, start:end] + zp) / scale)
+                .clip(q_min, q_max)
+                .astype(np.int8)
+            )
 
         return weight_q, scales, zero_points
 
@@ -259,7 +265,7 @@ def dequantize_weight_per_tensor(
     weight_q: np.ndarray,
     scale: float,
     zero_point: Optional[float] = None,
-    dtype: type = np.float16
+    dtype: type = np.float16,
 ) -> np.ndarray:
     """
     Per-tensor dequantization.
@@ -284,7 +290,7 @@ def dequantize_weight_per_group(
     scales: np.ndarray,
     group_size: int,
     zero_points: Optional[np.ndarray] = None,
-    dtype: type = np.float16
+    dtype: type = np.float16,
 ) -> np.ndarray:
     """
     Per-group dequantization.
@@ -306,12 +312,12 @@ def dequantize_weight_per_group(
 
     for i in range(n_groups):
         start, end = i * group_size, (i + 1) * group_size
-        scale = scales[:, i:i+1]
+        scale = scales[:, i : i + 1]
 
         if zero_points is None:
             weight[:, start:end] = weight_q[:, start:end].astype(dtype) * scale
         else:
-            zp = zero_points[:, i:i+1]
+            zp = zero_points[:, i : i + 1]
             weight[:, start:end] = weight_q[:, start:end].astype(dtype) * scale - zp
 
     return weight
@@ -321,10 +327,9 @@ def dequantize_weight_per_group(
 #                     KV Cache Quantization (Chunk-based)
 # =============================================================================
 
+
 def quantize_kcache_chunk(
-    k_chunk: np.ndarray,
-    bits: int,
-    sym: bool = True
+    k_chunk: np.ndarray, bits: int, sym: bool = True
 ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """
     K Cache single chunk quantization - Per-Token (quantize along head_dim).
@@ -365,9 +370,7 @@ def quantize_kcache_chunk(
 
 
 def quantize_vcache_chunk(
-    v_chunk: np.ndarray,
-    bits: int,
-    sym: bool = True
+    v_chunk: np.ndarray, bits: int, sym: bool = True
 ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """
     V Cache single chunk quantization - Per-Channel (quantize along seq_len).
@@ -422,7 +425,7 @@ def dequantize_kcache_chunk(
     k_q: np.ndarray,
     k_scales: np.ndarray,
     k_zeros: Optional[np.ndarray] = None,
-    dtype: type = np.float16
+    dtype: type = np.float16,
 ) -> np.ndarray:
     """
     K Cache single chunk dequantization - Per-Token.
@@ -447,7 +450,7 @@ def dequantize_vcache_chunk(
     v_q: np.ndarray,
     v_scales: np.ndarray,
     v_zeros: Optional[np.ndarray] = None,
-    dtype: type = np.float16
+    dtype: type = np.float16,
 ) -> np.ndarray:
     """
     V Cache single chunk dequantization - Per-Channel.
@@ -472,11 +475,9 @@ def dequantize_vcache_chunk(
 #                 Full KV Cache Quantization (Multi-Chunk)
 # =============================================================================
 
+
 def quantize_kcache_chunked(
-    K_fp: np.ndarray,
-    chunk_size: int,
-    bits: int = 4,
-    sym: bool = True
+    K_fp: np.ndarray, chunk_size: int, bits: int = 4, sym: bool = True
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Quantize full K cache by splitting into chunks (per-token quantization).
@@ -511,8 +512,9 @@ def quantize_kcache_chunked(
         K_scales: Per-token scales [batch, n_head, seq_len, 1]
     """
     batch, n_head, seq_len, head_dim = K_fp.shape
-    assert seq_len % chunk_size == 0, \
+    assert seq_len % chunk_size == 0, (
         f"seq_len={seq_len} must be divisible by chunk_size={chunk_size}"
+    )
 
     n_chunks = seq_len // chunk_size
     K_q_all, K_scales_all = [], []
@@ -536,10 +538,7 @@ def quantize_kcache_chunked(
 
 
 def quantize_vcache_chunked(
-    V_fp: np.ndarray,
-    chunk_size: int,
-    bits: int = 4,
-    sym: bool = True
+    V_fp: np.ndarray, chunk_size: int, bits: int = 4, sym: bool = True
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Quantize full V cache by splitting into chunks (per-channel quantization).
@@ -578,8 +577,9 @@ def quantize_vcache_chunked(
         V_scales: Per-channel per-chunk scales [batch, n_head, n_chunks, head_dim]
     """
     batch, n_head, seq_len, head_dim = V_fp.shape
-    assert seq_len % chunk_size == 0, \
+    assert seq_len % chunk_size == 0, (
         f"seq_len={seq_len} must be divisible by chunk_size={chunk_size}"
+    )
 
     n_chunks = seq_len // chunk_size
     V_q_all, V_scales_all = [], []
@@ -595,7 +595,9 @@ def quantize_vcache_chunked(
                 V_q_head.append(v_q)
                 V_scales_head.append(v_scales)  # [1, head_dim]
             V_q_batch.append(np.concatenate(V_q_head, axis=0))
-            V_scales_batch.append(np.concatenate(V_scales_head, axis=0))  # [n_chunks, head_dim]
+            V_scales_batch.append(
+                np.concatenate(V_scales_head, axis=0)
+            )  # [n_chunks, head_dim]
         V_q_all.append(np.stack(V_q_batch, axis=0))
         V_scales_all.append(np.stack(V_scales_batch, axis=0))
 
@@ -603,10 +605,7 @@ def quantize_vcache_chunked(
 
 
 def dequantize_kcache_chunked(
-    K_q: np.ndarray,
-    K_scales: np.ndarray,
-    chunk_size: int,
-    dtype: type = np.float32
+    K_q: np.ndarray, K_scales: np.ndarray, chunk_size: int, dtype: type = np.float32
 ) -> np.ndarray:
     """
     Dequantize full K cache by processing chunks.
@@ -634,7 +633,9 @@ def dequantize_kcache_chunked(
                 start, end = c * chunk_size, (c + 1) * chunk_size
                 k_chunk_q = K_q[b, h, start:end, :]
                 k_chunk_scales = K_scales[b, h, start:end, :]
-                k_chunk_dq = dequantize_kcache_chunk(k_chunk_q, k_chunk_scales, dtype=dtype)
+                k_chunk_dq = dequantize_kcache_chunk(
+                    k_chunk_q, k_chunk_scales, dtype=dtype
+                )
                 K_dq_head.append(k_chunk_dq)
             K_dq_batch.append(np.concatenate(K_dq_head, axis=0))
         K_dq_all.append(np.stack(K_dq_batch, axis=0))
@@ -643,10 +644,7 @@ def dequantize_kcache_chunked(
 
 
 def dequantize_vcache_chunked(
-    V_q: np.ndarray,
-    V_scales: np.ndarray,
-    chunk_size: int,
-    dtype: type = np.float32
+    V_q: np.ndarray, V_scales: np.ndarray, chunk_size: int, dtype: type = np.float32
 ) -> np.ndarray:
     """
     Dequantize full V cache by processing chunks.
@@ -673,8 +671,10 @@ def dequantize_vcache_chunked(
             for c in range(n_chunks):
                 start, end = c * chunk_size, (c + 1) * chunk_size
                 v_chunk_q = V_q[b, h, start:end, :]
-                v_chunk_scales = V_scales[b, h, c:c+1, :]  # [1, head_dim]
-                v_chunk_dq = dequantize_vcache_chunk(v_chunk_q, v_chunk_scales, dtype=dtype)
+                v_chunk_scales = V_scales[b, h, c : c + 1, :]  # [1, head_dim]
+                v_chunk_dq = dequantize_vcache_chunk(
+                    v_chunk_q, v_chunk_scales, dtype=dtype
+                )
                 V_dq_head.append(v_chunk_dq)
             V_dq_batch.append(np.concatenate(V_dq_head, axis=0))
         V_dq_all.append(np.stack(V_dq_batch, axis=0))
@@ -685,6 +685,7 @@ def dequantize_vcache_chunked(
 # =============================================================================
 #                            Utility Functions
 # =============================================================================
+
 
 def compute_sqnr(original: np.ndarray, reconstructed: np.ndarray) -> float:
     """
@@ -706,10 +707,10 @@ def compute_sqnr(original: np.ndarray, reconstructed: np.ndarray) -> float:
     """
     signal_power = np.mean(original.astype(np.float64) ** 2)
     noise = original.astype(np.float64) - reconstructed.astype(np.float64)
-    noise_power = np.mean(noise ** 2)
+    noise_power = np.mean(noise**2)
 
     if noise_power < 1e-10:
-        return float('inf')
+        return float("inf")
 
     return 10 * np.log10(signal_power / noise_power)
 
@@ -731,10 +732,10 @@ def nmse(original: np.ndarray, reconstructed: np.ndarray) -> float:
     reconstructed = reconstructed.astype(np.float64)
 
     noise = original - reconstructed
-    signal_power = np.sum(original ** 2)
-    noise_power = np.sum(noise ** 2)
+    signal_power = np.sum(original**2)
+    noise_power = np.sum(noise**2)
 
     if signal_power < 1e-10:
-        return float('inf')
+        return float("inf")
 
     return noise_power / signal_power

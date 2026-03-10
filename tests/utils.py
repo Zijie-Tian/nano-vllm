@@ -15,31 +15,24 @@ HAYSTACK_PARAGRAPHS = [
     "The weather today is quite pleasant with clear skies and moderate temperatures. "
     "Many people are enjoying outdoor activities in the park. "
     "Birds are singing in the trees and children are playing on the swings. ",
-
     "In the world of technology, new innovations continue to emerge every day. "
     "Researchers are working on advanced algorithms and computing systems. "
     "The future of artificial intelligence looks promising with many breakthroughs. ",
-
     "The history of human civilization spans thousands of years. "
     "Ancient cultures developed writing, mathematics, and astronomy. "
     "Trade routes connected distant lands and facilitated cultural exchange. ",
-
     "Modern cooking combines traditional techniques with new ingredients. "
     "Chefs around the world experiment with flavors and presentations. "
     "Food brings people together and creates memorable experiences. ",
-
     "The ocean covers more than seventy percent of Earth's surface. "
     "Marine ecosystems support an incredible diversity of life forms. "
     "Scientists continue to discover new species in the deep sea. ",
-
     "Music has been a part of human culture since prehistoric times. "
     "Different genres evolved across various regions and time periods. "
     "Today, people can access millions of songs through digital platforms. ",
-
     "Space exploration has revealed many secrets about our universe. "
     "Telescopes can observe galaxies billions of light years away. "
     "Future missions aim to establish human presence on other planets. ",
-
     "The study of languages reveals patterns in human cognition. "
     "Linguists analyze grammar, semantics, and phonetics across cultures. "
     "Language continues to evolve with new words and expressions. ",
@@ -72,7 +65,7 @@ def generate_needle_prompt(
     needle = f"The secret number you need to remember is {needle_value}. This is very important. "
 
     # Question text
-    if use_chat_template and hasattr(tokenizer, 'apply_chat_template'):
+    if use_chat_template and hasattr(tokenizer, "apply_chat_template"):
         question_text = "/no_think Answer only with the secret number mentioned above, nothing else:"
     else:
         question_text = "\n\nQuestion: What is the secret number mentioned in the text above?\nAnswer: The secret number is"
@@ -83,9 +76,11 @@ def generate_needle_prompt(
         parts.insert(needle_idx, needle)
         full_text = "".join(parts)
 
-        if use_chat_template and hasattr(tokenizer, 'apply_chat_template'):
+        if use_chat_template and hasattr(tokenizer, "apply_chat_template"):
             messages = [{"role": "user", "content": f"{full_text}\n\n{question_text}"}]
-            return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            return tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
         else:
             return full_text + question_text
 
@@ -138,7 +133,9 @@ def generate_needle_prompt(
 
     actual_tokens = count_tokens(prompt)
     if verbose:
-        print(f"[NeedleTest] Target: {target_length}, Actual: {actual_tokens} tokens (diff={actual_tokens - target_length})")
+        print(
+            f"[NeedleTest] Target: {target_length}, Actual: {actual_tokens} tokens (diff={actual_tokens - target_length})"
+        )
 
     return prompt, needle_value
 
@@ -146,8 +143,10 @@ def generate_needle_prompt(
 def check_needle_answer(output_text: str, expected: str) -> bool:
     """Check if the model output contains the expected needle value."""
     # Clean output - remove special tokens and whitespace
-    output_clean = output_text.replace('<|im_end|>', '').replace('\r', ' ').replace('\n', ' ')
-    output_clean = ' '.join(output_clean.split()).lower()
+    output_clean = (
+        output_text.replace("<|im_end|>", "").replace("\r", " ").replace("\n", " ")
+    )
+    output_clean = " ".join(output_clean.split()).lower()
     expected_clean = expected.strip().lower()
 
     # Check if expected value appears in output
@@ -156,7 +155,7 @@ def check_needle_answer(output_text: str, expected: str) -> bool:
         return True
 
     # Try to extract numbers and check if expected is among them
-    numbers = re.findall(r'\d+', output_clean)
+    numbers = re.findall(r"\d+", output_clean)
     return expected_clean in numbers
 
 
@@ -177,5 +176,6 @@ def generate_random_token_ids(
         List of random token IDs
     """
     from random import randint, seed as set_seed
+
     set_seed(seed)
     return [randint(0, vocab_size - 1) for _ in range(length)]

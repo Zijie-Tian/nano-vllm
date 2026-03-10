@@ -10,6 +10,7 @@ from typing import Literal, Optional
 try:
     from nanovllm.comm._sgdma_cuda import memcpy_2d as _memcpy_2d_cuda
     from nanovllm.comm._sgdma_cuda import memcpy_2d_async as _memcpy_2d_async_cuda
+
     CUDA_AVAILABLE = True
 except ImportError as e:
     CUDA_AVAILABLE = False
@@ -23,7 +24,7 @@ def memcpy_2d(
     spitch: int,
     width: int,
     height: int,
-    kind: Literal["h2d", "d2h", "d2d", "h2h"] = "h2d"
+    kind: Literal["h2d", "d2h", "d2d", "h2h"] = "h2d",
 ) -> None:
     """
     Perform 2D memory copy using cudaMemcpy2D for efficient strided transfers.
@@ -106,7 +107,7 @@ def memcpy_2d_async(
     width: int,
     height: int,
     kind: Literal["h2d", "d2h", "d2d", "h2h"] = "h2d",
-    stream: Optional[torch.cuda.Stream] = None
+    stream: Optional[torch.cuda.Stream] = None,
 ) -> None:
     """
     Asynchronous version of memcpy_2d using cudaMemcpy2DAsync.

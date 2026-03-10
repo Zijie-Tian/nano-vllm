@@ -80,19 +80,30 @@ def _fwd_kernel_with_lse(
 
     # Pointers
     q_ptrs = (
-        Q + off_b * stride_qb + off_h * stride_qh + (offs_m[:, None] * stride_qm + offs_d[None, :])
+        Q
+        + off_b * stride_qb
+        + off_h * stride_qh
+        + (offs_m[:, None] * stride_qm + offs_d[None, :])
     )
     k_ptrs = (
-        K + off_b * stride_kb + off_h * stride_kh + (offs_n[:, None] * stride_kn + offs_d[None, :])
+        K
+        + off_b * stride_kb
+        + off_h * stride_kh
+        + (offs_n[:, None] * stride_kn + offs_d[None, :])
     )
     v_ptrs = (
-        V + off_b * stride_vb + off_h * stride_vh + (offs_n[:, None] * stride_vn + offs_d[None, :])
+        V
+        + off_b * stride_vb
+        + off_h * stride_vh
+        + (offs_n[:, None] * stride_vn + offs_d[None, :])
     )
 
     # Initialize running statistics
     m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")  # running max
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32)  # running sum of exp
-    acc_o = tl.zeros([BLOCK_M, BLOCK_HEADDIM], dtype=tl.float32)  # running output (unnormalized)
+    acc_o = tl.zeros(
+        [BLOCK_M, BLOCK_HEADDIM], dtype=tl.float32
+    )  # running output (unnormalized)
 
     # Load Q (once per block)
     if EVEN_M & EVEN_N:
@@ -105,7 +116,9 @@ def _fwd_kernel_with_lse(
             q = tl.load(q_ptrs, mask=offs_m[:, None] < seqlen_q, other=0.0)
         else:
             q = tl.load(
-                q_ptrs, mask=(offs_m[:, None] < seqlen_q) & (offs_d[None, :] < headdim), other=0.0
+                q_ptrs,
+                mask=(offs_m[:, None] < seqlen_q) & (offs_d[None, :] < headdim),
+                other=0.0,
             )
 
     # Loop over K, V blocks
@@ -118,7 +131,11 @@ def _fwd_kernel_with_lse(
             if EVEN_HEADDIM:
                 k = tl.load(k_ptrs + start_n * stride_kn)
             else:
-                k = tl.load(k_ptrs + start_n * stride_kn, mask=offs_d[None, :] < headdim, other=0.0)
+                k = tl.load(
+                    k_ptrs + start_n * stride_kn,
+                    mask=offs_d[None, :] < headdim,
+                    other=0.0,
+                )
         else:
             if EVEN_HEADDIM:
                 k = tl.load(
@@ -129,7 +146,8 @@ def _fwd_kernel_with_lse(
             else:
                 k = tl.load(
                     k_ptrs + start_n * stride_kn,
-                    mask=((start_n + offs_n)[:, None] < seqlen_k) & (offs_d[None, :] < headdim),
+                    mask=((start_n + offs_n)[:, None] < seqlen_k)
+                    & (offs_d[None, :] < headdim),
                     other=0.0,
                 )
 
@@ -142,7 +160,9 @@ def _fwd_kernel_with_lse(
         if not EVEN_N:
             qk += tl.where((start_n + offs_n)[None, :] < seqlen_k, 0, float("-inf"))
         if IS_CAUSAL:
-            qk += tl.where(offs_m[:, None] >= (start_n + offs_n)[None, :], 0, float("-inf"))
+            qk += tl.where(
+                offs_m[:, None] >= (start_n + offs_n)[None, :], 0, float("-inf")
+            )
 
         # Online softmax: compute block max
         m_ij = tl.max(qk, 1)  # [BLOCK_M]
@@ -170,7 +190,11 @@ def _fwd_kernel_with_lse(
             if EVEN_HEADDIM:
                 v = tl.load(v_ptrs + start_n * stride_vn)
             else:
-                v = tl.load(v_ptrs + start_n * stride_vn, mask=offs_d[None, :] < headdim, other=0.0)
+                v = tl.load(
+                    v_ptrs + start_n * stride_vn,
+                    mask=offs_d[None, :] < headdim,
+                    other=0.0,
+                )
         else:
             if EVEN_HEADDIM:
                 v = tl.load(
@@ -181,7 +205,8 @@ def _fwd_kernel_with_lse(
             else:
                 v = tl.load(
                     v_ptrs + start_n * stride_vn,
-                    mask=((start_n + offs_n)[:, None] < seqlen_k) & (offs_d[None, :] < headdim),
+                    mask=((start_n + offs_n)[:, None] < seqlen_k)
+                    & (offs_d[None, :] < headdim),
                     other=0.0,
                 )
 
@@ -223,7 +248,9 @@ def _fwd_kernel_with_lse(
             tl.store(out_ptrs, acc_o, mask=offs_m[:, None] < seqlen_q)
         else:
             tl.store(
-                out_ptrs, acc_o, mask=(offs_m[:, None] < seqlen_q) & (offs_d[None, :] < headdim)
+                out_ptrs,
+                acc_o,
+                mask=(offs_m[:, None] < seqlen_q) & (offs_d[None, :] < headdim),
             )
 
 
@@ -262,7 +289,9 @@ def flash_attn_with_lse(
     # It returns (output, softmax_lse) when return_attn_probs=True is not set
     # We need to use the internal function to get LSE
     out, lse, _ = flash_attn_func(
-        q, k, v,
+        q,
+        k,
+        v,
         softmax_scale=softmax_scale,
         causal=causal,
         return_attn_probs=True,  # This makes it return (out, softmax_lse, S_dmask)
@@ -277,7 +306,9 @@ def flash_attn_with_lse(
 
 @triton.jit
 def _merge_lse_kernel(
-    lse1_ptr, lse2_ptr, lse_out_ptr,
+    lse1_ptr,
+    lse2_ptr,
+    lse_out_ptr,
     num_elements: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -313,8 +344,15 @@ def _merge_lse_kernel(
 
 @triton.jit
 def _merge_output_kernel(
-    o1_ptr, o2_ptr, lse1_ptr, lse2_ptr, o_out_ptr,
-    batch: tl.constexpr, seqlen_q: tl.constexpr, nheads: tl.constexpr, headdim: tl.constexpr,
+    o1_ptr,
+    o2_ptr,
+    lse1_ptr,
+    lse2_ptr,
+    o_out_ptr,
+    batch: tl.constexpr,
+    seqlen_q: tl.constexpr,
+    nheads: tl.constexpr,
+    headdim: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     """Fused kernel for merging attention outputs.
@@ -346,9 +384,11 @@ def _merge_output_kernel(
         mask = d_idx < headdim
 
         # Compute output index: [batch, seqlen_q, nheads, headdim]
-        base_idx = (pid_batch * seqlen_q * nheads * headdim +
-                    pid_seq * nheads * headdim +
-                    pid_head * headdim)
+        base_idx = (
+            pid_batch * seqlen_q * nheads * headdim
+            + pid_seq * nheads * headdim
+            + pid_head * headdim
+        )
         o_idx = base_idx + d_idx
 
         # Load o1, o2 and convert to fp32 for weighted sum
@@ -397,7 +437,9 @@ def merge_attention_outputs(
     BLOCK_SIZE_LSE = 256
     grid_lse = (triton.cdiv(num_lse_elements, BLOCK_SIZE_LSE),)
     _merge_lse_kernel[grid_lse](
-        lse1, lse2, lse_merged,
+        lse1,
+        lse2,
+        lse_merged,
         num_lse_elements,
         BLOCK_SIZE=BLOCK_SIZE_LSE,
     )
@@ -406,8 +448,15 @@ def merge_attention_outputs(
     BLOCK_SIZE = 128
     grid_output = (batch, seqlen_q, nheads)
     _merge_output_kernel[grid_output](
-        o1, o2, lse1, lse2, o_merged,
-        batch, seqlen_q, nheads, headdim,
+        o1,
+        o2,
+        lse1,
+        lse2,
+        o_merged,
+        batch,
+        seqlen_q,
+        nheads,
+        headdim,
         BLOCK_SIZE=BLOCK_SIZE,
     )
 
@@ -420,11 +469,12 @@ def merge_attention_outputs(
 
 # LSE conversion constants: FlashInfer uses log2, flash_attn uses ln
 _LOG2_E = 1.4426950408889634  # math.log2(math.e) - ln -> log2
-_LN_2 = 0.6931471805599453    # math.log(2) - log2 -> ln
+_LN_2 = 0.6931471805599453  # math.log(2) - log2 -> ln
 
 # Check FlashInfer availability (only for merge_state, not attention kernel)
 try:
-    from flashinfer.cascade import merge_state, merge_state_in_place
+    from flashinfer.cascade import merge_state, merge_state_in_place  # noqa: F401
+
     FLASHINFER_MERGE_AVAILABLE = True
 except ImportError:
     FLASHINFER_MERGE_AVAILABLE = False
@@ -484,9 +534,9 @@ def merge_attention_outputs_flashinfer(
     # o: [batch, seq, heads, dim] -> [seq, heads, dim]
     # lse: [batch, heads, seq] -> [seq, heads] (convert ln -> log2)
     v_a = o1.squeeze(0).contiguous()
-    s_a = (lse1.squeeze(0).transpose(0, 1).contiguous().float() * _LOG2_E)
+    s_a = lse1.squeeze(0).transpose(0, 1).contiguous().float() * _LOG2_E
     v_b = o2.squeeze(0).contiguous()
-    s_b = (lse2.squeeze(0).transpose(0, 1).contiguous().float() * _LOG2_E)
+    s_b = lse2.squeeze(0).transpose(0, 1).contiguous().float() * _LOG2_E
 
     # FlashInfer merge
     v_merged, s_merged = merge_state(v_a, s_a, v_b, s_b)
@@ -534,9 +584,9 @@ def chunked_attention_varlen(
     if len(kv_chunks) == 0:
         raise ValueError("Need at least one KV chunk")
 
-    nheads = q.shape[1]
+    q.shape[1]
     headdim = q.shape[2]
-    batch = cu_seqlens_q.shape[0] - 1
+    cu_seqlens_q.shape[0] - 1
 
     if softmax_scale is None:
         softmax_scale = 1.0 / math.sqrt(headdim)
@@ -572,8 +622,10 @@ def chunked_attention_varlen(
             accumulated_lse = chunk_lse
         else:
             accumulated_o, accumulated_lse = merge_attention_outputs(
-                accumulated_o, accumulated_lse,
-                chunk_o, chunk_lse,
+                accumulated_o,
+                accumulated_lse,
+                chunk_o,
+                chunk_lse,
             )
 
     # Remove batch dimension
@@ -614,8 +666,10 @@ class ChunkedPrefillState:
         else:
             acc_o, acc_lse = self.layer_states[layer_id]
             merged_o, merged_lse = merge_attention_outputs(
-                acc_o, acc_lse,
-                chunk_output, chunk_lse,
+                acc_o,
+                acc_lse,
+                chunk_output,
+                chunk_lse,
             )
             self.layer_states[layer_id] = (merged_o, merged_lse)
 
@@ -653,9 +707,15 @@ def _test_chunked_attention():
                 (1, 8192, 32, 128),
             ]:
                 # Generate random Q, K, V
-                q = torch.randn(batch, seqlen, nheads, headdim, device="cuda", dtype=dtype)
-                k = torch.randn(batch, seqlen, nheads, headdim, device="cuda", dtype=dtype)
-                v = torch.randn(batch, seqlen, nheads, headdim, device="cuda", dtype=dtype)
+                q = torch.randn(
+                    batch, seqlen, nheads, headdim, device="cuda", dtype=dtype
+                )
+                k = torch.randn(
+                    batch, seqlen, nheads, headdim, device="cuda", dtype=dtype
+                )
+                v = torch.randn(
+                    batch, seqlen, nheads, headdim, device="cuda", dtype=dtype
+                )
 
                 # Reference: full attention (non-causal)
                 out_ref = flash_attn_func(q, k, v, causal=False)
@@ -683,8 +743,7 @@ def _test_chunked_attention():
                     else:
                         # Merge with previous chunks
                         accumulated_o, accumulated_lse = merge_attention_outputs(
-                            accumulated_o, accumulated_lse,
-                            chunk_o, chunk_lse
+                            accumulated_o, accumulated_lse, chunk_o, chunk_lse
                         )
 
                 # Compare

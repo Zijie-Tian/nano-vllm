@@ -69,11 +69,10 @@ class NanovllmSteppable(SteppableModel):
                     else:
                         full_output = output
                     self._captured[f"layer_{idx}"] = full_output.detach().clone()
+
                 return hook
 
-            self._hooks.append(
-                layer.register_forward_hook(make_layer_hook(layer_idx))
-            )
+            self._hooks.append(layer.register_forward_hook(make_layer_hook(layer_idx)))
 
         # Hook for final norm
         def final_norm_hook(module, input, output):
@@ -81,17 +80,13 @@ class NanovllmSteppable(SteppableModel):
             hidden_states = output[0] if isinstance(output, tuple) else output
             self._captured["final_norm"] = hidden_states.detach().clone()
 
-        self._hooks.append(
-            self.model.model.norm.register_forward_hook(final_norm_hook)
-        )
+        self._hooks.append(self.model.model.norm.register_forward_hook(final_norm_hook))
 
         # Hook for lm_head
         def lm_head_hook(module, input, output):
             self._captured["lm_head"] = output.detach().clone()
 
-        self._hooks.append(
-            self.model.lm_head.register_forward_hook(lm_head_hook)
-        )
+        self._hooks.append(self.model.lm_head.register_forward_hook(lm_head_hook))
 
     def _remove_hooks(self):
         """Remove all registered hooks."""
@@ -211,7 +206,10 @@ class NanovllmSteppable(SteppableModel):
                         )
 
             # FINAL_NORM
-            if self.is_enabled(BreakpointType.FINAL_NORM) and "final_norm" in self._captured:
+            if (
+                self.is_enabled(BreakpointType.FINAL_NORM)
+                and "final_norm" in self._captured
+            ):
                 yield Breakpoint(
                     bp_type=BreakpointType.FINAL_NORM,
                     layer_idx=None,

@@ -59,8 +59,10 @@ class COMPASSPolicy(SparsePolicy):
         # For now, return all blocks to test basic chunked prefill flow
         if ctx.layer_id == 0:
             self._stats_num_chunks += 1
-            logger.debug(f"[COMPASS] chunk={ctx.query_chunk_idx}, "
-                        f"available={len(available_blocks)}, selected={len(available_blocks)}")
+            logger.debug(
+                f"[COMPASS] chunk={ctx.query_chunk_idx}, "
+                f"available={len(available_blocks)}, selected={len(available_blocks)}"
+            )
         return available_blocks
 
     def reset_stats(self) -> None:
@@ -158,9 +160,11 @@ class COMPASSPolicy(SparsePolicy):
             merge_attention_outputs_flashinfer as merge_attention_outputs,
         )
 
-        logger.debug(f"[COMPASS] compute_chunked_prefill called, "
-                    f"layer={layer_id}, chunk={current_chunk_idx}, "
-                    f"num_tokens={num_tokens}, selected_blocks={len(selected_blocks)}")
+        logger.debug(
+            f"[COMPASS] compute_chunked_prefill called, "
+            f"layer={layer_id}, chunk={current_chunk_idx}, "
+            f"num_tokens={num_tokens}, selected_blocks={len(selected_blocks)}"
+        )
 
         q_batched = q.unsqueeze(0)  # [1, seq_len, num_heads, head_dim]
         o_acc = None
@@ -179,20 +183,26 @@ class COMPASSPolicy(SparsePolicy):
                 slot = load_slots[0]
                 for block_idx in range(num_blocks):
                     cpu_block_id = cpu_block_table[block_idx]
-                    offload_engine.load_to_slot_layer(slot, layer_id, cpu_block_id, chunk_idx=cpu_block_id)
+                    offload_engine.load_to_slot_layer(
+                        slot, layer_id, cpu_block_id, chunk_idx=cpu_block_id
+                    )
                     offload_engine.wait_slot_layer(slot)
 
                     with torch.cuda.stream(compute_stream):
                         prev_k, prev_v = offload_engine.get_kv_for_slot(slot)
                         prev_o, prev_lse = flash_attn_with_lse(
-                            q_batched, prev_k, prev_v,
+                            q_batched,
+                            prev_k,
+                            prev_v,
                             softmax_scale=softmax_scale,
                             causal=False,
                         )
                         if o_acc is None:
                             o_acc, lse_acc = prev_o, prev_lse
                         else:
-                            o_acc, lse_acc = merge_attention_outputs(o_acc, lse_acc, prev_o, prev_lse)
+                            o_acc, lse_acc = merge_attention_outputs(
+                                o_acc, lse_acc, prev_o, prev_lse
+                            )
                         offload_engine.record_slot_compute_done(slot)
             else:
                 # Multiple slots - use pipeline
@@ -200,7 +210,9 @@ class COMPASSPolicy(SparsePolicy):
                 num_preload = min(num_slots, num_blocks)
                 for i in range(num_preload):
                     cpu_block_id = cpu_block_table[i]
-                    offload_engine.load_to_slot_layer(load_slots[i], layer_id, cpu_block_id, chunk_idx=cpu_block_id)
+                    offload_engine.load_to_slot_layer(
+                        load_slots[i], layer_id, cpu_block_id, chunk_idx=cpu_block_id
+                    )
 
                 for block_idx in range(num_blocks):
                     current_slot = load_slots[block_idx % num_slots]
@@ -210,7 +222,9 @@ class COMPASSPolicy(SparsePolicy):
                     with torch.cuda.stream(compute_stream):
                         prev_k, prev_v = offload_engine.get_kv_for_slot(current_slot)
                         prev_o, prev_lse = flash_attn_with_lse(
-                            q_batched, prev_k, prev_v,
+                            q_batched,
+                            prev_k,
+                            prev_v,
                             softmax_scale=softmax_scale,
                             causal=False,
                         )
@@ -219,20 +233,31 @@ class COMPASSPolicy(SparsePolicy):
                         if o_acc is None:
                             o_acc, lse_acc = prev_o, prev_lse
                         else:
-                            o_acc, lse_acc = merge_attention_outputs(o_acc, lse_acc, prev_o, prev_lse)
+                            o_acc, lse_acc = merge_attention_outputs(
+                                o_acc, lse_acc, prev_o, prev_lse
+                            )
 
                     # Issue next transfer
                     next_block_idx = block_idx + num_slots
                     if next_block_idx < num_blocks:
                         next_slot = load_slots[next_block_idx % num_slots]
                         next_cpu_block_id = cpu_block_table[next_block_idx]
-                        offload_engine.load_to_slot_layer(next_slot, layer_id, next_cpu_block_id, chunk_idx=next_cpu_block_id)
+                        offload_engine.load_to_slot_layer(
+                            next_slot,
+                            layer_id,
+                            next_cpu_block_id,
+                            chunk_idx=next_cpu_block_id,
+                        )
 
         # Compute attention to current chunk (causal mask)
         with torch.cuda.stream(compute_stream):
-            k_curr, v_curr = offload_engine.get_prefill_buffer_slice(layer_id, num_tokens)
+            k_curr, v_curr = offload_engine.get_prefill_buffer_slice(
+                layer_id, num_tokens
+            )
             current_o, current_lse = flash_attn_with_lse(
-                q_batched, k_curr, v_curr,
+                q_batched,
+                k_curr,
+                v_curr,
                 softmax_scale=softmax_scale,
                 causal=True,
             )
@@ -242,7 +267,9 @@ class COMPASSPolicy(SparsePolicy):
             if o_acc is None:
                 final_o = current_o
             else:
-                final_o, _ = merge_attention_outputs(o_acc, lse_acc, current_o, current_lse)
+                final_o, _ = merge_attention_outputs(
+                    o_acc, lse_acc, current_o, current_lse
+                )
 
         # Sync default stream with compute_stream before returning
         torch.cuda.default_stream().wait_stream(compute_stream)
@@ -282,12 +309,20 @@ class COMPASSPolicy(SparsePolicy):
         # (select_blocks already returns all blocks in decode phase)
         from .full_policy import FullAttentionPolicy
 
-        logger.debug(f"[COMPASS] compute_chunked_decode using FullAttentionPolicy, "
-                    f"layer={layer_id}, selected_blocks={len(selected_blocks)}")
+        logger.debug(
+            f"[COMPASS] compute_chunked_decode using FullAttentionPolicy, "
+            f"layer={layer_id}, selected_blocks={len(selected_blocks)}"
+        )
 
         fallback_policy = FullAttentionPolicy()
         return fallback_policy.compute_chunked_decode(
-            q, layer_id, softmax_scale, offload_engine, kvcache_manager, seq, selected_blocks
+            q,
+            layer_id,
+            softmax_scale,
+            offload_engine,
+            kvcache_manager,
+            seq,
+            selected_blocks,
         )
 
     def offload_prefill_chunk(
@@ -298,7 +333,9 @@ class COMPASSPolicy(SparsePolicy):
         num_tokens: int,
         **kwargs,
     ) -> None:
-        super().offload_prefill_chunk(offload_engine, layer_id, cpu_block_id, num_tokens, **kwargs)
+        super().offload_prefill_chunk(
+            offload_engine, layer_id, cpu_block_id, num_tokens, **kwargs
+        )
 
     def offload_decode_chunk(
         self,

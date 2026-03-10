@@ -6,7 +6,7 @@ and overriding the abstract methods.
 """
 
 from abc import ABC, abstractmethod
-from typing import Set, Optional
+from typing import Set
 
 
 class EvictionPolicy(ABC):

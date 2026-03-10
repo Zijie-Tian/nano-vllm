@@ -1,7 +1,5 @@
 import tvm
 from tvm import te
-import os
-from tvm.contrib import utils, clang
 from typing import Tuple, Optional
 from ..utils.math_utils import get_bits_alphas
 from .utils import _create_llvm
@@ -30,9 +28,13 @@ def tbl(
     weights should be within the same group.
     """
 
-    LUT = te.placeholder((kfactor, 2 ** g), dtype, name="LUT")
+    LUT = te.placeholder((kfactor, 2**g), dtype, name="LUT")
     lut_buffer = tvm.tir.decl_buffer(
-        LUT.shape, LUT.dtype, name="lut_buffer", offset_factor=1, strides=[te.var("sl"), 1]
+        LUT.shape,
+        LUT.dtype,
+        name="lut_buffer",
+        offset_factor=1,
+        strides=[te.var("sl"), 1],
     )
     A = te.placeholder((kfactor, m // ngroups_per_elem), "uint8", name="A")
     a_buffer = tvm.tir.decl_buffer(
@@ -42,17 +44,25 @@ def tbl(
     if m_groups == -1:
         if zero_point:
             scales_shape = (kfactor * g // act_group_size, m // bits * 2)
+
             def _get_scale(m, k):
-                return Scales[k * g // act_group_size, m // bits * 2] - Scales[k * g // act_group_size, m // bits * 2 + 1]
+                return (
+                    Scales[k * g // act_group_size, m // bits * 2]
+                    - Scales[k * g // act_group_size, m // bits * 2 + 1]
+                )
         else:
             scales_shape = (kfactor * g // act_group_size, m // bits)
+
             def _get_scale(m, k):
                 return Scales[k * g // act_group_size, m // bits]
+
         scale_buffer_strides = [te.var("ss"), 1]
     else:
         scales_shape = (kfactor * g // act_group_size,)
+
         def _get_scale(m, k):
             return Scales[k * g // act_group_size]
+
         scale_buffer_strides = [1]
 
     alpha = te.const(get_bits_alphas(bits)[0], dtype=out_dtype)
@@ -60,26 +70,52 @@ def tbl(
     if not do_scale_final:
         Scales = te.placeholder(scales_shape, out_dtype, name="Scales")
         scales_buffer = tvm.tir.decl_buffer(
-            Scales.shape, Scales.dtype, name="scales_buffer", offset_factor=1, strides=scale_buffer_strides
+            Scales.shape,
+            Scales.dtype,
+            name="scales_buffer",
+            offset_factor=1,
+            strides=scale_buffer_strides,
         )
         if has_lut_scale:
-            LUT_Scales = te.placeholder((max(1, kfactor * g // act_group_size),), dtype=out_dtype, name="LUT_Scales")
+            LUT_Scales = te.placeholder(
+                (max(1, kfactor * g // act_group_size),),
+                dtype=out_dtype,
+                name="LUT_Scales",
+            )
             lut_scales_buffer = tvm.tir.decl_buffer(
-                LUT_Scales.shape, LUT_Scales.dtype, name="lut_scales_buffer", offset_factor=1, strides=[1]
+                LUT_Scales.shape,
+                LUT_Scales.dtype,
+                name="lut_scales_buffer",
+                offset_factor=1,
+                strides=[1],
             )
-            LUT_Biases = te.placeholder((max(1, kfactor * g // act_group_size),), dtype=out_dtype, name="LUT_Biases")
+            LUT_Biases = te.placeholder(
+                (max(1, kfactor * g // act_group_size),),
+                dtype=out_dtype,
+                name="LUT_Biases",
+            )
             lut_biases_buffer = tvm.tir.decl_buffer(
-                LUT_Biases.shape, LUT_Biases.dtype, name="lut_biases_buffer", offset_factor=1, strides=[1]
+                LUT_Biases.shape,
+                LUT_Biases.dtype,
+                name="lut_biases_buffer",
+                offset_factor=1,
+                strides=[1],
             )
+
             def _lut_scale(k, val):
-                return val * LUT_Scales[k * g // act_group_size] + LUT_Biases[k * g // act_group_size] * alpha
+                return (
+                    val * LUT_Scales[k * g // act_group_size]
+                    + LUT_Biases[k * g // act_group_size] * alpha
+                )
         else:
+
             def _lut_scale(k, val):
                 return val
 
         def _scale_first(m, k, lut_val):
             return _lut_scale(k, lut_val.astype(out_dtype)) * _get_scale(m, k)
     else:
+
         def _scale_first(m, k, lut_val):
             return lut_val.astype(aggregation_dtype)
 
@@ -100,7 +136,11 @@ def tbl(
     )
 
     c_buffer = tvm.tir.decl_buffer(
-        C.shape, C.dtype, name="c_buffer", offset_factor=1, strides=[1],
+        C.shape,
+        C.dtype,
+        name="c_buffer",
+        offset_factor=1,
+        strides=[1],
     )
 
     def to_intrinstr(t):
@@ -139,7 +179,9 @@ def tbl(
             ib.emit(
                 tvm.tir.call_extern(
                     "int32",
-                    "tbl_g{}_{}_{}_update_s{}_k{}_b{}_ak{}_fa{}_z{}_os{}".format(*api_args),
+                    "tbl_g{}_{}_{}_update_s{}_k{}_b{}_ak{}_fa{}_z{}_os{}".format(
+                        *api_args
+                    ),
                     *args,
                 )
             )

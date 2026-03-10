@@ -23,7 +23,9 @@ Usage:
     CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/home/zijie/Code/nano-vllm:$PYTHONPATH \
         python tests/test_xattn_estimate_alignment.py --gpuonly
 """
+
 import sys
+
 sys.path.insert(0, "/home/zijie/Code/nano-vllm")
 
 import argparse
@@ -42,18 +44,30 @@ from nanovllm.ops.xattn import (
 # 命令行参数
 # ============================================================
 parser = argparse.ArgumentParser()
-parser.add_argument("--gpuonly", action="store_true", help="使用 GPU-only 模式保存的数据")
+parser.add_argument(
+    "--gpuonly", action="store_true", help="使用 GPU-only 模式保存的数据"
+)
 parser.add_argument("--data-file", type=str, default=None, help="数据文件路径")
-parser.add_argument("--chunk-size", type=int, default=None, help="覆盖 CHUNK_SIZE (用于测试不同分块大小)")
+parser.add_argument(
+    "--chunk-size",
+    type=int,
+    default=None,
+    help="覆盖 CHUNK_SIZE (用于测试不同分块大小)",
+)
 args = parser.parse_args()
 
 # ============================================================
 # 参数配置
 # ============================================================
 if args.gpuonly:
-    DATA_FILE = args.data_file or "/home/zijie/Code/nano-vllm/results/mask_alignment/gpuonly_layer0.pt"
+    DATA_FILE = (
+        args.data_file
+        or "/home/zijie/Code/nano-vllm/results/mask_alignment/gpuonly_layer0.pt"
+    )
 else:
-    DATA_FILE = args.data_file or "/home/zijie/Code/nano-vllm/results/kvcache/qkv_32485.pt"
+    DATA_FILE = (
+        args.data_file or "/home/zijie/Code/nano-vllm/results/kvcache/qkv_32485.pt"
+    )
 
 device = "cuda"
 
@@ -69,7 +83,7 @@ data = torch.load(DATA_FILE, map_location="cpu")
 # 检测数据格式并加载
 if "Q" in data:
     # GPU-only 模式保存的格式
-    print(f"[INFO] 检测到 GPU-only 模式数据格式")
+    print("[INFO] 检测到 GPU-only 模式数据格式")
     Q = data["Q"].to(device)
     K = data["K"].to(device)
     BSA_BLOCK_SIZE = data.get("block_size", 128)
@@ -85,7 +99,7 @@ if "Q" in data:
     layer_id = 0  # GPU-only 只保存 layer 0
 else:
     # offload 模式保存的格式
-    print(f"[INFO] 检测到 offload 模式数据格式")
+    print("[INFO] 检测到 offload 模式数据格式")
     Q = data["query"].to(device)
     K = data["key"].to(device)
     BSA_BLOCK_SIZE = 128
@@ -112,7 +126,9 @@ if saved_density is not None:
     print(f"Data layer_id: {layer_id}, saved density: {saved_density:.4f}")
 else:
     print(f"Data layer_id: {layer_id}")
-print(f"使用参数: STRIDE={STRIDE}, THRESHOLD={THRESHOLD}, CHUNK_SIZE={CHUNK_SIZE}, BSA_BLOCK_SIZE={BSA_BLOCK_SIZE}")
+print(
+    f"使用参数: STRIDE={STRIDE}, THRESHOLD={THRESHOLD}, CHUNK_SIZE={CHUNK_SIZE}, BSA_BLOCK_SIZE={BSA_BLOCK_SIZE}"
+)
 print()
 
 # ============================================================
@@ -123,7 +139,8 @@ print("Step 2: 调用 xattn_estimate (高层 API)")
 print("=" * 60)
 
 attn_sums_api, mask_api = xattn_estimate(
-    Q, K,
+    Q,
+    K,
     block_size=BSA_BLOCK_SIZE,
     stride=STRIDE,
     threshold=THRESHOLD,
@@ -137,14 +154,18 @@ k_blocks = (seq_len + BSA_BLOCK_SIZE - 1) // BSA_BLOCK_SIZE
 mask_api_valid = mask_api[:, :, :q_blocks, :k_blocks]
 
 # 计算 density (causal)
-causal_mask = torch.tril(torch.ones(q_blocks, k_blocks, device=device, dtype=torch.bool))
+causal_mask = torch.tril(
+    torch.ones(q_blocks, k_blocks, device=device, dtype=torch.bool)
+)
 total_api = causal_mask.sum().item() * batch_size * num_heads
 selected_api = (mask_api_valid & causal_mask.unsqueeze(0).unsqueeze(0)).sum().item()
 density_api = selected_api / total_api
 
 print(f"mask_api shape (padded): {mask_api.shape}")
 print(f"mask_api_valid shape:    {mask_api_valid.shape}")
-print(f"[xattn_estimate] density: {density_api:.6f} (selected={selected_api}, total={total_api})")
+print(
+    f"[xattn_estimate] density: {density_api:.6f} (selected={selected_api}, total={total_api})"
+)
 print()
 
 # ============================================================
@@ -199,7 +220,9 @@ for q_chunk_idx in range(q_chunk_num):
     q_end = q_start + reshaped_chunk_size * STRIDE
     Q_chunk = Q_padded[:, :, q_start:q_end, :]
 
-    chunk_start = (k_block_num - q_block_num) * reshaped_block_size + q_chunk_idx * reshaped_chunk_size
+    chunk_start = (
+        k_block_num - q_block_num
+    ) * reshaped_block_size + q_chunk_idx * reshaped_chunk_size
     chunk_end = chunk_start + reshaped_chunk_size
 
     # 阶段 1: 每个 KV chunk 计算 partial stats 和 raw scores
@@ -217,7 +240,9 @@ for q_chunk_idx in range(q_chunk_num):
 
         # 计算 raw attention scores
         attn_weights_kv = flat_group_gemm_fuse_reshape(
-            Q_chunk, K_chunk, STRIDE,
+            Q_chunk,
+            K_chunk,
+            STRIDE,
             chunk_start=chunk_start,
             chunk_end=chunk_end,
             is_causal=False,  # K 不完整，不能在这里用 causal
@@ -273,23 +298,31 @@ for q_chunk_idx in range(q_chunk_num):
     )
     simple_mask_list.append(simple_mask)
 
-    print(f"  Q chunk {q_chunk_idx}: merged {kv_chunk_num} KV chunks, attn_sum shape={attn_sum_concat.shape}")
+    print(
+        f"  Q chunk {q_chunk_idx}: merged {kv_chunk_num} KV chunks, attn_sum shape={attn_sum_concat.shape}"
+    )
 
 mask_kv_chunking = torch.cat(simple_mask_list, dim=2)
 
 # 应用与 xattn_estimate 相同的 causal mask 后处理 (xattn.py 第 1300-1306 行)
 mask_kv_chunking[:, :, -q_block_num:, -q_block_num:] = torch.where(
-    torch.tril(torch.ones(q_block_num, q_block_num, dtype=bool, device=device), diagonal=0),
+    torch.tril(
+        torch.ones(q_block_num, q_block_num, dtype=bool, device=device), diagonal=0
+    ),
     mask_kv_chunking[:, :, -q_block_num:, -q_block_num:],
     False,
 )
 
 mask_kv_chunking_valid = mask_kv_chunking[:, :, :q_blocks, :k_blocks]
-selected_kv = (mask_kv_chunking_valid & causal_mask.unsqueeze(0).unsqueeze(0)).sum().item()
+selected_kv = (
+    (mask_kv_chunking_valid & causal_mask.unsqueeze(0).unsqueeze(0)).sum().item()
+)
 density_kv = selected_kv / total_api
 
 print()
-print(f"[KV chunking] density: {density_kv:.6f} (selected={selected_kv}, total={total_api})")
+print(
+    f"[KV chunking] density: {density_kv:.6f} (selected={selected_kv}, total={total_api})"
+)
 print()
 
 # ============================================================
@@ -306,7 +339,9 @@ mask_diff = (mask_api_valid != mask_kv_chunking_valid).sum().item()
 print("| 方法 | density | 与 API 差异 | Mask 差异 |")
 print("|------|---------|-------------|-----------|")
 print(f"| xattn_estimate API | {density_api:.6f} | - | - |")
-print(f"| KV chunking | {density_kv:.6f} | {abs(density_api - density_kv):.6f} | {100*mask_diff/mask_total:.4f}% |")
+print(
+    f"| KV chunking | {density_kv:.6f} | {abs(density_api - density_kv):.6f} | {100 * mask_diff / mask_total:.4f}% |"
+)
 print()
 
 passed = abs(density_api - density_kv) < 1e-6 and mask_diff / mask_total < 0.001
@@ -325,7 +360,9 @@ if saved_mask is not None or saved_attn_sums is not None:
         # 比较 mask
         mask_saved_diff = (mask_api_valid != saved_mask_gpu).sum().item()
         mask_saved_total = saved_mask_gpu.numel()
-        print(f"| xattn_estimate vs GPU-only saved mask | 差异 blocks: {mask_saved_diff} / {mask_saved_total} ({100*mask_saved_diff/mask_saved_total:.4f}%) |")
+        print(
+            f"| xattn_estimate vs GPU-only saved mask | 差异 blocks: {mask_saved_diff} / {mask_saved_total} ({100 * mask_saved_diff / mask_saved_total:.4f}%) |"
+        )
 
         if mask_saved_diff == 0:
             print("✅ mask 与 GPU-only 保存完全一致")
@@ -338,7 +375,8 @@ if saved_mask is not None or saved_attn_sums is not None:
         # 需要从 xattn_estimate 获取 attn_sums
         # 重新调用一次获取 attn_sums
         attn_sums_check, _ = xattn_estimate(
-            Q, K,
+            Q,
+            K,
             block_size=BSA_BLOCK_SIZE,
             stride=STRIDE,
             threshold=THRESHOLD,
@@ -349,7 +387,9 @@ if saved_mask is not None or saved_attn_sums is not None:
 
         max_diff = (attn_sums_check_valid - saved_attn_sums_gpu).abs().max().item()
         mean_diff = (attn_sums_check_valid - saved_attn_sums_gpu).abs().mean().item()
-        print(f"| xattn_estimate vs GPU-only saved attn_sums | max diff: {max_diff:.6e}, mean diff: {mean_diff:.6e} |")
+        print(
+            f"| xattn_estimate vs GPU-only saved attn_sums | max diff: {max_diff:.6e}, mean diff: {mean_diff:.6e} |"
+        )
 
         if max_diff < 1e-5:
             print("✅ attn_sums 与 GPU-only 保存一致")

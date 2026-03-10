@@ -35,6 +35,7 @@ def get_policy(policy_name: str) -> EvictionPolicy:
     try:
         module_path, class_name = policy_name.rsplit(".", 1)
         import importlib
+
         module = importlib.import_module(module_path)
         policy_class = getattr(module, class_name)
         if not issubclass(policy_class, EvictionPolicy):
@@ -48,4 +49,10 @@ def get_policy(policy_name: str) -> EvictionPolicy:
         ) from e
 
 
-__all__ = ["EvictionPolicy", "LRUPolicy", "FIFOPolicy", "get_policy", "BUILTIN_POLICIES"]
+__all__ = [
+    "EvictionPolicy",
+    "LRUPolicy",
+    "FIFOPolicy",
+    "get_policy",
+    "BUILTIN_POLICIES",
+]

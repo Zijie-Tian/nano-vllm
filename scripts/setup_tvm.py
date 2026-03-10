@@ -52,7 +52,8 @@ def download_and_extract_llvm(extract_path):
 
     # Calculate the expected LLVM directory path
     llvm_dir = os.path.abspath(
-        os.path.join(extract_path, file_name.replace(".tar.xz", "")))
+        os.path.join(extract_path, file_name.replace(".tar.xz", ""))
+    )
 
     # Check if LLVM directory already exists
     if os.path.exists(llvm_dir):
@@ -67,10 +68,9 @@ def download_and_extract_llvm(extract_path):
     print(f"Downloading {file_name} from {download_url}")
     with urllib.request.urlopen(download_url) as response:
         if response.status != 200:
-            raise Exception(
-                f"Download failed with status code {response.status}")
+            raise Exception(f"Download failed with status code {response.status}")
         file_content = response.read()
-    
+
     # Ensure the extract path exists
     os.makedirs(extract_path, exist_ok=True)
 
@@ -84,8 +84,7 @@ def download_and_extract_llvm(extract_path):
         tar.extractall(path=extract_path)
 
     print("Download and extraction completed successfully.")
-    return os.path.abspath(
-        os.path.join(extract_path, file_name.replace(".tar.xz", "")))
+    return os.path.abspath(os.path.join(extract_path, file_name.replace(".tar.xz", "")))
 
 
 def update_submodules():
@@ -93,7 +92,8 @@ def update_submodules():
     try:
         print("Updating submodules...")
         subprocess.check_call(
-            ["git", "submodule", "update", "--init", "--recursive"], cwd=ROOT_DIR)
+            ["git", "submodule", "update", "--init", "--recursive"], cwd=ROOT_DIR
+        )
     except subprocess.CalledProcessError as error:
         raise RuntimeError("Failed to update submodules") from error
 
@@ -105,22 +105,27 @@ def build_tvm(llvm_path, llvm_config_path):
     if not os.path.exists("build"):
         os.makedirs("build")
     os.chdir("build")
-    
+
     # Copy the config.cmake as a baseline
     if not os.path.exists("config.cmake"):
         shutil.copy("../cmake/config.cmake", "config.cmake")
-    
+
     llvm_bin_dir = os.path.join(llvm_path, "bin")
-    
+
     # Set LLVM path and strict C/CXX compilers in config.cmake
     with open("config.cmake", "a") as config_file:
         if is_win():
             import posixpath
+
             llvm_config_path = llvm_config_path.replace(os.sep, posixpath.sep)
         config_file.write(f"\nset(USE_LLVM {llvm_config_path})\n")
         # Ensure we strictly use the downloaded clang/clang++
-        config_file.write(f"set(CMAKE_C_COMPILER {os.path.join(llvm_bin_dir, 'clang')})\n")
-        config_file.write(f"set(CMAKE_CXX_COMPILER {os.path.join(llvm_bin_dir, 'clang++')})\n")
+        config_file.write(
+            f"set(CMAKE_C_COMPILER {os.path.join(llvm_bin_dir, 'clang')})\n"
+        )
+        config_file.write(
+            f"set(CMAKE_CXX_COMPILER {os.path.join(llvm_bin_dir, 'clang++')})\n"
+        )
 
     # Override environment PATH to prioritize downloaded LLVM bin just for the subprocess
     env = os.environ.copy()
@@ -132,7 +137,9 @@ def build_tvm(llvm_path, llvm_config_path):
         subprocess.check_call(["cmake", ".."], env=env)
         if is_win():
             print("Building TVM...")
-            subprocess.check_call(["cmake", "--build", ".", "--config", "Release"], env=env)
+            subprocess.check_call(
+                ["cmake", "--build", ".", "--config", "Release"], env=env
+            )
         else:
             print("Building TVM (make -j128)...")
             subprocess.check_call(["make", "-j128"], env=env)
@@ -158,11 +165,11 @@ def main():
 
     # custom build tvm
     update_submodules()
-    
+
     # Set up LLVM for TVM
     llvm_path, llvm_config = setup_llvm_for_tvm()
     llvm_bin_path = os.path.abspath(os.path.join(llvm_path, "bin"))
-    
+
     # Build TVM
     build_tvm(llvm_path, llvm_config)
 
@@ -200,7 +207,7 @@ echo "  TVM_ROOT: $TVM_ROOT"
         tvm_root=tvm_root,
         llvm_bin_path=llvm_bin_path,
         tvm_python_path=tvm_python_path,
-        tvm_lib_path=tvm_lib_path
+        tvm_lib_path=tvm_lib_path,
     )
 
     # Ensure build directory exists
@@ -209,10 +216,11 @@ echo "  TVM_ROOT: $TVM_ROOT"
     env_file_path = os.path.abspath(os.path.join(build_dir, "nano-vllm-envs.sh"))
     with open(env_file_path, "w") as env_file:
         env_file.write(envs)
-        
-    print(f"\\nEnvironment file generated successfully.")
-    print(f"Please set environment variables by running:")
+
+    print("\\nEnvironment file generated successfully.")
+    print("Please set environment variables by running:")
     print(f"    source {os.path.relpath(env_file_path, ROOT_DIR)}")
+
 
 if __name__ == "__main__":
     main()

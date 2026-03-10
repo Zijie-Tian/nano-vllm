@@ -1,7 +1,5 @@
 import tvm
 from tvm import te
-import os
-from tvm.contrib import utils, clang
 from typing import Tuple, Optional
 from .utils import _create_llvm
 
@@ -14,7 +12,7 @@ def lut_ctor(
     dtype: str,
     cc: Optional[str] = None,
     cc_opts: Optional[list] = None,
-    out_dtype = "float16",
+    out_dtype="float16",
     fast_aggregation_k: int = 16,
 ) -> Tuple[tvm.tir.TensorIntrin, str, str, str]:
 
@@ -25,7 +23,8 @@ def lut_ctor(
     QLUT = te.compute(
         (k // g, 1 << g),
         lambda i, j: (
-            B[i * g + (j % g)] / LUT_Scales[i * g // act_group_size] - LUT_Biases[i * g // act_group_size]
+            B[i * g + (j % g)] / LUT_Scales[i * g // act_group_size]
+            - LUT_Biases[i * g // act_group_size]
         ).astype(dtype),
         name="QLUT",
     )
@@ -34,13 +33,25 @@ def lut_ctor(
         B.shape, B.dtype, name="b_buffer", offset_factor=1, strides=[1]
     )
     lut_scales_buffer = tvm.tir.decl_buffer(
-        LUT_Scales.shape, LUT_Scales.dtype, name="lut_scales", offset_factor=1, strides=[1]
+        LUT_Scales.shape,
+        LUT_Scales.dtype,
+        name="lut_scales",
+        offset_factor=1,
+        strides=[1],
     )
     lut_biases_buffer = tvm.tir.decl_buffer(
-        LUT_Biases.shape, LUT_Biases.dtype, name="lut_biases", offset_factor=1, strides=[1]
+        LUT_Biases.shape,
+        LUT_Biases.dtype,
+        name="lut_biases",
+        offset_factor=1,
+        strides=[1],
     )
     qlut_buffer = tvm.tir.decl_buffer(
-        QLUT.shape, QLUT.dtype, name="qlut_buffer", offset_factor=1, strides=[te.var("sc"), 1]
+        QLUT.shape,
+        QLUT.dtype,
+        name="qlut_buffer",
+        offset_factor=1,
+        strides=[te.var("sc"), 1],
     )
 
     def _intrin_func(ins, outs):
@@ -59,10 +70,17 @@ def lut_ctor(
         return ib.get()
 
     body_code = f"lut_ctor({fast_aggregation_k}, {bits})"
-    ll_code, header_code, body_code = _create_llvm("lut_ctor.cc", body_code, cc, cc_opts)
+    ll_code, header_code, body_code = _create_llvm(
+        "lut_ctor.cc", body_code, cc, cc_opts
+    )
 
     buffer_params = {"offset_factor": 1}
-    binds = {B: b_buffer, LUT_Scales: lut_scales_buffer, LUT_Biases: lut_biases_buffer, QLUT: qlut_buffer}
+    binds = {
+        B: b_buffer,
+        LUT_Scales: lut_scales_buffer,
+        LUT_Biases: lut_biases_buffer,
+        QLUT: qlut_buffer,
+    }
     return (
         te.decl_tensor_intrin(
             QLUT.op,
@@ -82,7 +100,7 @@ def partial_max(
     k: int = 32,
     cc: Optional[str] = None,
     cc_opts: Optional[list] = None,
-    out_dtype = "float16",
+    out_dtype="float16",
 ) -> Tuple[tvm.tir.TensorIntrin, str, str, str]:
 
     if dtype == "int8":
@@ -104,7 +122,11 @@ def partial_max(
         B.shape, B.dtype, name="b_buffer", offset_factor=1, strides=[1]
     )
     lut_scales_buffer = tvm.tir.decl_buffer(
-        LUT_Scales.shape, LUT_Scales.dtype, name="lut_scales", offset_factor=1, strides=[1]
+        LUT_Scales.shape,
+        LUT_Scales.dtype,
+        name="lut_scales",
+        offset_factor=1,
+        strides=[1],
     )
 
     def _intrin_func(ins, outs):
@@ -125,7 +147,7 @@ def partial_max(
             ib.emit(
                 tvm.tir.call_extern(
                     "int32",
-                    f"partial_max_reset",
+                    "partial_max_reset",
                     lut_scales_buffer.access_ptr("w"),
                 )
             )

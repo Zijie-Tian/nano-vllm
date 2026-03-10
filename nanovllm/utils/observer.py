@@ -49,6 +49,7 @@ class Observer:
     def print_summary(cls) -> None:
         """打印人类可读的摘要（子类可选覆盖）"""
         import json
+
         print(json.dumps(cls.get_summary(), indent=2))
 
 
@@ -103,4 +104,6 @@ class InferenceObserver(Observer):
     @classmethod
     def print_summary(cls) -> None:
         """打印摘要"""
-        print(f"[InferenceObserver] TTFT: {cls.ttft / 1e6:.2f}ms, TPOT: {cls.tpot / 1e6:.2f}ms")
+        print(
+            f"[InferenceObserver] TTFT: {cls.ttft / 1e6:.2f}ms, TPOT: {cls.tpot / 1e6:.2f}ms"
+        )

@@ -43,7 +43,9 @@ class BLASSTPolicy(SparsePolicy):
     supports_prefill = True
     supports_decode = True
 
-    def __init__(self, a: int = 16384, fixed_lambda: float = None, granularity: int = 128):
+    def __init__(
+        self, a: int = 16384, fixed_lambda: float = None, granularity: int = 128
+    ):
         self.a = a
         self.fixed_lambda = fixed_lambda
         self.granularity = granularity
@@ -66,8 +68,10 @@ class BLASSTPolicy(SparsePolicy):
     ) -> List[int]:
         if ctx.layer_id == 0:
             self._stats_num_chunks += 1
-            logger.debug(f"[BLASST] chunk={ctx.query_chunk_idx}, "
-                        f"available={len(available_blocks)}, selected={len(available_blocks)}")
+            logger.debug(
+                f"[BLASST] chunk={ctx.query_chunk_idx}, "
+                f"available={len(available_blocks)}, selected={len(available_blocks)}"
+            )
         return available_blocks
 
     def reset_stats(self) -> None:
@@ -87,10 +91,17 @@ class BLASSTPolicy(SparsePolicy):
         }
 
     def compute_prefill(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-        cu_seqlens_q: torch.Tensor, cu_seqlens_k: torch.Tensor,
-        max_seqlen_q: int, max_seqlen_k: int, softmax_scale: float,
-        layer_id: int, block_tables=None,
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+        softmax_scale: float,
+        layer_id: int,
+        block_tables=None,
     ) -> torch.Tensor:
         raise NotImplementedError("BLASST policy only supports chunked prefill mode.")
 
@@ -116,7 +127,7 @@ class BLASSTPolicy(SparsePolicy):
         total_seq_len = len(seq) if seq else num_tokens
         lambda_val = self._get_lambda(total_seq_len)
         ln_lambda = math.log(lambda_val)
-        
+
         q_len = q.shape[0]
         num_heads = q.shape[1]
         compute_stream = offload_engine.compute_stream
@@ -125,7 +136,7 @@ class BLASSTPolicy(SparsePolicy):
         historical_o = None
         historical_lse = None
 
-        collect_density = (layer_id == 0)
+        collect_density = layer_id == 0
         compute_density_sum = 0.0
         required_kv_density_sum = 0.0
         num_density_measurements = 0
@@ -137,10 +148,16 @@ class BLASSTPolicy(SparsePolicy):
         num_kv_subblocks = kvcache_manager.block_size // TRITON_BLOCK_N
 
         def get_mask_buffer(is_causal=False, kv_len_override=None):
-            num_sub = num_kv_subblocks if kv_len_override is None else (kv_len_override + TRITON_BLOCK_N - 1) // TRITON_BLOCK_N
+            num_sub = (
+                num_kv_subblocks
+                if kv_len_override is None
+                else (kv_len_override + TRITON_BLOCK_N - 1) // TRITON_BLOCK_N
+            )
             # Initialize to 1s (Compute all by default)
-            mask = torch.ones((grid_0, grid_1, num_sub), device=q.device, dtype=torch.int8)
-            
+            mask = torch.ones(
+                (grid_0, grid_1, num_sub), device=q.device, dtype=torch.int8
+            )
+
             if is_causal:
                 # Apply Block-level Causal Mask: Set to 0 where KV strictly in future of Q
                 for q_idx in range(grid_0):
@@ -160,7 +177,9 @@ class BLASSTPolicy(SparsePolicy):
 
             num_preload = min(num_slots, num_blocks)
             for i in range(num_preload):
-                offload_engine.load_to_slot_layer(load_slots[i], layer_id, cpu_block_table[i])
+                offload_engine.load_to_slot_layer(
+                    load_slots[i], layer_id, cpu_block_table[i]
+                )
 
             for block_idx in range(num_blocks):
                 current_slot = load_slots[block_idx % num_slots]
@@ -174,19 +193,23 @@ class BLASSTPolicy(SparsePolicy):
 
                     # Historical blocks are fully visible
                     mask_buffer = get_mask_buffer(is_causal=False)
-                    
+
                     out, lse = blasst_chunked_prefill(
-                        q=q_input, k=k_input, v=v_input,
+                        q=q_input,
+                        k=k_input,
+                        v=v_input,
                         threshold_ln_lambda=ln_lambda,
                         lse_in=historical_lse,  # Pass historical LSE to preserve running max
-                        mask_buffer=mask_buffer
+                        mask_buffer=mask_buffer,
                     )
-                    
+
                     compute_stream.synchronize()
                     if collect_density:
                         compute_density_sum += mask_buffer.float().mean().item()
                         required_kv_mask = mask_buffer.any(dim=0)
-                        required_kv_density_sum += required_kv_mask.float().mean().item()
+                        required_kv_density_sum += (
+                            required_kv_mask.float().mean().item()
+                        )
                         num_density_measurements += 1
                     if DEBUG_DUMP_BLASST_MASK:
                         layer_masks[f"kvchunk_{cpu_block_id}"] = mask_buffer.cpu()
@@ -204,25 +227,34 @@ class BLASSTPolicy(SparsePolicy):
 
                 next_block_idx = block_idx + num_slots
                 if next_block_idx < num_blocks:
-                    offload_engine.load_to_slot_layer(load_slots[next_block_idx % num_slots], 
-                                                     layer_id, cpu_block_table[next_block_idx])
+                    offload_engine.load_to_slot_layer(
+                        load_slots[next_block_idx % num_slots],
+                        layer_id,
+                        cpu_block_table[next_block_idx],
+                    )
 
         # 2. Process Current Prefill Chunk (GPU Buffer, Causal)
         with torch.cuda.stream(compute_stream):
-            k_curr, v_curr = offload_engine.get_prefill_buffer_slice(layer_id, num_tokens)
+            k_curr, v_curr = offload_engine.get_prefill_buffer_slice(
+                layer_id, num_tokens
+            )
             k_curr_input = k_curr.transpose(1, 2).contiguous()
             v_curr_input = v_curr.transpose(1, 2).contiguous()
-            
+
             # Causal mask for the diagonal chunk
-            curr_mask_buffer = get_mask_buffer(is_causal=True, kv_len_override=num_tokens)
+            curr_mask_buffer = get_mask_buffer(
+                is_causal=True, kv_len_override=num_tokens
+            )
 
             out_curr, lse_curr = blasst_chunked_prefill(
-                q=q_input, k=k_curr_input, v=v_curr_input,
+                q=q_input,
+                k=k_curr_input,
+                v=v_curr_input,
                 threshold_ln_lambda=ln_lambda,
                 lse_in=historical_lse,
-                mask_buffer=curr_mask_buffer
+                mask_buffer=curr_mask_buffer,
             )
-            
+
             compute_stream.synchronize()
             if collect_density:
                 # To be completely accurate with density, we should probably ignore the causal 0s,
@@ -240,7 +272,9 @@ class BLASSTPolicy(SparsePolicy):
             if historical_o is None:
                 final_o = block_o
             else:
-                final_o, _ = merge_attention_outputs(historical_o, historical_lse, block_o, block_lse)
+                final_o, _ = merge_attention_outputs(
+                    historical_o, historical_lse, block_o, block_lse
+                )
 
         # 3. Finalize
         if DEBUG_DUMP_BLASST_MASK and layer_masks:
@@ -251,21 +285,35 @@ class BLASSTPolicy(SparsePolicy):
         if layer_id == 0 and num_density_measurements > 0:
             avg_comp = compute_density_sum / num_density_measurements
             avg_req = required_kv_density_sum / num_density_measurements
-            logger.info(f"[BLASST] Chunk {current_chunk_idx} Stats: "
-                       f"Compute Density={avg_comp*100:.2f}%, "
-                       f"Required KV Density={avg_req*100:.2f}%")
+            logger.info(
+                f"[BLASST] Chunk {current_chunk_idx} Stats: "
+                f"Compute Density={avg_comp * 100:.2f}%, "
+                f"Required KV Density={avg_req * 100:.2f}%"
+            )
 
         torch.cuda.default_stream().wait_stream(compute_stream)
         return final_o.squeeze(0)
 
     def compute_chunked_decode(
-        self, q: torch.Tensor, layer_id: int, softmax_scale: float,
-        offload_engine: "OffloadEngine", kvcache_manager: "KVCacheManager",
-        seq: "Sequence", selected_blocks: List[int],
+        self,
+        q: torch.Tensor,
+        layer_id: int,
+        softmax_scale: float,
+        offload_engine: "OffloadEngine",
+        kvcache_manager: "KVCacheManager",
+        seq: "Sequence",
+        selected_blocks: List[int],
     ) -> torch.Tensor:
         from .full_policy import FullAttentionPolicy
+
         return FullAttentionPolicy().compute_chunked_decode(
-            q, layer_id, softmax_scale, offload_engine, kvcache_manager, seq, selected_blocks
+            q,
+            layer_id,
+            softmax_scale,
+            offload_engine,
+            kvcache_manager,
+            seq,
+            selected_blocks,
         )
 
     def offload_prefill_chunk(
@@ -276,7 +324,9 @@ class BLASSTPolicy(SparsePolicy):
         num_tokens: int,
         **kwargs,
     ) -> None:
-        super().offload_prefill_chunk(offload_engine, layer_id, cpu_block_id, num_tokens, **kwargs)
+        super().offload_prefill_chunk(
+            offload_engine, layer_id, cpu_block_id, num_tokens, **kwargs
+        )
 
     def offload_decode_chunk(
         self,

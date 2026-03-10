@@ -19,21 +19,20 @@ _GLOBAL_TEMPLATE_CACHE = {}
 
 
 class OpCodegen:
-
     def __init__(
-            self,
-            dtype: str,
-            target: str,
-            name: str,
-            tune: bool = False,
-            reuse_tuned: bool = False,
-            verify: bool = True,
-            save_dir: str = "",
-            target_host: Optional[str] = None,
-            remote_kwargs: Optional[dict] = None,
-            cc: Optional[str] = None,
-            cc_opts: Optional[list] = None,
-            num_threads: int = 4,
+        self,
+        dtype: str,
+        target: str,
+        name: str,
+        tune: bool = False,
+        reuse_tuned: bool = False,
+        verify: bool = True,
+        save_dir: str = "",
+        target_host: Optional[str] = None,
+        remote_kwargs: Optional[dict] = None,
+        cc: Optional[str] = None,
+        cc_opts: Optional[list] = None,
+        num_threads: int = 4,
     ) -> None:
         self.dtype = dtype
         self.name = name
@@ -44,7 +43,9 @@ class OpCodegen:
         pathlib.Path(self.save_path).mkdir(parents=True, exist_ok=True)
         self.target = tvm.target.Target(target, host=target_host)
         self.remote_kwargs = remote_kwargs.copy() if remote_kwargs is not None else None
-        self.build_func = self.remote_kwargs.pop("build_func") if remote_kwargs is not None else None
+        self.build_func = (
+            self.remote_kwargs.pop("build_func") if remote_kwargs is not None else None
+        )
         self.cc = cc
         self.cc_opts = cc_opts
         self.num_threads = num_threads
@@ -61,7 +62,9 @@ class OpCodegen:
     def _reference(self, *args) -> List[np.ndarray]:
         raise NotImplementedError
 
-    def _define_config(self, cfg: Union[autotvm.ConfigSpace, autotvm.ConfigEntity], *args):
+    def _define_config(
+        self, cfg: Union[autotvm.ConfigSpace, autotvm.ConfigEntity], *args
+    ):
         for key in cfg:
             setattr(self, key, cfg[key].val)
 
@@ -101,8 +104,12 @@ class OpCodegen:
             task = autotvm.task.create(template_name, args=args, target=self.target)
             tuner = autotvm.tuner.GridSearchTuner(task)
 
-            def _preload_function(remote: rpc.RPCSession, build_result: tvm.runtime.Module):
-                remote.get_function("runtime.config_threadpool")(thread_affinity, self.num_threads)
+            def _preload_function(
+                remote: rpc.RPCSession, build_result: tvm.runtime.Module
+            ):
+                remote.get_function("runtime.config_threadpool")(
+                    thread_affinity, self.num_threads
+                )
 
             if self.remote_kwargs is not None:
                 measure_option = autotvm.measure_option(
@@ -134,10 +141,10 @@ class OpCodegen:
 
     def _postprocess_tvm_c_code(self, c_code: str, template_name: str):
         to_removes = [
-            r'#define TVM_EXPORTS',
+            r"#define TVM_EXPORTS",
             r'#include "tvm/runtime/c_runtime_api.h"',
             r'#include "tvm/runtime/c_backend_api.h"',
-            r'TVM_DLL',
+            r"TVM_DLL",
         ]
         for s in to_removes:
             c_code = c_code.replace(s, "")
@@ -163,19 +170,25 @@ extern "C"
         c_code = re.sub(tvm_main_def_ptn, "", c_code, flags=re.MULTILINE)
 
         # Modify kernel args
-        kernel_dcl_ptn = """#ifdef __cplusplus
+        kernel_dcl_ptn = (
+            """#ifdef __cplusplus
 extern "C"
 #endif
- (int32_t """ + template_name + """\(void\* args, int32_t\* arg_type_ids, int32_t num_args, void\* out_ret_value, int32_t\* out_ret_tcode, void\* resource_handle\)) {
+ (int32_t """
+            + template_name
+            + """\(void\* args, int32_t\* arg_type_ids, int32_t num_args, void\* out_ret_value, int32_t\* out_ret_tcode, void\* resource_handle\)) {
 ([\s\S]+)
 }"""
+        )
         kernel_m = re.search(kernel_dcl_ptn, c_code, re.MULTILINE)
         if not kernel_m:
             raise RuntimeError("can't find kernel declaration")
 
         kernel_body = kernel_m[2]
         # Modify args retrieve
-        args_def_ptn = """(void\* \w+) = \(\(\(TVMValue\*\)args\)\[(\d+)\]\.v_handle\);"""
+        args_def_ptn = (
+            """(void\* \w+) = \(\(\(TVMValue\*\)args\)\[(\d+)\]\.v_handle\);"""
+        )
         args = []
         for m in re.finditer(args_def_ptn, kernel_body):
             if int(m[2]) != len(args):
@@ -218,10 +231,14 @@ extern "C"
         c_code = c_code.replace(kernel_m[2], kernel_body)
 
         # Move kernel def to header
-        kernel_def = """#ifdef __cplusplus
+        kernel_def = (
+            """#ifdef __cplusplus
 extern "C"
 #endif
- """ + kernel_args + ";"
+ """
+            + kernel_args
+            + ";"
+        )
         c_code = c_code.replace(kernel_def, "")
         c_header = kernel_def
 
@@ -250,36 +267,49 @@ typedef _Float16 half;
     ):
         template_name = self.get_template_name(*args)
         log_path = self.log_path
-        
-        self._vectorization = (return_type != "c")
-        
+
+        self._vectorization = return_type != "c"
+
         with self.target:
             if not preserve_cfg:
                 # Register the template to avoid "missing task" errors
                 self.template(template_name)
-                
+
                 if self.tune:
-                    self.tuning(*args, n_trial=n_trial, thread_affinity=thread_affinity, **eval_kwargs)
-                
+                    self.tuning(
+                        *args,
+                        n_trial=n_trial,
+                        thread_affinity=thread_affinity,
+                        **eval_kwargs,
+                    )
+
                 # Manual configuration application to ensure self.bm etc are set
                 task = autotvm.task.create(template_name, args=args, target=self.target)
                 if os.path.exists(log_path):
                     best_config = None
                     try:
                         from tvm.autotvm.record import load_from_file
+
                         for inp, res in load_from_file(log_path):
                             # Logs are isolated by save_path (which includes target info implicitly)
                             # so checking template_name is sufficient and avoids Target equality issues
                             if inp.task.workload[0] == template_name:
-                                if best_config is None or res.costs[0] < best_config[1].costs[0]:
+                                if (
+                                    best_config is None
+                                    or res.costs[0] < best_config[1].costs[0]
+                                ):
                                     best_config = (inp.config, res)
-                        
+
                         if best_config:
-                            logger.info(f"Applying best config for {template_name} from {log_path}")
+                            logger.info(
+                                f"Applying best config for {template_name} from {log_path}"
+                            )
                             self._define_config(best_config[0], *args)
                             ctx = autotvm.apply_history_best(log_path)
                         else:
-                            logger.warning(f"No matching workload found in {log_path}, using fallback")
+                            logger.warning(
+                                f"No matching workload found in {log_path}, using fallback"
+                            )
                             self._define_config(task.config_space.get(0), *args)
                             ctx = autotvm.FallbackContext()
                     except Exception as e:
@@ -289,46 +319,49 @@ typedef _Float16 half;
                 else:
                     self._define_config(task.config_space.get(0), *args)
                     ctx = autotvm.FallbackContext()
-                
+
                 # Still use ctx for the build phase if needed by some internal TVM logic
                 # although we manually set the attributes already.
                 with ctx:
                     # We don't call template(*args) here to avoid registration errors.
                     # Instead we directly call _compute and _schedule.
                     pass
-            
+
             # Re-run compute and schedule with the configured attributes
             tensors = self._compute(*args)
             s = self._schedule(tensors)
-            
+
             # logger.info(tvm.lower(s, tensors, simple_mode=True))
-            
+
             func = tvm.build(s, tensors, name=template_name)
             if self.target.kind.name == "llvm":
                 func.save(os.path.join(self.save_path, "src.S"), "s")
                 func.save(os.path.join(self.save_path, "src.ll"), "ll")
             elif self.target.kind.name == "c":
                 func.save(os.path.join(self.save_path, "src.c"), "c")
-            
+
             if return_type == "c":
                 func_c = tvm.build(s, tensors, target="c", name=template_name)
                 return self._postprocess_tvm_c_code(func_c.get_source(), template_name)
-            
+
             if return_type == "lower":
                 return tvm.lower(s, tensors, name=template_name)
-            
+
             func_syslib = tvm.build(
                 s,
                 tensors,
                 name=template_name,
                 runtime=relay.backend.Runtime("cpp", {"system-lib": True}),
             )
-            func_syslib.save(os.path.join(self.save_path, f"kernels.o"))
-            
+            func_syslib.save(os.path.join(self.save_path, "kernels.o"))
+
             if self.verify:
                 arrays = self._reference(*args)
             else:
-                arrays = [np.zeros(shape=[int(s) for s in list(t.shape)], dtype=t.dtype) for t in tensors]
+                arrays = [
+                    np.zeros(shape=[int(s) for s in list(t.shape)], dtype=t.dtype)
+                    for t in tensors
+                ]
             return func, arrays
 
     def _verify(self, tvm_arrays: List[tvm.nd.NDArray], arrays: List[np.ndarray]):
@@ -346,7 +379,7 @@ typedef _Float16 half;
             **eval_kwargs,
         )
         assert func
-        
+
         if self.remote_kwargs is not None:
             remote_kwargs = {
                 "device_key" if k == "key" else k: v
@@ -362,7 +395,7 @@ typedef _Float16 half;
             func = remote.load_module(relpath)
             config_threadpool = remote.get_function("runtime.config_threadpool")
             get_num_threads = remote.get_function("runtime.NumThreads")
-            
+
             if self.target.kind.name == "opencl":
                 dev = remote.cl()
             elif self.target.kind.name == "vulkan":
@@ -373,15 +406,15 @@ typedef _Float16 half;
             config_threadpool = get_global_func("runtime.config_threadpool")
             get_num_threads = tvm.runtime.num_threads
             dev = tvm.device(self.target.kind.name)
-        
+
         config_threadpool(thread_affinity, self.num_threads)
         logger.info(f"Threads: {get_num_threads()}")
-        
+
         tvm_arrays = [tvm.nd.array(a, dev) for a in arrays]
         func(*tvm_arrays)
         if self.verify:
             self._verify(tvm_arrays, arrays)
-        
+
         evaluator = func.time_evaluator(
             func.entry_name,
             dev,
@@ -408,7 +441,7 @@ typedef _Float16 half;
             self.tuning(*args, thread_affinity=thread_affinity, **eval_kwargs)
 
         func = self.template(template_name)
-        
+
         with self._get_dispatch_context(*args):
             sch, tensors = func(*args)
 
@@ -416,7 +449,9 @@ typedef _Float16 half;
             device = tvm.device(str(self.target.kind), 0)
 
         def preload(sess, build_result):
-            sess.get_function("runtime.config_threadpool")(thread_affinity, self.num_threads)
+            sess.get_function("runtime.config_threadpool")(
+                thread_affinity, self.num_threads
+            )
 
         if self.remote_kwargs is not None:
             func_impl = tvm.build(
@@ -428,14 +463,15 @@ typedef _Float16 half;
             remote = request_remote(**self.remote_kwargs)
             temp = utils.tempdir()
             path = temp.relpath("dev_lib.tar")
-            func_impl.export_library(path, ndk.create_shared if self.build_func == "ndk" else None)
+            func_impl.export_library(
+                path, ndk.create_shared if self.build_func == "ndk" else None
+            )
             remote.upload(path)
             func_impl = remote.load_module("dev_lib.tar")
             preload(remote, func_impl)
             ctx = remote.device(str(self.target.kind), 0)
             return func_impl, ctx
         else:
-            ll = self.extra_cc_body
             func_impl = tvm.build(
                 sch,
                 tensors,

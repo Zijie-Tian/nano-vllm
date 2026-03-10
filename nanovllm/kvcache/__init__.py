@@ -35,11 +35,12 @@ def create_kvcache_manager(config: "Config") -> KVCacheManager:
     Returns:
         KVCacheManager instance
     """
-    if not getattr(config, 'enable_cpu_offload', False):
+    if not getattr(config, "enable_cpu_offload", False):
         # Default: pure GPU mode
         # Check if sparse policy is requested for GPU-only mode
         from nanovllm.config import SparsePolicyType
-        sparse_policy_type = getattr(config, 'sparse_policy', None)
+
+        sparse_policy_type = getattr(config, "sparse_policy", None)
         # Handle None case - use FULL as default
         if sparse_policy_type is None:
             sparse_policy_type = SparsePolicyType.FULL
@@ -52,31 +53,34 @@ def create_kvcache_manager(config: "Config") -> KVCacheManager:
             policy_kwargs = {}
             if sparse_policy_type == SparsePolicyType.QUEST:
                 policy_kwargs = {
-                    'topk_blocks': getattr(config, 'sparse_topk_blocks', 8),
-                    'threshold_blocks': getattr(config, 'sparse_threshold_blocks', 4),
+                    "topk_blocks": getattr(config, "sparse_topk_blocks", 8),
+                    "threshold_blocks": getattr(config, "sparse_threshold_blocks", 4),
                 }
             elif sparse_policy_type == SparsePolicyType.XATTN_BSA:
                 policy_kwargs = {
-                    'block_size': getattr(config, 'sparse_block_size', 128),
-                    'samples_per_chunk': getattr(config, 'sparse_samples_per_chunk', 128),
-                    'threshold': getattr(config, 'sparse_threshold', 0.9),
-                    'use_triton': getattr(config, 'sparse_use_triton', True),
-                    'stride': getattr(config, 'sparse_stride', 8),
-                    'chunk_size': getattr(config, 'sparse_chunk_size', 16384),
+                    "block_size": getattr(config, "sparse_block_size", 128),
+                    "samples_per_chunk": getattr(
+                        config, "sparse_samples_per_chunk", 128
+                    ),
+                    "threshold": getattr(config, "sparse_threshold", 0.9),
+                    "use_triton": getattr(config, "sparse_use_triton", True),
+                    "stride": getattr(config, "sparse_stride", 8),
+                    "chunk_size": getattr(config, "sparse_chunk_size", 16384),
                 }
             elif sparse_policy_type == SparsePolicyType.COMPASS:
                 policy_kwargs = {}  # COMPASS has no extra parameters
             elif sparse_policy_type == SparsePolicyType.BLASST:
                 policy_kwargs = {
-                    'a': getattr(config, 'blasst_a', 16384),
-                    'fixed_lambda': getattr(config, 'blasst_fixed_lambda', None),
-                    'granularity': getattr(config, 'blasst_granularity', 128),
+                    "a": getattr(config, "blasst_a", 16384),
+                    "fixed_lambda": getattr(config, "blasst_fixed_lambda", None),
+                    "granularity": getattr(config, "blasst_granularity", 128),
                 }
 
             sparse_policy = create_sparse_policy(sparse_policy_type, **policy_kwargs)
         else:
             # FULL policy for GPU-only mode - always create for consistent API
             from nanovllm.kvcache.sparse import FullAttentionPolicy
+
             sparse_policy = FullAttentionPolicy()
 
         return GPUOnlyManager(
@@ -95,31 +99,31 @@ def create_kvcache_manager(config: "Config") -> KVCacheManager:
 
     # Create sparse policy from config enum
     # Quest is decode-only: prefill returns all blocks (query=None), decode does Top-K
-    sparse_policy_type = getattr(config, 'sparse_policy', SparsePolicyType.FULL)
+    sparse_policy_type = getattr(config, "sparse_policy", SparsePolicyType.FULL)
 
     # Build policy kwargs based on policy type
     policy_kwargs = {}
     if sparse_policy_type == SparsePolicyType.QUEST:
         policy_kwargs = {
-            'topk_blocks': getattr(config, 'sparse_topk_blocks', 8),
-            'threshold_blocks': getattr(config, 'sparse_threshold_blocks', 4),
+            "topk_blocks": getattr(config, "sparse_topk_blocks", 8),
+            "threshold_blocks": getattr(config, "sparse_threshold_blocks", 4),
         }
     elif sparse_policy_type == SparsePolicyType.XATTN_BSA:
         policy_kwargs = {
-            'block_size': getattr(config, 'sparse_block_size', 128),
-            'samples_per_chunk': getattr(config, 'sparse_samples_per_chunk', 128),
-            'threshold': getattr(config, 'sparse_threshold', 0.9),
-            'use_triton': getattr(config, 'sparse_use_triton', True),
-            'stride': getattr(config, 'sparse_stride', 8),
-            'chunk_size': getattr(config, 'sparse_chunk_size', 16384),
+            "block_size": getattr(config, "sparse_block_size", 128),
+            "samples_per_chunk": getattr(config, "sparse_samples_per_chunk", 128),
+            "threshold": getattr(config, "sparse_threshold", 0.9),
+            "use_triton": getattr(config, "sparse_use_triton", True),
+            "stride": getattr(config, "sparse_stride", 8),
+            "chunk_size": getattr(config, "sparse_chunk_size", 16384),
         }
     elif sparse_policy_type == SparsePolicyType.COMPASS:
         policy_kwargs = {}  # COMPASS has no extra parameters
     elif sparse_policy_type == SparsePolicyType.BLASST:
         policy_kwargs = {
-            'a': getattr(config, 'blasst_a', 16384),
-            'fixed_lambda': getattr(config, 'blasst_fixed_lambda', None),
-            'granularity': getattr(config, 'blasst_granularity', 128),
+            "a": getattr(config, "blasst_a", 16384),
+            "fixed_lambda": getattr(config, "blasst_fixed_lambda", None),
+            "granularity": getattr(config, "blasst_granularity", 128),
         }
 
     sparse_policy = create_sparse_policy(sparse_policy_type, **policy_kwargs)
@@ -137,7 +141,7 @@ def create_kvcache_manager(config: "Config") -> KVCacheManager:
     from nanovllm.kvcache.hybrid_manager import HybridKVCacheManager
     from nanovllm.kvcache.policies import get_policy
 
-    eviction_policy = get_policy(getattr(config, 'offload_policy', 'lru'))
+    eviction_policy = get_policy(getattr(config, "offload_policy", "lru"))
 
     return HybridKVCacheManager(
         num_gpu_slots=num_gpu_blocks,

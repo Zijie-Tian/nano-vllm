@@ -12,8 +12,11 @@ from .adapters.base import SteppableModel
 @dataclass
 class AlignmentResult:
     """Result of an alignment test."""
+
     passed: bool
-    all_comparisons: List[Tuple[Breakpoint, Breakpoint, ComparisonResult]] = field(default_factory=list)
+    all_comparisons: List[Tuple[Breakpoint, Breakpoint, ComparisonResult]] = field(
+        default_factory=list
+    )
     failed_at: Optional[Breakpoint] = None
     message: str = ""
 
@@ -81,9 +84,9 @@ class BreakpointAligner:
 
         if self.verbose:
             phase = "prefill" if is_prefill else "decode"
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print(f"Alignment Test ({phase})")
-            print(f"{'='*60}")
+            print(f"{'=' * 60}")
 
         # Start both generators
         ref_gen = self.ref_model.step(input_ids, positions, is_prefill)
@@ -140,7 +143,9 @@ class BreakpointAligner:
                 # Handle shape mismatches
                 if ref_t.shape != test_t.shape:
                     if self.verbose:
-                        print(f"[{ref_bp.name}] Shape mismatch: ref={ref_t.shape} vs test={test_t.shape}")
+                        print(
+                            f"[{ref_bp.name}] Shape mismatch: ref={ref_t.shape} vs test={test_t.shape}"
+                        )
 
                     # Try to reshape if element count matches
                     if ref_t.numel() == test_t.numel():
@@ -160,7 +165,9 @@ class BreakpointAligner:
 
                 if self.verbose:
                     status = "\u2713" if result.passed else "\u2717"
-                    print(f"{status} [{ref_bp.name}] cos={result.cosine_similarity:.6f}, max_diff={result.max_abs_diff:.2e}")
+                    print(
+                        f"{status} [{ref_bp.name}] cos={result.cosine_similarity:.6f}, max_diff={result.max_abs_diff:.2e}"
+                    )
 
                 if not result.passed and self.stop_on_error:
                     if self.verbose:
@@ -199,13 +206,15 @@ class BreakpointAligner:
         total = len(all_comparisons)
 
         if self.verbose:
-            print(f"{'='*60}")
+            print(f"{'=' * 60}")
             status = "PASSED" if all_passed else "FAILED"
             print(f"Result: {status} ({passed_count}/{total} breakpoints)")
-            print(f"{'='*60}\n")
+            print(f"{'=' * 60}\n")
 
         return AlignmentResult(
             passed=all_passed,
             all_comparisons=all_comparisons,
-            message="All breakpoints aligned" if all_passed else "Some breakpoints failed",
+            message="All breakpoints aligned"
+            if all_passed
+            else "Some breakpoints failed",
         )

@@ -7,11 +7,14 @@ import torch
 
 class SparsePolicyType(Enum):
     """Sparse attention policy types."""
+
+    # fmt: off
     FULL = auto()       # No sparse attention (load all blocks)
     QUEST = auto()      # Query-aware Top-K block selection (decode only)
     XATTN_BSA = auto()  # XAttention Block Sparse Attention (prefill only, chunked)
     COMPASS = auto()    # COMPASS sparse attention (prefill only, chunked)
     BLASST = auto()     # BLASST sparse attention (prefill only, chunked)
+    # fmt: on
 
 
 @dataclass
@@ -33,7 +36,9 @@ class Config:
     enable_cpu_offload: bool = False
     offload_policy: str = "lru"  # "lru", "fifo", or full class path
     num_transfer_streams: int = 4  # Number of CUDA streams for async transfers
-    num_gpu_blocks: int = -1  # User-specified GPU blocks count, -1 = auto (use max available)
+    num_gpu_blocks: int = (
+        -1
+    )  # User-specified GPU blocks count, -1 = auto (use max available)
 
     # Computed fields for offload (set in __post_init__ or by ModelRunner)
     num_gpu_kvcache_blocks: int = -1
@@ -57,7 +62,9 @@ class Config:
 
     # BLASST specific parameters
     blasst_a: int = 16384  # Inverse formula numerator (λ = a / L). Default 16384 gives λ=0.5 at 32K.
-    blasst_fixed_lambda: float | None = None  # Fixed threshold instead of inverse formula (overrides a)
+    blasst_fixed_lambda: float | None = (
+        None  # Fixed threshold instead of inverse formula (overrides a)
+    )
     blasst_granularity: int = 128  # Token granularity for skip decisions (default 128)
 
     def __post_init__(self):
@@ -66,8 +73,11 @@ class Config:
         assert 1 <= self.tensor_parallel_size <= 8
         self.hf_config = AutoConfig.from_pretrained(self.model, trust_remote_code=True)
         # Get max position embeddings (GLM-4 uses seq_length instead of max_position_embeddings)
-        max_pos = getattr(self.hf_config, 'max_position_embeddings',
-                         getattr(self.hf_config, 'seq_length', 4096))
+        max_pos = getattr(
+            self.hf_config,
+            "max_position_embeddings",
+            getattr(self.hf_config, "seq_length", 4096),
+        )
         self.max_model_len = min(self.max_model_len, max_pos)
         assert self.max_num_batched_tokens >= self.max_model_len
 
@@ -82,5 +92,7 @@ class Config:
                 "fp32": torch.float32,
             }
             if self.dtype not in dtype_map:
-                raise ValueError(f"Invalid dtype: {self.dtype}. Choose from: {list(dtype_map.keys())}")
+                raise ValueError(
+                    f"Invalid dtype: {self.dtype}. Choose from: {list(dtype_map.keys())}"
+                )
             self.hf_config.torch_dtype = dtype_map[self.dtype]

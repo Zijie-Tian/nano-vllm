@@ -25,25 +25,34 @@ def _find_free_port() -> int:
     Uses socket binding with port 0 to let the OS assign an available port.
     """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(('', 0))
+        s.bind(("", 0))
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         return s.getsockname()[1]
 
 
 def get_num_kv_heads(hf_config) -> int:
     """Get number of KV heads from config (handles GLM-4's multi_query_group_num)."""
-    return getattr(hf_config, 'num_key_value_heads',
-                   getattr(hf_config, 'multi_query_group_num', hf_config.num_attention_heads))
+    return getattr(
+        hf_config,
+        "num_key_value_heads",
+        getattr(hf_config, "multi_query_group_num", hf_config.num_attention_heads),
+    )
 
 
 def get_head_dim(hf_config) -> int:
     """Get head dimension from config (handles GLM-4's kv_channels)."""
-    return getattr(hf_config, "head_dim",
-                   getattr(hf_config, "kv_channels", hf_config.hidden_size // hf_config.num_attention_heads))
+    return getattr(
+        hf_config,
+        "head_dim",
+        getattr(
+            hf_config,
+            "kv_channels",
+            hf_config.hidden_size // hf_config.num_attention_heads,
+        ),
+    )
 
 
 class ModelRunner:
-
     def __init__(self, config: Config, rank: int, event: Event | list[Event]):
         self.config = config
         hf_config = config.hf_config
@@ -60,7 +69,9 @@ class ModelRunner:
         else:
             port = _find_free_port()
             logger.info(f"Auto-assigned distributed port: {port}")
-        dist.init_process_group("nccl", f"tcp://localhost:{port}", world_size=self.world_size, rank=rank)
+        dist.init_process_group(
+            "nccl", f"tcp://localhost:{port}", world_size=self.world_size, rank=rank
+        )
         torch.cuda.set_device(rank)
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.torch_dtype)
@@ -69,10 +80,10 @@ class ModelRunner:
         self.model = model_class(hf_config)
         load_model(self.model, config.model)
         self.sampler = GreedySampler()
-        
-        #> Disable warmup for debugging
+
+        # > Disable warmup for debugging
         self.warmup_model()
-        
+
         self.allocate_kv_cache()
         if not self.enforce_eager:
             self.capture_cudagraph()
@@ -116,7 +127,7 @@ class ModelRunner:
         assert self.world_size > 1 and self.rank > 0
         self.event.wait()
         n = int.from_bytes(self.shm.buf[0:4], "little")
-        method_name, *args = pickle.loads(self.shm.buf[4:n+4])
+        method_name, *args = pickle.loads(self.shm.buf[4 : n + 4])
         self.event.clear()
         return method_name, args
 
@@ -125,7 +136,7 @@ class ModelRunner:
         data = pickle.dumps([method_name, *args])
         n = len(data)
         self.shm.buf[0:4] = n.to_bytes(4, "little")
-        self.shm.buf[4:n+4] = data
+        self.shm.buf[4 : n + 4] = data
         for event in self.event:
             event.set()
 
@@ -143,7 +154,11 @@ class ModelRunner:
         # Using 2 blocks is sufficient and avoids huge memory allocation
         warmup_len = min(self.block_size * 2, self.config.max_model_len)
         warmup_len = max(warmup_len, 128)  # At least 128 tokens
-        num_seqs = min(self.config.max_num_batched_tokens // warmup_len, self.config.max_num_seqs, 4)
+        num_seqs = min(
+            self.config.max_num_batched_tokens // warmup_len,
+            self.config.max_num_seqs,
+            4,
+        )
         num_seqs = max(num_seqs, 1)
         seqs = [Sequence([0] * warmup_len) for _ in range(num_seqs)]
         self.run(seqs, True)
@@ -158,7 +173,14 @@ class ModelRunner:
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
         num_kv_heads = get_num_kv_heads(hf_config) // self.world_size
         head_dim = get_head_dim(hf_config)
-        block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.torch_dtype.itemsize
+        block_bytes = (
+            2
+            * hf_config.num_hidden_layers
+            * self.block_size
+            * num_kv_heads
+            * head_dim
+            * hf_config.torch_dtype.itemsize
+        )
 
         # Calculate max GPU blocks based on available memory
         # In CPU offload mode with shared GPU, use actual free memory instead of total * utilization
@@ -167,18 +189,20 @@ class ModelRunner:
             available_memory = free * 0.9  # Leave 10% buffer
         else:
             # Standard calculation for dedicated GPU usage
-            available_memory = total * config.gpu_memory_utilization - used - peak + current
+            available_memory = (
+                total * config.gpu_memory_utilization - used - peak + current
+            )
 
         max_gpu_blocks = int(available_memory) // block_bytes
 
         if max_gpu_blocks <= 0:
             raise RuntimeError(
                 f"Insufficient GPU memory for KV cache allocation. "
-                f"Total: {total/1024**3:.2f} GB, "
-                f"Used by other processes: {used/1024**3:.2f} GB, "
-                f"Free: {free/1024**3:.2f} GB, "
-                f"Available: {available_memory/1024**3:.2f} GB, "
-                f"Required per block: {block_bytes/1024**2:.2f} MB. "
+                f"Total: {total / 1024**3:.2f} GB, "
+                f"Used by other processes: {used / 1024**3:.2f} GB, "
+                f"Free: {free / 1024**3:.2f} GB, "
+                f"Available: {available_memory / 1024**3:.2f} GB, "
+                f"Required per block: {block_bytes / 1024**2:.2f} MB. "
                 f"Try waiting for GPU to be available or reduce model size."
             )
 
@@ -192,7 +216,9 @@ class ModelRunner:
             # Three-region design: CPU is primary storage, GPU is working buffer
             # CPU blocks = all blocks needed to support max_model_len (stores complete KV for one max sequence)
             # GPU blocks = three-region working buffer (user-specified or auto)
-            num_cpu_blocks = (config.max_model_len + self.block_size - 1) // self.block_size
+            num_cpu_blocks = (
+                config.max_model_len + self.block_size - 1
+            ) // self.block_size
 
             config.num_gpu_kvcache_blocks = num_gpu_blocks
             config.num_cpu_kvcache_blocks = num_cpu_blocks
@@ -215,9 +241,16 @@ class ModelRunner:
         )
 
         # Initialize sparse policy if manager has one (works for both CPU offload and GPU-only modes)
-        if hasattr(self.kvcache_manager, 'sparse_policy') and self.kvcache_manager.sparse_policy is not None:
+        if (
+            hasattr(self.kvcache_manager, "sparse_policy")
+            and self.kvcache_manager.sparse_policy is not None
+        ):
             # Use CPU blocks for offload mode, GPU blocks for GPU-only mode
-            num_blocks_for_init = config.num_cpu_kvcache_blocks if config.enable_cpu_offload else config.num_kvcache_blocks
+            num_blocks_for_init = (
+                config.num_cpu_kvcache_blocks
+                if config.enable_cpu_offload
+                else config.num_kvcache_blocks
+            )
             self.kvcache_manager.sparse_policy.initialize(
                 num_layers=hf_config.num_hidden_layers,
                 num_kv_heads=num_kv_heads,
@@ -242,21 +275,29 @@ class ModelRunner:
             )
 
             # Log policy info (handle both enum and None cases)
-            policy_name = config.sparse_policy.name if config.sparse_policy is not None else "FULL"
+            policy_name = (
+                config.sparse_policy.name
+                if config.sparse_policy is not None
+                else "FULL"
+            )
             logger.info(
                 f"Sparse policy initialized: {policy_name} "
                 f"(topk={config.sparse_topk_blocks}, threshold={config.sparse_threshold_blocks})"
             )
 
         # Log KV cache allocation info with detailed per-token breakdown
-        gpu_memory_mb = config.num_gpu_kvcache_blocks * block_bytes / (1024 ** 2)
-        cpu_memory_mb = config.num_cpu_kvcache_blocks * block_bytes / (1024 ** 2)
+        gpu_memory_mb = config.num_gpu_kvcache_blocks * block_bytes / (1024**2)
+        cpu_memory_mb = config.num_cpu_kvcache_blocks * block_bytes / (1024**2)
         total_memory_mb = gpu_memory_mb + cpu_memory_mb
 
         # Calculate per-token KV cache usage
         # KV per token = 2 (K+V) * num_layers * kv_heads * head_dim * dtype_size
-        dtype_size = 2 if hf_config.torch_dtype in [torch.float16, torch.bfloat16] else 4
-        per_token_kv_bytes = 2 * hf_config.num_hidden_layers * num_kv_heads * head_dim * dtype_size
+        dtype_size = (
+            2 if hf_config.torch_dtype in [torch.float16, torch.bfloat16] else 4
+        )
+        per_token_kv_bytes = (
+            2 * hf_config.num_hidden_layers * num_kv_heads * head_dim * dtype_size
+        )
         per_token_kv_kb = per_token_kv_bytes / 1024
 
         logger.info(
@@ -289,7 +330,7 @@ class ModelRunner:
                 f"block_size={self.block_size}"
             )
 
-        #> Bind layer caches to attention modules and set layer_id
+        # > Bind layer caches to attention modules and set layer_id
         layer_id = 0
         for module in self.model.modules():
             if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
@@ -303,8 +344,12 @@ class ModelRunner:
 
     def prepare_block_tables(self, seqs: list[Sequence]):
         max_len = max(len(seq.block_table) for seq in seqs)
-        block_tables = [seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs]
-        block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        block_tables = [
+            seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs
+        ]
+        block_tables = torch.tensor(
+            block_tables, dtype=torch.int32, pin_memory=True
+        ).cuda(non_blocking=True)
         return block_tables
 
     def prepare_prefill(self, seqs: list[Sequence], chunk_info: list[tuple] = None):
@@ -321,7 +366,7 @@ class ModelRunner:
         has_blocks = any(seq.block_table for seq in seqs)
 
         gpu_block_tables = None
-        if has_blocks and hasattr(self, 'kvcache_manager'):
+        if has_blocks and hasattr(self, "kvcache_manager"):
             if chunk_info is None:
                 # Standard prefill - try to get all blocks
                 # This may fail if GPU doesn't have enough capacity
@@ -378,7 +423,7 @@ class ModelRunner:
             else:
                 # Standard prefill
                 seqlen = len(seq)
-                input_ids.extend(seq[seq.num_cached_tokens:])
+                input_ids.extend(seq[seq.num_cached_tokens :])
                 positions.extend(list(range(seq.num_cached_tokens, seqlen)))
                 seqlen_q = seqlen - seq.num_cached_tokens
                 seqlen_k = seqlen
@@ -386,7 +431,7 @@ class ModelRunner:
                 cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
                 max_seqlen_q = max(seqlen_q, max_seqlen_q)
                 max_seqlen_k = max(seqlen_k, max_seqlen_k)
-                if not seq.block_table:    # warmup
+                if not seq.block_table:  # warmup
                     continue
                 # Use GPU physical block IDs for slot mapping
                 gpu_blocks = gpu_block_tables[seq_idx]
@@ -398,13 +443,23 @@ class ModelRunner:
                         end = start + seq.last_block_num_tokens
                     slot_mapping.extend(list(range(start, end)))
 
-        if cu_seqlens_k[-1] > cu_seqlens_q[-1] and gpu_block_tables:    # prefix cache
+        if cu_seqlens_k[-1] > cu_seqlens_q[-1] and gpu_block_tables:  # prefix cache
             block_tables = self._prepare_gpu_block_tables(gpu_block_tables)
-        input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
-        positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
-        cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(
+            non_blocking=True
+        )
+        positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(
+            non_blocking=True
+        )
+        cu_seqlens_q = torch.tensor(
+            cu_seqlens_q, dtype=torch.int32, pin_memory=True
+        ).cuda(non_blocking=True)
+        cu_seqlens_k = torch.tensor(
+            cu_seqlens_k, dtype=torch.int32, pin_memory=True
+        ).cuda(non_blocking=True)
+        slot_mapping = torch.tensor(
+            slot_mapping, dtype=torch.int32, pin_memory=True
+        ).cuda(non_blocking=True)
         set_context(
             is_prefill=True,
             cu_seqlens_q=cu_seqlens_q,
@@ -413,13 +468,13 @@ class ModelRunner:
             max_seqlen_k=max_seqlen_k,
             slot_mapping=slot_mapping,
             block_tables=block_tables,
-            kvcache_manager=getattr(self, 'kvcache_manager', None),
+            kvcache_manager=getattr(self, "kvcache_manager", None),
         )
         return input_ids, positions
 
     def prepare_decode(self, seqs: list[Sequence]):
         # Prepare KV cache (updates gather_indices for hybrid manager)
-        if hasattr(self, 'kvcache_manager'):
+        if hasattr(self, "kvcache_manager"):
             self.kvcache_manager.prepare_for_attention(seqs, is_prefill=False)
             # Get GPU physical block tables
             gpu_block_tables = self.kvcache_manager.get_gpu_block_tables(seqs)
@@ -436,11 +491,21 @@ class ModelRunner:
             context_lens.append(len(seq))
             # Use GPU physical block ID for slot mapping
             gpu_blocks = gpu_block_tables[seq_idx]
-            slot_mapping.append(gpu_blocks[-1] * self.block_size + seq.last_block_num_tokens - 1)
-        input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
-        positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
-        slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        context_lens = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+            slot_mapping.append(
+                gpu_blocks[-1] * self.block_size + seq.last_block_num_tokens - 1
+            )
+        input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(
+            non_blocking=True
+        )
+        positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(
+            non_blocking=True
+        )
+        slot_mapping = torch.tensor(
+            slot_mapping, dtype=torch.int32, pin_memory=True
+        ).cuda(non_blocking=True)
+        context_lens = torch.tensor(
+            context_lens, dtype=torch.int32, pin_memory=True
+        ).cuda(non_blocking=True)
         # Use GPU physical block tables for attention
         block_tables = self._prepare_gpu_block_tables(gpu_block_tables)
         set_context(
@@ -456,21 +521,32 @@ class ModelRunner:
         """Prepare block tables tensor from GPU physical block IDs."""
         max_len = max(len(bt) for bt in gpu_block_tables)
         padded = [bt + [-1] * (max_len - len(bt)) for bt in gpu_block_tables]
-        return torch.tensor(padded, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        return torch.tensor(padded, dtype=torch.int32, pin_memory=True).cuda(
+            non_blocking=True
+        )
 
     def prepare_sample(self, seqs: list[Sequence]):
         temperatures = []
         for seq in seqs:
             temperatures.append(seq.temperature)
-        temperatures = torch.tensor(temperatures, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
+        temperatures = torch.tensor(
+            temperatures, dtype=torch.float32, pin_memory=True
+        ).cuda(non_blocking=True)
         return temperatures
 
     @torch.inference_mode()
-    def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool):
+    def run_model(
+        self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool
+    ):
         context = get_context()
         # Use eager mode for: prefill, enforce_eager, large batch, or chunked attention
         # Chunked attention requires dynamic KV loading that can't be captured in CUDA Graph
-        use_eager = is_prefill or self.enforce_eager or input_ids.size(0) > 512 or context.is_chunked_prefill
+        use_eager = (
+            is_prefill
+            or self.enforce_eager
+            or input_ids.size(0) > 512
+            or context.is_chunked_prefill
+        )
         if use_eager:
             return self.model.compute_logits(self.model(input_ids, positions))
         else:
@@ -484,13 +560,17 @@ class ModelRunner:
             graph_vars["slot_mapping"][:bs] = context.slot_mapping
             graph_vars["context_lens"].zero_()
             graph_vars["context_lens"][:bs] = context.context_lens
-            graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
+            graph_vars["block_tables"][:bs, : context.block_tables.size(1)] = (
+                context.block_tables
+            )
             graph.replay()
             return self.model.compute_logits(graph_vars["outputs"][:bs])
 
     def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
-        #> Check if Chunked Offload mode should be used (all blocks on CPU)
-        if hasattr(self, 'kvcache_manager') and hasattr(self.kvcache_manager, 'get_all_cpu_blocks'):
+        # > Check if Chunked Offload mode should be used (all blocks on CPU)
+        if hasattr(self, "kvcache_manager") and hasattr(
+            self.kvcache_manager, "get_all_cpu_blocks"
+        ):
             use_chunked_offload = self._should_use_chunked_offload(seqs, is_prefill)
             if use_chunked_offload:
                 if is_prefill:
@@ -498,15 +578,21 @@ class ModelRunner:
                 else:
                     return self.run_chunked_offload_decode(seqs)
 
-        #> Following Code will not use Chunked Offload mode
-        input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
+        # > Following Code will not use Chunked Offload mode
+        input_ids, positions = (
+            self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
+        )
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
         logits = self.run_model(input_ids, positions, is_prefill)
-        token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
+        token_ids = (
+            self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
+        )
         reset_context()
         return token_ids
 
-    def _should_use_chunked_offload(self, seqs: list[Sequence], is_prefill: bool) -> bool:
+    def _should_use_chunked_offload(
+        self, seqs: list[Sequence], is_prefill: bool
+    ) -> bool:
         """
         Check if three-region mode should be used.
 
@@ -515,7 +601,7 @@ class ModelRunner:
         - There are blocks on CPU (either allocated there or offloaded)
         - Sequence exceeds GPU Compute region capacity
         """
-        if not hasattr(self.kvcache_manager, 'offload_engine'):
+        if not hasattr(self.kvcache_manager, "offload_engine"):
             return False
 
         for seq in seqs:
@@ -555,9 +641,11 @@ class ModelRunner:
 
         total_tokens = len(seq)
         num_chunks = (total_tokens + tokens_per_chunk - 1) // tokens_per_chunk
-        logger.debug(f"[Ring Buffer Prefill] Starting: {total_tokens} tokens, "
-              f"ring_slots={offload_engine.num_ring_slots}, chunk={tokens_per_chunk} tokens, "
-              f"total_chunks={num_chunks}")
+        logger.debug(
+            f"[Ring Buffer Prefill] Starting: {total_tokens} tokens, "
+            f"ring_slots={offload_engine.num_ring_slots}, chunk={tokens_per_chunk} tokens, "
+            f"total_chunks={num_chunks}"
+        )
 
         chunk_idx = 0
         logits = None
@@ -576,8 +664,10 @@ class ModelRunner:
             # CPU block index for this chunk
             block_idx = chunk_idx
 
-            logger.debug(f"[Ring Buffer Prefill] Chunk {chunk_idx}: tokens {chunk_start}-{chunk_end}, "
-                  f"write_slot={write_slot}")
+            logger.debug(
+                f"[Ring Buffer Prefill] Chunk {chunk_idx}: tokens {chunk_start}-{chunk_end}, "
+                f"write_slot={write_slot}"
+            )
 
             # Prepare inputs
             input_ids, positions = self._prepare_chunked_offload_chunk(
@@ -587,12 +677,14 @@ class ModelRunner:
             if input_ids.numel() == 0:
                 break
 
-            #> Run model forward
+            # > Run model forward
             # Use graph-optimized forward if available (chunk_size == block_size), otherwise eager mode
-            if (hasattr(self, 'prefill_graph_manager') and
-                self.prefill_graph_manager is not None and
-                self.prefill_graph_manager.captured and
-                input_ids.shape[0] == self.block_size):
+            if (
+                hasattr(self, "prefill_graph_manager")
+                and self.prefill_graph_manager is not None
+                and self.prefill_graph_manager.captured
+                and input_ids.shape[0] == self.block_size
+            ):
                 logits = self.run_prefill_with_offload_graph(input_ids, positions)
             else:
                 logits = self.run_model(input_ids, positions, is_prefill=True)
@@ -619,7 +711,9 @@ class ModelRunner:
         # For chunked prefill, ParallelLMHead automatically selects last position's logits
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
         if logits is not None:
-            token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
+            token_ids = (
+                self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
+            )
         else:
             token_ids = [0] if self.rank == 0 else None
 
@@ -648,14 +742,24 @@ class ModelRunner:
 
         # Convert to tensors
         num_tokens = chunk_end - chunk_start
-        input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
-        positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
-        slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(
+            non_blocking=True
+        )
+        positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(
+            non_blocking=True
+        )
+        slot_mapping = torch.tensor(
+            slot_mapping, dtype=torch.int32, pin_memory=True
+        ).cuda(non_blocking=True)
 
         # Set up context for chunked prefill
         seqlen = num_tokens
-        cu_seqlens_q = torch.tensor([0, seqlen], dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        cu_seqlens_k = torch.tensor([0, seqlen], dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        cu_seqlens_q = torch.tensor(
+            [0, seqlen], dtype=torch.int32, pin_memory=True
+        ).cuda(non_blocking=True)
+        cu_seqlens_k = torch.tensor(
+            [0, seqlen], dtype=torch.int32, pin_memory=True
+        ).cuda(non_blocking=True)
 
         set_context(
             is_prefill=True,
@@ -690,15 +794,23 @@ class ModelRunner:
         offload_engine = self.kvcache_manager.offload_engine
 
         # Prepare inputs
-        input_ids = torch.tensor([seq.last_token], dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
-        positions = torch.tensor([len(seq) - 1], dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
+        input_ids = torch.tensor(
+            [seq.last_token], dtype=torch.int64, pin_memory=True
+        ).cuda(non_blocking=True)
+        positions = torch.tensor(
+            [len(seq) - 1], dtype=torch.int64, pin_memory=True
+        ).cuda(non_blocking=True)
 
         # Use Decode region (slot 0) to write new KV
         decode_slot = offload_engine.decode_slot  # = 0
         pos_in_block = (len(seq) - 1) % self.block_size
         slot = decode_slot * self.block_size + pos_in_block
-        slot_mapping = torch.tensor([slot], dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        context_len = torch.tensor([len(seq)], dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        slot_mapping = torch.tensor([slot], dtype=torch.int32, pin_memory=True).cuda(
+            non_blocking=True
+        )
+        context_len = torch.tensor([len(seq)], dtype=torch.int32, pin_memory=True).cuda(
+            non_blocking=True
+        )
 
         # Get decode start position for accumulated token tracking
         decode_start_pos = self.kvcache_manager.get_decode_start_pos(seq)
@@ -738,7 +850,9 @@ class ModelRunner:
 
         # Sample
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
-        token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
+        token_ids = (
+            self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
+        )
 
         return token_ids
 
@@ -767,9 +881,9 @@ class ModelRunner:
                 block_tables=block_tables[:bs],
                 kvcache_manager=self.kvcache_manager,
             )
-            outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # warmup
+            outputs[:bs] = self.model(input_ids[:bs], positions[:bs])  # warmup
             with torch.cuda.graph(graph, self.graph_pool):
-                outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # capture
+                outputs[:bs] = self.model(input_ids[:bs], positions[:bs])  # capture
             if self.graph_pool is None:
                 self.graph_pool = graph.pool()
             self.graphs[bs] = graph
@@ -866,7 +980,9 @@ class ModelRunner:
         hidden_states = gm.embed_graph(input_ids, use_graph=use_graph)
 
         # GRAPH_FIRST: input_norm_0 → qkv_proj_0 → rotary_0
-        q, k, v, residual = gm.first_graph(hidden_states, positions, use_graph=use_graph)
+        q, k, v, residual = gm.first_graph(
+            hidden_states, positions, use_graph=use_graph
+        )
 
         for i in range(num_layers):
             # EAGER: Attention core only (with offload)
@@ -884,7 +1000,9 @@ class ModelRunner:
                 )
             else:
                 # GRAPH_LAST: o_proj_{N-1} → post_norm_{N-1} → mlp_{N-1} → final_norm
-                hidden_states = gm.last_graph(attn_output, residual, use_graph=use_graph)
+                hidden_states = gm.last_graph(
+                    attn_output, residual, use_graph=use_graph
+                )
 
         return self.model.compute_logits(hidden_states)
 
@@ -909,13 +1027,17 @@ class ModelRunner:
         gm = self.prefill_graph_manager
         layers = self.model.model.layers
         num_layers = len(layers)
-        use_graph = input_ids.shape[0] == self.block_size  # Only use graph for chunk_size
+        use_graph = (
+            input_ids.shape[0] == self.block_size
+        )  # Only use graph for chunk_size
 
         # GRAPH_EMBED: embed_tokens
         hidden_states = gm.embed_graph(input_ids, use_graph=use_graph)
 
         # GRAPH_FIRST: input_norm_0 → qkv_proj_0 → rotary_0
-        q, k, v, residual = gm.first_graph(hidden_states, positions, use_graph=use_graph)
+        q, k, v, residual = gm.first_graph(
+            hidden_states, positions, use_graph=use_graph
+        )
 
         for i in range(num_layers):
             # EAGER: Attention core only (with offload)
@@ -929,6 +1051,8 @@ class ModelRunner:
                 )
             else:
                 # GRAPH_LAST: o_proj_{N-1} → post_norm_{N-1} → mlp_{N-1} → final_norm
-                hidden_states = gm.last_graph(attn_output, residual, use_graph=use_graph)
+                hidden_states = gm.last_graph(
+                    attn_output, residual, use_graph=use_graph
+                )
 
         return self.model.compute_logits(hidden_states)

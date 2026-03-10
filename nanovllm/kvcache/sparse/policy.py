@@ -7,11 +7,10 @@ from CPU for each query chunk during chunked attention computation.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List, Optional, Any, TYPE_CHECKING
+from typing import List, Optional, TYPE_CHECKING
 import torch
 
 # Import SparsePolicyType from config to avoid circular imports
-from nanovllm.config import SparsePolicyType
 
 if TYPE_CHECKING:
     from nanovllm.kvcache.offload_engine import OffloadEngine

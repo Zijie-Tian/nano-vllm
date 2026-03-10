@@ -114,9 +114,14 @@ class GPUOnlyManager(KVCacheManager):
         # Shape: [2, num_layers, num_blocks, block_size, kv_heads, head_dim]
         # 2 for K and V
         self.kv_cache = torch.empty(
-            2, num_layers, self._num_blocks, self._block_size,
-            num_kv_heads, head_dim,
-            dtype=dtype, device="cuda"
+            2,
+            num_layers,
+            self._num_blocks,
+            self._block_size,
+            num_kv_heads,
+            head_dim,
+            dtype=dtype,
+            device="cuda",
         )
 
     def get_layer_cache(self, layer_id: int) -> Tuple[Tensor, Tensor]:
@@ -205,7 +210,7 @@ class GPUOnlyManager(KVCacheManager):
     def can_append(self, seq: Sequence) -> bool:
         """Check if we can append a token (may need new block)."""
         # Need new block only if current position is at block boundary
-        need_new_block = (len(seq) % self._block_size == 1)
+        need_new_block = len(seq) % self._block_size == 1
         return len(self.free_block_ids) >= int(need_new_block)
 
     def may_append(self, seq: Sequence) -> None:

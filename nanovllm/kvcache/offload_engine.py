@@ -11,16 +11,15 @@ import torch
 import torch.cuda.nvtx
 import nvtx
 from torch import Tensor
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 from dataclasses import dataclass
 
-from nanovllm.kvcache.kernels import gathered_copy_kv
-from nanovllm.comm import memcpy_2d_async
 from nanovllm.utils.logger import get_logger
 from nanovllm.utils.memory_observer import MemoryObserver
 
 # Import for type hints only (avoid circular import)
 from typing import TYPE_CHECKING
+
 if TYPE_CHECKING:
     from nanovllm.kvcache.sparse import SparsePolicy
 
@@ -30,6 +29,7 @@ logger = get_logger("offload_engine")
 @dataclass
 class TransferEvent:
     """Tracks a pending async transfer."""
+
     event: torch.cuda.Event
     layer_id: int
     src_block_id: int
@@ -85,13 +85,16 @@ class OffloadEngine:
         self.gpu_block_bytes = self.block_numel * self.dtype_size
         self.height = num_layers  # For CPU all-layer operations
 
-        logger.info(f"sgDMA parameters: cpu_pitch={self.cpu_pitch}, "
-                    f"gpu_block_bytes={self.gpu_block_bytes}, height={self.height}")
+        logger.info(
+            f"sgDMA parameters: cpu_pitch={self.cpu_pitch}, "
+            f"gpu_block_bytes={self.gpu_block_bytes}, height={self.height}"
+        )
 
         # ========== Unified Ring Buffer configuration ==========
         # Constraint checks
-        assert num_gpu_blocks >= 2, \
+        assert num_gpu_blocks >= 2, (
             f"Need at least 2 GPU blocks for ring buffer, got {num_gpu_blocks}"
+        )
 
         # Unified Ring Buffer: all slots cycle for prefill
         # Prefill: use ALL slots as ring buffer (slot[chunk_idx % N])
@@ -108,8 +111,10 @@ class OffloadEngine:
         self.num_gpu_slots = num_gpu_blocks  # alias
 
         logger.info(f"Unified Ring Buffer: {self.num_ring_slots} slots total")
-        logger.info(f"  Prefill: all slots as ring buffer [0..{num_gpu_blocks-1}]")
-        logger.info(f"  Decode: slot[0] as decode_slot, slots[1..{num_gpu_blocks-1}] for loading")
+        logger.info(f"  Prefill: all slots as ring buffer [0..{num_gpu_blocks - 1}]")
+        logger.info(
+            f"  Decode: slot[0] as decode_slot, slots[1..{num_gpu_blocks - 1}] for loading"
+        )
 
         # ========== Fixed-address GPU KV cache ==========
         # Shape: [num_gpu_blocks, block_size, kv_heads, head_dim]
@@ -117,12 +122,20 @@ class OffloadEngine:
         # Each layer reuses the same slots (layers execute sequentially).
         # This saves 28x GPU memory compared to per-layer allocation.
         self.k_cache_gpu = torch.zeros(
-            num_gpu_blocks, block_size, num_kv_heads, head_dim,
-            dtype=dtype, device="cuda"
+            num_gpu_blocks,
+            block_size,
+            num_kv_heads,
+            head_dim,
+            dtype=dtype,
+            device="cuda",
         )
         self.v_cache_gpu = torch.zeros(
-            num_gpu_blocks, block_size, num_kv_heads, head_dim,
-            dtype=dtype, device="cuda"
+            num_gpu_blocks,
+            block_size,
+            num_kv_heads,
+            head_dim,
+            dtype=dtype,
+            device="cuda",
         )
 
         # ========== Per-layer decode buffer ==========
@@ -133,14 +146,20 @@ class OffloadEngine:
         # Memory: num_layers * block_size * kv_heads * head_dim * dtype_size
         #         e.g., 28 * 1024 * 8 * 128 * 2 = 58.7 MB (acceptable)
         self.decode_k_buffer = torch.zeros(
-            num_layers, block_size, num_kv_heads, head_dim,
-            dtype=dtype, device="cuda"
+            num_layers, block_size, num_kv_heads, head_dim, dtype=dtype, device="cuda"
         )
         self.decode_v_buffer = torch.zeros(
-            num_layers, block_size, num_kv_heads, head_dim,
-            dtype=dtype, device="cuda"
+            num_layers, block_size, num_kv_heads, head_dim, dtype=dtype, device="cuda"
         )
-        decode_buf_mb = 2 * num_layers * block_size * num_kv_heads * head_dim * dtype.itemsize / (1024 * 1024)
+        decode_buf_mb = (
+            2
+            * num_layers
+            * block_size
+            * num_kv_heads
+            * head_dim
+            * dtype.itemsize
+            / (1024 * 1024)
+        )
         logger.info(f"  Per-layer decode buffer: {decode_buf_mb:.1f} MB")
 
         # ========== Per-layer prefill buffer for async offload ==========
@@ -151,14 +170,20 @@ class OffloadEngine:
         # Each layer writes to its own buffer, enabling fully async offloads.
         # Shape: [num_layers, block_size, kv_heads, head_dim]
         self.prefill_k_buffer = torch.zeros(
-            num_layers, block_size, num_kv_heads, head_dim,
-            dtype=dtype, device="cuda"
+            num_layers, block_size, num_kv_heads, head_dim, dtype=dtype, device="cuda"
         )
         self.prefill_v_buffer = torch.zeros(
-            num_layers, block_size, num_kv_heads, head_dim,
-            dtype=dtype, device="cuda"
+            num_layers, block_size, num_kv_heads, head_dim, dtype=dtype, device="cuda"
         )
-        prefill_buf_mb = 2 * num_layers * block_size * num_kv_heads * head_dim * dtype.itemsize / (1024 * 1024)
+        prefill_buf_mb = (
+            2
+            * num_layers
+            * block_size
+            * num_kv_heads
+            * head_dim
+            * dtype.itemsize
+            / (1024 * 1024)
+        )
         logger.info(f"  Per-layer prefill buffer: {prefill_buf_mb:.1f} MB")
 
         # Per-layer offload events for async prefill offload
@@ -169,18 +194,32 @@ class OffloadEngine:
 
         # ========== Fixed-address CPU KV cache (pinned memory) ==========
         self.k_cache_cpu = torch.zeros(
-            num_layers, num_cpu_blocks, block_size, num_kv_heads, head_dim,
-            dtype=dtype, device="cpu", pin_memory=True
+            num_layers,
+            num_cpu_blocks,
+            block_size,
+            num_kv_heads,
+            head_dim,
+            dtype=dtype,
+            device="cpu",
+            pin_memory=True,
         )
         self.v_cache_cpu = torch.zeros(
-            num_layers, num_cpu_blocks, block_size, num_kv_heads, head_dim,
-            dtype=dtype, device="cpu", pin_memory=True
+            num_layers,
+            num_cpu_blocks,
+            block_size,
+            num_kv_heads,
+            head_dim,
+            dtype=dtype,
+            device="cpu",
+            pin_memory=True,
         )
 
         # Log memory allocation
         gpu_mem_mb = self.gpu_memory_bytes() / (1024 * 1024)
         cpu_mem_mb = self.cpu_memory_bytes() / (1024 * 1024)
-        logger.info(f"  GPU memory: {gpu_mem_mb:.1f} MB, CPU memory: {cpu_mem_mb:.1f} MB")
+        logger.info(
+            f"  GPU memory: {gpu_mem_mb:.1f} MB, CPU memory: {cpu_mem_mb:.1f} MB"
+        )
 
         # ========== Transfer streams for async operations ==========
         self.transfer_streams = [torch.cuda.Stream() for _ in range(num_streams)]
@@ -193,11 +232,15 @@ class OffloadEngine:
         # ========== Per-slot transfer streams for parallel H2D ==========
         # Each slot has its own stream to enable parallel transfers
         # This allows multiple slots to load simultaneously
-        self.slot_transfer_streams = [torch.cuda.Stream() for _ in range(self.num_ring_slots)]
+        self.slot_transfer_streams = [
+            torch.cuda.Stream() for _ in range(self.num_ring_slots)
+        ]
         logger.info(f"  Created {self.num_ring_slots} per-slot transfer streams")
 
         # ========== Ring Buffer dedicated stream and events ==========
-        self.transfer_stream_main = torch.cuda.Stream()  # Main transfer stream (for legacy/batch ops)
+        self.transfer_stream_main = (
+            torch.cuda.Stream()
+        )  # Main transfer stream (for legacy/batch ops)
 
         # Decode offload event
         self.decode_offload_done = torch.cuda.Event()
@@ -208,12 +251,16 @@ class OffloadEngine:
         # ring_slot_ready[slot_idx] = CUDA Event for H2D completion
         # ring_slot_offload_done[slot_idx] = CUDA Event for D2H completion
         self.ring_slot_ready = [torch.cuda.Event() for _ in range(self.num_ring_slots)]
-        self.ring_slot_offload_done = [torch.cuda.Event() for _ in range(self.num_ring_slots)]
+        self.ring_slot_offload_done = [
+            torch.cuda.Event() for _ in range(self.num_ring_slots)
+        ]
 
         # ========== Per-slot compute_done events for async pipeline ==========
         # ring_slot_compute_done[slot_idx] = CUDA Event for compute completion
         # This ensures we don't overwrite data before it's been read by attention
-        self.ring_slot_compute_done = [torch.cuda.Event() for _ in range(self.num_ring_slots)]
+        self.ring_slot_compute_done = [
+            torch.cuda.Event() for _ in range(self.num_ring_slots)
+        ]
 
         # Initialize all compute_done events (record them once)
         # This prevents undefined behavior on first load_to_slot_layer call
@@ -286,15 +333,15 @@ class OffloadEngine:
     def gpu_memory_bytes(self) -> int:
         """Total GPU memory used by KV caches."""
         return (
-            self.k_cache_gpu.numel() * self.k_cache_gpu.element_size() +
-            self.v_cache_gpu.numel() * self.v_cache_gpu.element_size()
+            self.k_cache_gpu.numel() * self.k_cache_gpu.element_size()
+            + self.v_cache_gpu.numel() * self.v_cache_gpu.element_size()
         )
 
     def cpu_memory_bytes(self) -> int:
         """Total CPU memory used by KV caches."""
         return (
-            self.k_cache_cpu.numel() * self.k_cache_cpu.element_size() +
-            self.v_cache_cpu.numel() * self.v_cache_cpu.element_size()
+            self.k_cache_cpu.numel() * self.k_cache_cpu.element_size()
+            + self.v_cache_cpu.numel() * self.v_cache_cpu.element_size()
         )
 
     def __repr__(self) -> str:
@@ -377,7 +424,11 @@ class OffloadEngine:
         self.ring_slot_compute_done[slot_idx].record()
 
     def load_to_slot_layer(
-        self, slot_idx: int, layer_id: int, cpu_block_id: int, chunk_idx: int = -1,
+        self,
+        slot_idx: int,
+        layer_id: int,
+        cpu_block_id: int,
+        chunk_idx: int = -1,
         is_prefill: bool = True,
     ) -> None:
         """
@@ -397,7 +448,9 @@ class OffloadEngine:
             chunk_idx: Optional chunk index for NVTX labeling (-1 means not specified)
             is_prefill: True if in prefill phase, False if in decode phase (for MemoryObserver)
         """
-        logger.debug(f"Ring load: layer={layer_id}, CPU[{cpu_block_id}] -> GPU slot[{slot_idx}]")
+        logger.debug(
+            f"Ring load: layer={layer_id}, CPU[{cpu_block_id}] -> GPU slot[{slot_idx}]"
+        )
 
         # Use per-slot stream for parallel transfers across different slots
         stream = self.slot_transfer_streams[slot_idx]
@@ -432,7 +485,11 @@ class OffloadEngine:
         MemoryObserver.record_h2d(2 * self.gpu_block_bytes, is_prefill=is_prefill)
 
     def load_k_only_to_slot_layer(
-        self, slot_idx: int, layer_id: int, cpu_block_id: int, chunk_idx: int = -1,
+        self,
+        slot_idx: int,
+        layer_id: int,
+        cpu_block_id: int,
+        chunk_idx: int = -1,
         is_prefill: bool = True,
     ) -> None:
         """
@@ -448,14 +505,18 @@ class OffloadEngine:
             chunk_idx: Optional chunk index for NVTX labeling (-1 means not specified)
             is_prefill: True if in prefill phase, False if in decode phase
         """
-        logger.debug(f"Ring load K-only: layer={layer_id}, CPU[{cpu_block_id}] -> GPU slot[{slot_idx}]")
+        logger.debug(
+            f"Ring load K-only: layer={layer_id}, CPU[{cpu_block_id}] -> GPU slot[{slot_idx}]"
+        )
 
         stream = self.slot_transfer_streams[slot_idx]
 
         if chunk_idx >= 0:
             nvtx_label = f"H2D K-only: L{layer_id} Chunk{chunk_idx} CPU[{cpu_block_id}]->Slot[{slot_idx}]"
         else:
-            nvtx_label = f"H2D K-only: L{layer_id} CPU[{cpu_block_id}]->Slot[{slot_idx}]"
+            nvtx_label = (
+                f"H2D K-only: L{layer_id} CPU[{cpu_block_id}]->Slot[{slot_idx}]"
+            )
 
         nvtx.push_range(message=nvtx_label, color="cyan")
         with torch.cuda.stream(stream):
@@ -530,7 +591,9 @@ class OffloadEngine:
             num_valid_tokens: Number of valid tokens in this block (-1 = use block_size)
             is_prefill: True if in prefill phase, False if in decode phase
         """
-        logger.debug(f"Ring offload: GPU slot[{slot_idx}] -> CPU[layer={layer_id}, block={cpu_block_id}]")
+        logger.debug(
+            f"Ring offload: GPU slot[{slot_idx}] -> CPU[layer={layer_id}, block={cpu_block_id}]"
+        )
 
         # Collect metadata BEFORE offload (while k_cache is still on GPU)
         valid_tokens = num_valid_tokens if num_valid_tokens > 0 else self.block_size
@@ -538,9 +601,13 @@ class OffloadEngine:
 
         if self.sparse_policy is not None:
             if is_prefill:
-                self.sparse_policy.on_prefill_offload(cpu_block_id, layer_id, k_cache, valid_tokens)
+                self.sparse_policy.on_prefill_offload(
+                    cpu_block_id, layer_id, k_cache, valid_tokens
+                )
             else:
-                self.sparse_policy.on_decode_offload(cpu_block_id, layer_id, k_cache, valid_tokens)
+                self.sparse_policy.on_decode_offload(
+                    cpu_block_id, layer_id, k_cache, valid_tokens
+                )
 
         nvtx_label = f"D2H: Slot[{slot_idx}]->CPU[L{layer_id},B{cpu_block_id}]"
         nvtx.push_range(message=nvtx_label, color="green")
@@ -643,8 +710,8 @@ class OffloadEngine:
         Returns:
             (k_cache, v_cache), shape: [1, 1, kv_heads, head_dim]
         """
-        k = self.k_cache_gpu[self.decode_slot, pos_in_block:pos_in_block+1]
-        v = self.v_cache_gpu[self.decode_slot, pos_in_block:pos_in_block+1]
+        k = self.k_cache_gpu[self.decode_slot, pos_in_block : pos_in_block + 1]
+        v = self.v_cache_gpu[self.decode_slot, pos_in_block : pos_in_block + 1]
         k = k.unsqueeze(0)
         v = v.unsqueeze(0)
         return k, v
@@ -720,7 +787,9 @@ class OffloadEngine:
         if hook_fn in self._debug_hooks:
             self._debug_hooks.remove(hook_fn)
 
-    def _call_debug_hooks(self, slot_idx: int, layer_id: int, cpu_block_id: int) -> None:
+    def _call_debug_hooks(
+        self, slot_idx: int, layer_id: int, cpu_block_id: int
+    ) -> None:
         """
         Call all registered debug hooks with loaded tensor (internal use).
 
@@ -739,7 +808,7 @@ class OffloadEngine:
                 hook(slot_idx, layer_id, cpu_block_id, k, v)
             except Exception as e:
                 # Allow pdb quit to propagate
-                if e.__class__.__name__ == 'BdbQuit':
+                if e.__class__.__name__ == "BdbQuit":
                     raise
                 logger.warning(f"Debug hook error: {e}")
 
@@ -832,7 +901,9 @@ class OffloadEngine:
             k: Key tensor [kv_heads, head_dim] (single token, squeezed)
             v: Value tensor [kv_heads, head_dim] (single token, squeezed)
         """
-        torch.cuda.nvtx.range_push(f"D2D: L{layer_id} Pos{pos_in_block} WriteDecodeBuffer")
+        torch.cuda.nvtx.range_push(
+            f"D2D: L{layer_id} Pos{pos_in_block} WriteDecodeBuffer"
+        )
         self.decode_k_buffer[layer_id, pos_in_block].copy_(k)
         self.decode_v_buffer[layer_id, pos_in_block].copy_(v)
         torch.cuda.nvtx.range_pop()
@@ -863,7 +934,9 @@ class OffloadEngine:
         # Collect sparse policy metadata before offload
         if self.sparse_policy is not None:
             k_cache = self.prefill_k_buffer[layer_id]
-            self.sparse_policy.on_prefill_offload(cpu_block_id, layer_id, k_cache, valid_tokens)
+            self.sparse_policy.on_prefill_offload(
+                cpu_block_id, layer_id, k_cache, valid_tokens
+            )
 
         # Use per-layer stream for parallel offloads
         stream = self.prefill_offload_streams[layer_id]
@@ -921,12 +994,8 @@ class OffloadEngine:
             (k_sample, v_sample) tensors, shape: [num_samples, kv_heads, head_dim]
         """
         # Sample from the beginning of the block
-        k_sample = self.k_cache_cpu[
-            layer_id, cpu_block_id, :num_samples
-        ].clone().cuda()
-        v_sample = self.v_cache_cpu[
-            layer_id, cpu_block_id, :num_samples
-        ].clone().cuda()
+        k_sample = self.k_cache_cpu[layer_id, cpu_block_id, :num_samples].clone().cuda()
+        v_sample = self.v_cache_cpu[layer_id, cpu_block_id, :num_samples].clone().cuda()
 
         # Record H2D transfer: K + V samples
         transfer_bytes = 2 * k_sample.numel() * k_sample.element_size()
@@ -952,12 +1021,8 @@ class OffloadEngine:
         Returns:
             (k_full, v_full) tensors, shape: [block_size, kv_heads, head_dim]
         """
-        k_full = self.k_cache_cpu[
-            layer_id, cpu_block_id
-        ].clone().cuda()
-        v_full = self.v_cache_cpu[
-            layer_id, cpu_block_id
-        ].clone().cuda()
+        k_full = self.k_cache_cpu[layer_id, cpu_block_id].clone().cuda()
+        v_full = self.v_cache_cpu[layer_id, cpu_block_id].clone().cuda()
 
         # Record H2D transfer: K + V full block
         MemoryObserver.record_h2d(2 * self.gpu_block_bytes, is_prefill=True)

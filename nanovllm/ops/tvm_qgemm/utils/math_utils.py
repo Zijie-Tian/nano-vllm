@@ -36,7 +36,7 @@ def compute_sqnr(a: np.ndarray, b: np.ndarray) -> float:
     # Avoid log(0) by adding small epsilon
     noise_power = np.sum(np.square(a - b))
     if noise_power == 0:
-        return float('inf')  # Perfect reconstruction
+        return float("inf")  # Perfect reconstruction
     return 10 * np.log10(np.sum(np.square(a)) / noise_power)
 
 
@@ -54,7 +54,7 @@ def compute_error(x: np.ndarray, y: np.ndarray) -> float:
     Ps = np.linalg.norm(x)
     Pn = np.linalg.norm(x - y)
     if Pn == 0:
-        return float('inf')
+        return float("inf")
     return 20 * np.log10(Ps / Pn)
 
 
@@ -65,5 +65,7 @@ def print_binary(array: np.ndarray) -> None:
     Args:
         array: NumPy array to print in binary
     """
-    binary_array = np.vectorize(lambda x: format(x if x >= 0 else (1 << 8) + x, '08b'))(array)
+    binary_array = np.vectorize(lambda x: format(x if x >= 0 else (1 << 8) + x, "08b"))(
+        array
+    )
     print(binary_array)

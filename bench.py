@@ -8,8 +8,12 @@ from nanovllm.utils.observer import InferenceObserver
 def bench_decode(llm, num_seqs, input_len, output_len):
     """Benchmark decode performance"""
     seed(0)
-    prompt_token_ids = [[randint(0, 10000) for _ in range(input_len)] for _ in range(num_seqs)]
-    sampling_params = SamplingParams(temperature=0.6, ignore_eos=True, max_tokens=output_len)
+    prompt_token_ids = [
+        [randint(0, 10000) for _ in range(input_len)] for _ in range(num_seqs)
+    ]
+    sampling_params = SamplingParams(
+        temperature=0.6, ignore_eos=True, max_tokens=output_len
+    )
 
     t = time.time()
     llm.generate(prompt_token_ids, sampling_params, use_tqdm=False)
@@ -23,7 +27,9 @@ def bench_decode(llm, num_seqs, input_len, output_len):
     decode_tokens = num_seqs * output_len
     decode_throughput = 1000.0 / tpot_ms if tpot_ms > 0 else 0  # tokens/s per sequence
 
-    print(f"[Decode] Input: {num_seqs}x{input_len}tok, Output: {decode_tokens}tok, Time: {t:.2f}s")
+    print(
+        f"[Decode] Input: {num_seqs}x{input_len}tok, Output: {decode_tokens}tok, Time: {t:.2f}s"
+    )
     print(f"         TTFT: {ttft_ms:.2f}ms, TPOT: {tpot_ms:.2f}ms")
     print(f"         Decode Throughput: {decode_throughput:.2f} tok/s (from observer)")
 
@@ -32,7 +38,9 @@ def bench_prefill(llm, num_seqs, input_len):
     """Benchmark prefill performance"""
     seed(0)
     # Fixed length input, minimal output to focus on prefill
-    prompt_token_ids = [[randint(0, 10000) for _ in range(input_len)] for _ in range(num_seqs)]
+    prompt_token_ids = [
+        [randint(0, 10000) for _ in range(input_len)] for _ in range(num_seqs)
+    ]
     sampling_params = SamplingParams(temperature=0.6, ignore_eos=True, max_tokens=1)
 
     t = time.time()
@@ -49,8 +57,12 @@ def bench_prefill(llm, num_seqs, input_len):
     throughput_external = total_input_tokens / t
 
     print(f"[Prefill] Input: {total_input_tokens}tok ({num_seqs}x{input_len})")
-    print(f"          External Time: {t:.2f}s, Throughput: {throughput_external:.2f}tok/s")
-    print(f"          Observer TTFT: {ttft_ms:.2f}ms, Throughput: {throughput_observer:.2f}tok/s")
+    print(
+        f"          External Time: {t:.2f}s, Throughput: {throughput_external:.2f}tok/s"
+    )
+    print(
+        f"          Observer TTFT: {ttft_ms:.2f}ms, Throughput: {throughput_observer:.2f}tok/s"
+    )
 
 
 def main():
@@ -58,25 +70,64 @@ def main():
     from nanovllm.config import SparsePolicyType
 
     parser = argparse.ArgumentParser(description="Benchmark nanovllm GPU performance")
-    parser.add_argument("--model", type=str, default="~/models/Llama-3.1-8B-Instruct",
-                        help="Model path (default: ~/models/Llama-3.1-8B-Instruct)")
-    parser.add_argument("--input-len", type=int, default=None, help="Input length in tokens")
-    parser.add_argument("--output-len", type=int, default=64, help="Output length for decode benchmark (default: 64)")
-    parser.add_argument("--max-len", type=int, default=32*1024, help="Max model length (default: 32K)")
-    parser.add_argument("--bench-decode", action="store_true", help="Run decode benchmark (default: prefill only)")
-    parser.add_argument("--bench-all", action="store_true", help="Run both prefill and decode benchmarks")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="~/models/Llama-3.1-8B-Instruct",
+        help="Model path (default: ~/models/Llama-3.1-8B-Instruct)",
+    )
+    parser.add_argument(
+        "--input-len", type=int, default=None, help="Input length in tokens"
+    )
+    parser.add_argument(
+        "--output-len",
+        type=int,
+        default=64,
+        help="Output length for decode benchmark (default: 64)",
+    )
+    parser.add_argument(
+        "--max-len", type=int, default=32 * 1024, help="Max model length (default: 32K)"
+    )
+    parser.add_argument(
+        "--bench-decode",
+        action="store_true",
+        help="Run decode benchmark (default: prefill only)",
+    )
+    parser.add_argument(
+        "--bench-all",
+        action="store_true",
+        help="Run both prefill and decode benchmarks",
+    )
     # Sparse policy option (GPU-only mode now supports policy routing)
-    parser.add_argument("--policy", type=str, default=None,
-                        choices=["full", "xattn"],
-                        help="Sparse policy: full (FullAttention), xattn (XAttention+BSA)")
-    parser.add_argument("--enable-policy", action="store_true",
-                        help="Enable sparse policy routing (FullAttentionPolicy by default)")
-    parser.add_argument("--gpu-util", type=float, default=0.9,
-                        help="GPU memory utilization (default: 0.9)")
-    parser.add_argument("--block-size", type=int, default=1024,
-                        help="KV cache block size (default: 1024)")
-    parser.add_argument("--enforce-eager", action="store_true",
-                        help="Disable CUDA graphs (default: False)")
+    parser.add_argument(
+        "--policy",
+        type=str,
+        default=None,
+        choices=["full", "xattn"],
+        help="Sparse policy: full (FullAttention), xattn (XAttention+BSA)",
+    )
+    parser.add_argument(
+        "--enable-policy",
+        action="store_true",
+        help="Enable sparse policy routing (FullAttentionPolicy by default)",
+    )
+    parser.add_argument(
+        "--gpu-util",
+        type=float,
+        default=0.9,
+        help="GPU memory utilization (default: 0.9)",
+    )
+    parser.add_argument(
+        "--block-size",
+        type=int,
+        default=1024,
+        help="KV cache block size (default: 1024)",
+    )
+    parser.add_argument(
+        "--enforce-eager",
+        action="store_true",
+        help="Disable CUDA graphs (default: False)",
+    )
     args = parser.parse_args()
 
     path = os.path.expanduser(args.model)
@@ -125,7 +176,9 @@ def main():
         print("\n" + "=" * 60)
         print("Decode Benchmark (nanovllm GPU)")
         print("=" * 60)
-        bench_decode(llm, num_seqs=1, input_len=decode_input_len, output_len=args.output_len)
+        bench_decode(
+            llm, num_seqs=1, input_len=decode_input_len, output_len=args.output_len
+        )
 
 
 if __name__ == "__main__":

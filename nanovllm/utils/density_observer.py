@@ -19,7 +19,7 @@ DensityObserver - Sparse Attention Density 统计 Observer。
 - 而是 sum(selected) / sum(total)，正确处理不同 chunk 大小的权重
 """
 
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Tuple
 import torch
 from nanovllm.utils.observer import Observer
 
@@ -178,7 +178,9 @@ class DensityObserver(Observer):
                 torch.ones(q_blocks, k_blocks, device=mask.device, dtype=torch.bool)
             )
             total_blocks = causal_mask.sum().item() * batch * heads
-            selected_blocks = (mask & causal_mask.unsqueeze(0).unsqueeze(0)).sum().item()
+            selected_blocks = (
+                (mask & causal_mask.unsqueeze(0).unsqueeze(0)).sum().item()
+            )
         else:
             total_blocks = mask.numel()
             selected_blocks = mask.sum().item()
@@ -316,7 +318,9 @@ class DensityObserver(Observer):
         overall_comm = cls.get_overall_comm_density()
 
         print(f"[DensityObserver] Mode: {cls._mode}")
-        print(f"  Compute density: {overall:.4f} (min: {min_density:.4f} @ layer {min_layer})")
+        print(
+            f"  Compute density: {overall:.4f} (min: {min_density:.4f} @ layer {min_layer})"
+        )
         if overall_comm > 0:
             # Offload mode: show both densities with explanation
             print(f"  Comm density:    {overall_comm:.4f} (CPU block granularity)")

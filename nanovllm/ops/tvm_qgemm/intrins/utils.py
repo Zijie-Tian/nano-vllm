@@ -1,16 +1,22 @@
 import os
 from tvm.contrib import utils, clang
 
+
 def _extern_cpp(cc_code):
-    return """
+    return (
+        """
 #ifdef __cplusplus
 extern "C" {
 #endif
-""" + cc_code + """
+"""
+        + cc_code
+        + """
 #ifdef __cplusplus
 }
 #endif
 """
+    )
+
 
 def _create_llvm(header_file, body_code, cc, cc_opts):
     with open(os.path.join(os.path.dirname(__file__), header_file), "r") as fp:

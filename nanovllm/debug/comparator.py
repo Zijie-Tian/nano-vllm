@@ -8,6 +8,7 @@ import torch.nn.functional as F
 @dataclass
 class ComparisonResult:
     """Result of comparing two tensors."""
+
     passed: bool
     cosine_similarity: float
     max_abs_diff: float
@@ -60,10 +61,7 @@ class TensorComparator:
         test_f = test.float().flatten()
 
         # Cosine similarity
-        cos_sim = F.cosine_similarity(
-            ref_f.unsqueeze(0),
-            test_f.unsqueeze(0)
-        ).item()
+        cos_sim = F.cosine_similarity(ref_f.unsqueeze(0), test_f.unsqueeze(0)).item()
 
         # Absolute differences
         diff = (ref.float() - test.float()).abs()
@@ -72,9 +70,9 @@ class TensorComparator:
 
         # Check thresholds
         passed = (
-            cos_sim >= self.cosine_threshold and
-            max_diff <= self.max_diff_threshold and
-            mean_diff <= self.mean_diff_threshold
+            cos_sim >= self.cosine_threshold
+            and max_diff <= self.max_diff_threshold
+            and mean_diff <= self.mean_diff_threshold
         )
 
         status = "PASS" if passed else "FAIL"

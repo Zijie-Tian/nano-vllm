@@ -6,17 +6,18 @@ Tests LUT-based quantized GEMM with:
 2. QGeMMLUTBitsCodegen - LUT-based matrix multiplication
 """
 
-import os
-import sys
+
 import numpy as np
-
-# Ensure nanovllm is in path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-
+import torch
 import tvm
-from nanovllm.ops.tvm_qgemm.qgemm import QGeMMLUTBitsCodegen, QGeMMLUTBitsPreprocessorCodegen
-from nanovllm.ops.tvm_qgemm.utils.model_utils import preprocess_weights
+
+from nanovllm.kvcache.quant import quantize_kcache_per_token
+from nanovllm.ops.tvm_qgemm.qgemm import (
+    QGeMMLUTBitsCodegen,
+    QGeMMLUTBitsPreprocessorCodegen,
+)
 from nanovllm.ops.tvm_qgemm.utils.math_utils import nmse
+from nanovllm.ops.tvm_qgemm.utils.model_utils import preprocess_weights
 
 # =============================================================================
 # Configuration
@@ -34,12 +35,12 @@ simd_n_in = 16
 simd_n_out = 8
 act_group_size = 64  # Must be divisible by 32 for partial_max
 group_size = 128
-dtype = 'int8'
+dtype = "int8"
 zero_point = True
 m_groups = -1
 
 np.random.seed(21)
-np.set_printoptions(precision=4, floatmode='fixed', suppress=True)
+np.set_printoptions(precision=4, floatmode="fixed", suppress=True)
 
 print(f"Config: bits={bits}, M={M}, N={N}, K={K}, target={target}")
 print("=" * 60)
@@ -74,12 +75,14 @@ kfactor = codegen.kfactor
 bm = codegen.bm
 print(f"  Actual config: bm={bm}, kfactor={kfactor}")
 
+
 # =============================================================================
 # Reference implementations
 # =============================================================================
 def get_bits_alphas(bits: int):
     alphas = [1 / 2, 1, 2, 4]
     return alphas[:bits]
+
 
 def preprocessor_reference(B, act_group_size, g, dtype, out_dtype):
     """Generate LUT for activation values."""
@@ -95,11 +98,14 @@ def preprocessor_reference(B, act_group_size, g, dtype, out_dtype):
 
     def map_states(c):
         return _states[c]
+
     m = np.vectorize(map_states)(codes).astype(out_dtype)
 
     lut = b.dot(m)
 
-    lut_biases = lut.reshape(N, K // act_group_size, act_group_size // g, 1 << g)[:, :, :, 0]
+    lut_biases = lut.reshape(N, K // act_group_size, act_group_size // g, 1 << g)[
+        :, :, :, 0
+    ]
     lut_biases = np.sum(lut_biases, axis=-1) * _gamma
 
     qlut = lut.reshape(N, K // act_group_size, act_group_size // g * (1 << g))
@@ -108,17 +114,40 @@ def preprocessor_reference(B, act_group_size, g, dtype, out_dtype):
 
     def recp(s):
         return 1.0 / s if s != 0 else 0
+
     ils = np.vectorize(recp)(lut_scales).astype(out_dtype)
 
     qlut = np.rint(
-        (qlut.transpose(2, 0, 1).reshape(-1, qlut.shape[0] * qlut.shape[1]) * ils.reshape(1, qlut.shape[0] * qlut.shape[1]))
-        .reshape(qlut.shape[2], qlut.shape[0], qlut.shape[1]).transpose(1, 2, 0).reshape(N, K // g, 1 << g)
+        (
+            qlut.transpose(2, 0, 1).reshape(-1, qlut.shape[0] * qlut.shape[1])
+            * ils.reshape(1, qlut.shape[0] * qlut.shape[1])
+        )
+        .reshape(qlut.shape[2], qlut.shape[0], qlut.shape[1])
+        .transpose(1, 2, 0)
+        .reshape(N, K // g, 1 << g)
     ).astype(dtype)
 
     return B, lut_scales, lut_biases, qlut
 
-def qgemm_reference(A, QLUT, LUT_Scales, LUT_Biases, scales, bits, g, group_size, m_groups,
-                    simd_n_in, simd_n_out, bm, kfactor, zero_point, out_dtype, act_group_size):
+
+def qgemm_reference(
+    A,
+    QLUT,
+    LUT_Scales,
+    LUT_Biases,
+    scales,
+    bits,
+    g,
+    group_size,
+    m_groups,
+    simd_n_in,
+    simd_n_out,
+    bm,
+    kfactor,
+    zero_point,
+    out_dtype,
+    act_group_size,
+):
     """Reference implementation for LUT-based quantized GEMM."""
     _ngroups_per_elem = 8 // g
     alphas = get_bits_alphas(bits)
@@ -130,13 +159,25 @@ def qgemm_reference(A, QLUT, LUT_Scales, LUT_Biases, scales, bits, g, group_size
 
     cbits = np.zeros((N, M), dtype=out_dtype)
 
-    A = A.reshape(M // bm, K // g // kfactor, bm // _ngroups_per_elem // simd_n_in, kfactor, simd_n_in)
-    A = np.concatenate([(A >> (g * ng)) & ((1 << g) - 1) for ng in range(_ngroups_per_elem)], axis=-1)
+    A = A.reshape(
+        M // bm,
+        K // g // kfactor,
+        bm // _ngroups_per_elem // simd_n_in,
+        kfactor,
+        simd_n_in,
+    )
+    A = np.concatenate(
+        [(A >> (g * ng)) & ((1 << g) - 1) for ng in range(_ngroups_per_elem)], axis=-1
+    )
 
     if zero_point:
-        scales = scales.reshape(M // bm, K // group_size, bm // bits // simd_n_out, 2, simd_n_out)
+        scales = scales.reshape(
+            M // bm, K // group_size, bm // bits // simd_n_out, 2, simd_n_out
+        )
     else:
-        scales = scales.reshape(M // bm, K // group_size, bm // bits // simd_n_out, simd_n_out)
+        scales = scales.reshape(
+            M // bm, K // group_size, bm // bits // simd_n_out, simd_n_out
+        )
 
     for n in range(N):
         for k in range(K // g):
@@ -149,7 +190,7 @@ def qgemm_reference(A, QLUT, LUT_Scales, LUT_Biases, scales, bits, g, group_size
                 a_e = A[mo, ko, mi, ki, e]
 
                 scales_mi = (m % bm) // bits // simd_n_out
-                scales_e = ((m % bm) % simd_n_out)
+                scales_e = (m % bm) % simd_n_out
 
                 if m_groups == -1:
                     if zero_point:
@@ -160,21 +201,30 @@ def qgemm_reference(A, QLUT, LUT_Scales, LUT_Biases, scales, bits, g, group_size
                     m_group_size = M // m_groups
                     s = scales[m // m_group_size]
 
-                cbits[n, m] += QLUT[n, k, a_e] * LUT_Scales[n, k * g // act_group_size] * s
+                cbits[n, m] += (
+                    QLUT[n, k, a_e] * LUT_Scales[n, k * g // act_group_size] * s
+                )
 
-                if (((k * g) % act_group_size) == 0) and ((((m % bm) // simd_n_out) % bits) == 0):
+                if (((k * g) % act_group_size) == 0) and (
+                    (((m % bm) // simd_n_out) % bits) == 0
+                ):
                     cbits[n, m] += LUT_Biases[n, k * g // act_group_size] * s
                     if zero_point:
-                        cbits[n, m] += LUT_Biases[n, k * g // act_group_size] * (1 / alphas[0]) * scales[mo, k * g // group_size, scales_mi, 1, scales_e]
+                        cbits[n, m] += (
+                            LUT_Biases[n, k * g // act_group_size]
+                            * (1 / alphas[0])
+                            * scales[mo, k * g // group_size, scales_mi, 1, scales_e]
+                        )
 
     c = (
         cbits.reshape((N, M // simd_n_out // bits, bits, simd_n_out))
-            .transpose(0, 1, 3, 2)
-            .dot(np.array(alphas, dtype=out_dtype))
-            .reshape((N, M // bits))
+        .transpose(0, 1, 3, 2)
+        .dot(np.array(alphas, dtype=out_dtype))
+        .reshape((N, M // bits))
     )
 
     return c
+
 
 # =============================================================================
 # Prepare test data
@@ -184,10 +234,10 @@ activation = np.random.randn(N, K).astype(out_dtype)
 
 sym = not zero_point
 
-import torch
-from nanovllm.kvcache.quant import quantize_kcache_per_token
 weight_th = torch.from_numpy(weight)
-weight_quant_th, scales_th, zp_th = quantize_kcache_per_token(weight_th, bits=bits, sym=sym)
+weight_quant_th, scales_th, zp_th = quantize_kcache_per_token(
+    weight_th, bits=bits, sym=sym
+)
 weight_quant = weight_quant_th.numpy()
 scales = scales_th.numpy()
 zp = zp_th.numpy() if zp_th is not None else None
@@ -202,22 +252,40 @@ else:
 
 # Preprocess weights
 A_t, Scales_t = preprocess_weights(
-    Aref, Sref, zeros=Zref,
-    bits=bits, g=g, bm=bm,
+    Aref,
+    Sref,
+    zeros=Zref,
+    bits=bits,
+    g=g,
+    bm=bm,
     kfactor=kfactor,
     simd_n_in=simd_n_in,
-    simd_n_out=simd_n_out
+    simd_n_out=simd_n_out,
 )
 
 # Generate reference LUT
-Bref, LUT_Scales, LUT_Biases, QLUT = preprocessor_reference(Bref, act_group_size, g, dtype, out_dtype)
+Bref, LUT_Scales, LUT_Biases, QLUT = preprocessor_reference(
+    Bref, act_group_size, g, dtype, out_dtype
+)
 
 # Compute reference result
 C_ref = qgemm_reference(
-    A_t, QLUT, LUT_Scales, LUT_Biases, Scales_t,
-    bits, g, group_size, m_groups,
-    simd_n_in, simd_n_out, bm, kfactor,
-    zero_point, out_dtype, act_group_size
+    A_t,
+    QLUT,
+    LUT_Scales,
+    LUT_Biases,
+    Scales_t,
+    bits,
+    g,
+    group_size,
+    m_groups,
+    simd_n_in,
+    simd_n_out,
+    bm,
+    kfactor,
+    zero_point,
+    out_dtype,
+    act_group_size,
 )
 
 print(f"Reference output shape: {C_ref.shape}")

@@ -5,14 +5,17 @@ import torch.distributed as dist
 from nanovllm.layers.activation import SiluAndMul
 from nanovllm.layers.attention import Attention
 from nanovllm.layers.layernorm import RMSNorm
-from nanovllm.layers.linear import QKVParallelLinear, MergedColumnParallelLinear, RowParallelLinear
+from nanovllm.layers.linear import (
+    QKVParallelLinear,
+    MergedColumnParallelLinear,
+    RowParallelLinear,
+)
 from nanovllm.layers.rotary_embedding import get_rope
 from nanovllm.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
 from nanovllm.models.registry import register_model
 
 
 class LlamaAttention(nn.Module):
-
     def __init__(
         self,
         hidden_size: int,
@@ -34,7 +37,7 @@ class LlamaAttention(nn.Module):
         self.head_dim = head_dim or hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim ** -0.5
+        self.scaling = self.head_dim**-0.5
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -81,7 +84,6 @@ class LlamaAttention(nn.Module):
 
 
 class LlamaMLP(nn.Module):
-
     def __init__(
         self,
         hidden_size: int,
@@ -108,7 +110,6 @@ class LlamaMLP(nn.Module):
 
 
 class LlamaDecoderLayer(nn.Module):
-
     def __init__(self, config) -> None:
         super().__init__()
         self.self_attn = LlamaAttention(
@@ -116,7 +117,7 @@ class LlamaDecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
             max_position=config.max_position_embeddings,
-            head_dim=getattr(config, 'head_dim', None),
+            head_dim=getattr(config, "head_dim", None),
             rope_theta=getattr(config, "rope_theta", 10000),
             rope_scaling=getattr(config, "rope_scaling", None),
         )
@@ -125,7 +126,9 @@ class LlamaDecoderLayer(nn.Module):
             intermediate_size=config.intermediate_size,
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
     def forward(
         self,
@@ -144,11 +147,14 @@ class LlamaDecoderLayer(nn.Module):
 
 
 class LlamaModel(nn.Module):
-
     def __init__(self, config) -> None:
         super().__init__()
-        self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
-        self.layers = nn.ModuleList([LlamaDecoderLayer(config) for _ in range(config.num_hidden_layers)])
+        self.embed_tokens = VocabParallelEmbedding(
+            config.vocab_size, config.hidden_size
+        )
+        self.layers = nn.ModuleList(
+            [LlamaDecoderLayer(config) for _ in range(config.num_hidden_layers)]
+        )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
@@ -178,7 +184,7 @@ class LlamaForCausalLM(nn.Module):
         super().__init__()
         self.model = LlamaModel(config)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
-        if getattr(config, 'tie_word_embeddings', False):
+        if getattr(config, "tie_word_embeddings", False):
             self.lm_head.weight.data = self.model.embed_tokens.weight.data
 
     def forward(

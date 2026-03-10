@@ -10,8 +10,11 @@ Reference: Quest paper on query-aware KV cache selection.
 import logging
 import torch
 from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, TYPE_CHECKING
 from .policy import SparsePolicy, PolicyContext
+
+if TYPE_CHECKING:
+    from nanovllm.kvcache.offload_engine import OffloadEngine
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +56,11 @@ class BlockMetadataManager:
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
         self.dtype = dtype
-        self.device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = (
+            device
+            if device is not None
+            else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        )
 
         # Per-block min/max key values: [num_blocks, num_layers, num_heads, head_dim]
         # Stored on GPU for efficient score computation during decode
@@ -62,7 +69,9 @@ class BlockMetadataManager:
         self.key_max = torch.zeros(shape, dtype=dtype, device=self.device)
 
         # Track which blocks have valid metadata
-        self.valid_blocks = torch.zeros(num_blocks, dtype=torch.bool, device=self.device)
+        self.valid_blocks = torch.zeros(
+            num_blocks, dtype=torch.bool, device=self.device
+        )
 
     def update_metadata(
         self,
@@ -252,13 +261,15 @@ class QuestPolicy(SparsePolicy):
             # GQA: group query heads and average per KV group
             # Reshape q: [num_q_heads, head_dim] -> [num_kv_heads, group_size, head_dim]
             group_size = num_q_heads // num_kv_heads
-            q = q.view(num_kv_heads, group_size, -1).mean(dim=1)  # [num_kv_heads, head_dim]
+            q = q.view(num_kv_heads, group_size, -1).mean(
+                dim=1
+            )  # [num_kv_heads, head_dim]
 
         # Score: max(q·k_min, q·k_max) averaged over heads
         # key_min/key_max: [num_blocks, num_kv_heads, head_dim]
         # q: [num_kv_heads, head_dim]
-        score_min = torch.einsum('hd,bhd->bh', q, key_min)  # [num_blocks, kv_heads]
-        score_max = torch.einsum('hd,bhd->bh', q, key_max)
+        score_min = torch.einsum("hd,bhd->bh", q, key_min)  # [num_blocks, kv_heads]
+        score_max = torch.einsum("hd,bhd->bh", q, key_max)
         scores = torch.maximum(score_min, score_max).mean(dim=-1)  # [num_blocks]
 
         # Build selection set
@@ -282,7 +293,7 @@ class QuestPolicy(SparsePolicy):
 
             if mask.any():
                 masked_scores = scores.clone()
-                masked_scores[~mask] = float('-inf')
+                masked_scores[~mask] = float("-inf")
                 topk_count = min(remaining_k, mask.sum().item())
                 if topk_count > 0:
                     topk_indices = masked_scores.topk(topk_count).indices.cpu().tolist()
@@ -310,7 +321,9 @@ class QuestPolicy(SparsePolicy):
     ) -> None:
         """Update min/max key metadata during prefill offload."""
         if self.metadata is not None:
-            self.metadata.update_metadata(cpu_block_id, layer_id, k_cache, num_valid_tokens)
+            self.metadata.update_metadata(
+                cpu_block_id, layer_id, k_cache, num_valid_tokens
+            )
 
     def on_decode_offload(
         self,
@@ -321,7 +334,9 @@ class QuestPolicy(SparsePolicy):
     ) -> None:
         """Update min/max key metadata during decode offload (for new blocks)."""
         if self.metadata is not None:
-            self.metadata.update_metadata(cpu_block_id, layer_id, k_cache, num_valid_tokens)
+            self.metadata.update_metadata(
+                cpu_block_id, layer_id, k_cache, num_valid_tokens
+            )
 
     def reset(self) -> None:
         """Reset metadata."""
@@ -336,7 +351,9 @@ class QuestPolicy(SparsePolicy):
         num_tokens: int,
         **kwargs,
     ) -> None:
-        super().offload_prefill_chunk(offload_engine, layer_id, cpu_block_id, num_tokens, **kwargs)
+        super().offload_prefill_chunk(
+            offload_engine, layer_id, cpu_block_id, num_tokens, **kwargs
+        )
 
     def offload_decode_chunk(
         self,

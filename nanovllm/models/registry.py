@@ -16,10 +16,12 @@ def register_model(*architectures: str):
         class LlamaForCausalLM(nn.Module):
             ...
     """
+
     def decorator(cls: Type[nn.Module]) -> Type[nn.Module]:
         for arch in architectures:
             MODEL_REGISTRY[arch] = cls
         return cls
+
     return decorator
 
 

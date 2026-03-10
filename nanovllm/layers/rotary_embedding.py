@@ -38,15 +38,17 @@ def apply_rotary_emb_interleaved(
     x_0 = x_shaped[..., 0]
     x_1 = x_shaped[..., 1]
     # cos/sin: [seq_len, 1, rot_dim // 2] - broadcasts to num_heads
-    x_out = torch.stack([
-        x_0 * cos - x_1 * sin,
-        x_1 * cos + x_0 * sin,
-    ], dim=-1)
+    x_out = torch.stack(
+        [
+            x_0 * cos - x_1 * sin,
+            x_1 * cos + x_0 * sin,
+        ],
+        dim=-1,
+    )
     return x_out.flatten(-2).to(x.dtype)
 
 
 class RotaryEmbedding(nn.Module):
-
     def __init__(
         self,
         head_size: int,
@@ -57,7 +59,9 @@ class RotaryEmbedding(nn.Module):
         super().__init__()
         self.head_size = head_size
         assert rotary_dim == head_size
-        inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim))
+        inv_freq = 1.0 / (
+            base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim)
+        )
         t = torch.arange(max_position_embeddings, dtype=torch.float)
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
         cos = freqs.cos()
@@ -105,7 +109,9 @@ class Llama3RotaryEmbedding(nn.Module):
         assert rotary_dim == head_size
 
         # Compute base inv_freq
-        inv_freq = 1.0 / (base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim))
+        inv_freq = 1.0 / (
+            base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim)
+        )
 
         # Apply Llama3 scaling
         inv_freq = self._compute_llama3_inv_freq(
@@ -147,11 +153,17 @@ class Llama3RotaryEmbedding(nn.Module):
         wavelen = 2 * math.pi / inv_freq
 
         # Low frequency: scale down by factor
-        inv_freq_llama = torch.where(wavelen > low_freq_wavelen, inv_freq / factor, inv_freq)
+        inv_freq_llama = torch.where(
+            wavelen > low_freq_wavelen, inv_freq / factor, inv_freq
+        )
 
         # Medium frequency: smooth interpolation
-        smooth_factor = (old_context_len / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor)
-        smoothed_inv_freq = (1 - smooth_factor) * inv_freq_llama + smooth_factor * inv_freq
+        smooth_factor = (old_context_len / wavelen - low_freq_factor) / (
+            high_freq_factor - low_freq_factor
+        )
+        smoothed_inv_freq = (
+            1 - smooth_factor
+        ) * inv_freq_llama + smooth_factor * inv_freq
         is_medium_freq = (wavelen >= high_freq_wavelen) & (wavelen <= low_freq_wavelen)
         inv_freq_llama = torch.where(is_medium_freq, smoothed_inv_freq, inv_freq_llama)
 
@@ -193,7 +205,9 @@ class GLM4RotaryEmbedding(nn.Module):
         self.head_size = head_size
         self.rotary_dim = rotary_dim  # GLM-4: rotary_dim = head_dim // 2
         # inv_freq shape: [rotary_dim // 2]
-        inv_freq = 1.0 / (base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim))
+        inv_freq = 1.0 / (
+            base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim)
+        )
         t = torch.arange(max_position_embeddings, dtype=torch.float)
         freqs = torch.einsum("i,j -> ij", t, inv_freq)  # [max_pos, rotary_dim // 2]
         cos = freqs.cos()
@@ -225,10 +239,10 @@ class GLM4RotaryEmbedding(nn.Module):
         sin = cache[..., 1]  # [seq_len, 1, rotary_dim // 2]
 
         # Split into rotated and pass-through parts
-        q_rot = query[..., :self.rotary_dim]
-        q_pass = query[..., self.rotary_dim:]
-        k_rot = key[..., :self.rotary_dim]
-        k_pass = key[..., self.rotary_dim:]
+        q_rot = query[..., : self.rotary_dim]
+        q_pass = query[..., self.rotary_dim :]
+        k_rot = key[..., : self.rotary_dim]
+        k_pass = key[..., self.rotary_dim :]
 
         # Apply interleaved RoPE to rotated part
         q_rot = apply_rotary_emb_interleaved(q_rot, cos, sin)
@@ -260,7 +274,11 @@ def get_rope(
         rope_type = rope_scaling.get("rope_type", rope_scaling.get("type", "default"))
         if rope_type == "llama3":
             cache_key = (
-                head_size, rotary_dim, max_position, base, "llama3",
+                head_size,
+                rotary_dim,
+                max_position,
+                base,
+                "llama3",
                 rope_scaling["factor"],
                 rope_scaling["low_freq_factor"],
                 rope_scaling["high_freq_factor"],
@@ -268,7 +286,14 @@ def get_rope(
                 is_interleaved,
             )
         else:
-            cache_key = (head_size, rotary_dim, max_position, base, rope_type, is_interleaved)
+            cache_key = (
+                head_size,
+                rotary_dim,
+                max_position,
+                base,
+                rope_type,
+                is_interleaved,
+            )
 
     if cache_key in _rope_cache:
         return _rope_cache[cache_key]
@@ -289,7 +314,9 @@ def get_rope(
                 factor=rope_scaling["factor"],
                 low_freq_factor=rope_scaling["low_freq_factor"],
                 high_freq_factor=rope_scaling["high_freq_factor"],
-                original_max_position_embeddings=rope_scaling["original_max_position_embeddings"],
+                original_max_position_embeddings=rope_scaling[
+                    "original_max_position_embeddings"
+                ],
             )
         else:
             raise ValueError(f"Unsupported rope_type: {rope_type}")

@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional, List, Tuple, Any
+from typing import List, Tuple, Any
 import torch
 
 
@@ -24,7 +24,9 @@ class Context:
     kvcache_manager: Any = None
     # Current layer's previous K/V chunks (loaded from CPU)
     # Set by model_runner before each layer's forward
-    prev_kv_chunks: List[Tuple[torch.Tensor, torch.Tensor]] = field(default_factory=list)
+    prev_kv_chunks: List[Tuple[torch.Tensor, torch.Tensor]] = field(
+        default_factory=list
+    )
     # Current sequence being processed (for chunked prefill to load KV)
     chunked_seq: Any = None
     # Position within block for decode (used for reading from Decode region)

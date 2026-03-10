@@ -113,11 +113,11 @@ class MemoryObserver(Observer):
     def _fmt_bytes(cls, b: int) -> str:
         """格式化字节数"""
         if b >= 1e9:
-            return f"{b/1e9:.2f} GB"
+            return f"{b / 1e9:.2f} GB"
         if b >= 1e6:
-            return f"{b/1e6:.2f} MB"
+            return f"{b / 1e6:.2f} MB"
         if b >= 1e3:
-            return f"{b/1e3:.2f} KB"
+            return f"{b / 1e3:.2f} KB"
         return f"{b} B"
 
     @classmethod
@@ -129,5 +129,9 @@ class MemoryObserver(Observer):
         print(f"  H2D: {fmt(cls.h2d_bytes)} ({cls.h2d_count} ops)")
         print(f"  D2H: {fmt(cls.d2h_bytes)} ({cls.d2h_count} ops)")
         print(f"  D2D: {fmt(cls.d2d_bytes)} ({cls.d2d_count} ops)")
-        print(f"  Prefill - H2D: {fmt(cls.prefill_h2d_bytes)}, D2H: {fmt(cls.prefill_d2h_bytes)}")
-        print(f"  Decode  - H2D: {fmt(cls.decode_h2d_bytes)}, D2H: {fmt(cls.decode_d2h_bytes)}")
+        print(
+            f"  Prefill - H2D: {fmt(cls.prefill_h2d_bytes)}, D2H: {fmt(cls.prefill_d2h_bytes)}"
+        )
+        print(
+            f"  Decode  - H2D: {fmt(cls.decode_h2d_bytes)}, D2H: {fmt(cls.decode_d2h_bytes)}"
+        )

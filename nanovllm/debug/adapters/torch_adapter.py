@@ -52,7 +52,9 @@ class TorchSteppable(SteppableModel):
 
         # Generate position IDs if not provided
         if positions is None:
-            positions = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1)
+            positions = (
+                torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1)
+            )
         elif positions.dim() == 1:
             positions = positions.unsqueeze(0)
 

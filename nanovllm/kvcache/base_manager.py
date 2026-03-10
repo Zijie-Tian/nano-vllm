@@ -8,7 +8,7 @@ This interface allows pluggable implementations:
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 import torch
 from torch import Tensor
 

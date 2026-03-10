@@ -1,4 +1,5 @@
 """GLM-4 model implementation for nano-vllm."""
+
 import torch
 from torch import nn
 import torch.distributed as dist
@@ -6,14 +7,17 @@ import torch.distributed as dist
 from nanovllm.layers.activation import SiluAndMul
 from nanovllm.layers.attention import Attention
 from nanovllm.layers.layernorm import RMSNorm
-from nanovllm.layers.linear import QKVParallelLinear, MergedColumnParallelLinear, RowParallelLinear
+from nanovllm.layers.linear import (
+    QKVParallelLinear,
+    MergedColumnParallelLinear,
+    RowParallelLinear,
+)
 from nanovllm.layers.rotary_embedding import get_rope
 from nanovllm.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
 from nanovllm.models.registry import register_model
 
 
 class GLM4Attention(nn.Module):
-
     def __init__(
         self,
         hidden_size: int,
@@ -35,7 +39,7 @@ class GLM4Attention(nn.Module):
         self.head_dim = head_dim
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim ** -0.5
+        self.scaling = self.head_dim**-0.5
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -85,7 +89,6 @@ class GLM4Attention(nn.Module):
 
 
 class GLM4MLP(nn.Module):
-
     def __init__(
         self,
         hidden_size: int,
@@ -112,19 +115,20 @@ class GLM4MLP(nn.Module):
 
 
 class GLM4DecoderLayer(nn.Module):
-
     def __init__(self, config) -> None:
         super().__init__()
         # GLM-4 config field mapping
         hidden_size = config.hidden_size
         num_heads = config.num_attention_heads
-        num_kv_heads = getattr(config, 'multi_query_group_num', num_heads)
-        head_dim = getattr(config, 'kv_channels', hidden_size // num_heads)
-        max_position = getattr(config, 'seq_length', 1048576)
-        rope_ratio = getattr(config, 'rope_ratio', 1)
+        num_kv_heads = getattr(config, "multi_query_group_num", num_heads)
+        head_dim = getattr(config, "kv_channels", hidden_size // num_heads)
+        max_position = getattr(config, "seq_length", 1048576)
+        rope_ratio = getattr(config, "rope_ratio", 1)
         rope_theta = 10000 * rope_ratio  # GLM-4 uses rope_ratio to scale base
-        intermediate_size = getattr(config, 'ffn_hidden_size', getattr(config, 'intermediate_size', None))
-        rms_norm_eps = getattr(config, 'layernorm_epsilon', 1e-5)
+        intermediate_size = getattr(
+            config, "ffn_hidden_size", getattr(config, "intermediate_size", None)
+        )
+        rms_norm_eps = getattr(config, "layernorm_epsilon", 1e-5)
 
         self.self_attn = GLM4Attention(
             hidden_size=hidden_size,
@@ -159,15 +163,16 @@ class GLM4DecoderLayer(nn.Module):
 
 
 class GLM4Model(nn.Module):
-
     def __init__(self, config) -> None:
         super().__init__()
-        vocab_size = getattr(config, 'padded_vocab_size', config.vocab_size)
-        num_layers = getattr(config, 'num_layers', config.num_hidden_layers)
-        rms_norm_eps = getattr(config, 'layernorm_epsilon', 1e-5)
+        vocab_size = getattr(config, "padded_vocab_size", config.vocab_size)
+        num_layers = getattr(config, "num_layers", config.num_hidden_layers)
+        rms_norm_eps = getattr(config, "layernorm_epsilon", 1e-5)
 
         self.embed_tokens = VocabParallelEmbedding(vocab_size, config.hidden_size)
-        self.layers = nn.ModuleList([GLM4DecoderLayer(config) for _ in range(num_layers)])
+        self.layers = nn.ModuleList(
+            [GLM4DecoderLayer(config) for _ in range(num_layers)]
+        )
         self.norm = RMSNorm(config.hidden_size, eps=rms_norm_eps)
 
     def forward(
@@ -199,6 +204,7 @@ class ChatGLMForCausalLM(nn.Module):
     - transformer.encoder.final_layernorm → model.norm
     - transformer.output_layer → lm_head
     """
+
     packed_modules_mapping = {
         # QKV is merged in GLM-4 as query_key_value
         "query_key_value": ("qkv_proj", None),  # Special handling needed
@@ -215,7 +221,7 @@ class ChatGLMForCausalLM(nn.Module):
 
     def __init__(self, config) -> None:
         super().__init__()
-        vocab_size = getattr(config, 'padded_vocab_size', config.vocab_size)
+        vocab_size = getattr(config, "padded_vocab_size", config.vocab_size)
         self.config = config
         self.model = GLM4Model(config)
         self.lm_head = ParallelLMHead(vocab_size, config.hidden_size)

@@ -14,7 +14,6 @@ logger = logging.getLogger("qgemm")
 
 
 class QGeMMLUTBitsCodegen(OpCodegen):
-
     def __init__(
         self,
         *args,
@@ -29,7 +28,7 @@ class QGeMMLUTBitsCodegen(OpCodegen):
         aggregation_dtype: str = "int32",
         fast_aggregation: bool = False,
         zero_point: bool = False,
-        **kwargs
+        **kwargs,
     ):
         """
         Parameters
@@ -71,16 +70,23 @@ class QGeMMLUTBitsCodegen(OpCodegen):
         is_x86 = "x86_64" in str(self.target)
         if is_x86:
             if out_dtype == "float16":
-                logger.info("x86 detected: switching out_dtype from float16 to float32 for stability.")
+                logger.info(
+                    "x86 detected: switching out_dtype from float16 to float32 for stability."
+                )
                 out_dtype = "float32"
-            
+
             # Default x86 cc_opts if not provided
             if self.cc_opts is None:
-                self.cc_opts = ["-O3", "-march=native", "-mllvm", "-inline-threshold=10000"]
+                self.cc_opts = [
+                    "-O3",
+                    "-march=native",
+                    "-mllvm",
+                    "-inline-threshold=10000",
+                ]
                 logger.info(f"x86 detected: using default cc_opts: {self.cc_opts}")
 
         self.out_dtype = out_dtype
-        self.has_lut_scale = (self.dtype != self.out_dtype)
+        self.has_lut_scale = self.dtype != self.out_dtype
         self.weight_dtype = "uint8"
         self._num_per_elem = 8
         self.g = g
@@ -99,7 +105,9 @@ class QGeMMLUTBitsCodegen(OpCodegen):
         self.zero_point = zero_point
         if self.m_groups != -1:
             if self.zero_point:
-                logger.warning("Currently zero point is not supported for BitNet-like scales")
+                logger.warning(
+                    "Currently zero point is not supported for BitNet-like scales"
+                )
                 self.zero_point = False
 
     def do_scale_final(self, K: int):
@@ -115,7 +123,9 @@ class QGeMMLUTBitsCodegen(OpCodegen):
         bns = [8, 16, 32, 64]
         kfactors = [8, 16]
 
-        cfg.define_knob("bm", [bm for bm in bms if (M % bm == 0) and (bm % self.bits == 0)])
+        cfg.define_knob(
+            "bm", [bm for bm in bms if (M % bm == 0) and (bm % self.bits == 0)]
+        )
         cfg.define_knob("bn", [8, 16, 32, 64])
         if N <= 8:
             cfg.define_knob("bn", [8])
@@ -123,7 +133,12 @@ class QGeMMLUTBitsCodegen(OpCodegen):
             cfg.define_knob("bn", [bn for bn in bns if (N % bn == 0)])
         if not self.do_scale_final(K):
             w_group_size = self.group_size if self.m_groups == -1 else K
-            kfactors = [k for k in kfactors if ((k * self.g) % self.act_group_size == 0) and (w_group_size % (k * self.g) == 0)]
+            kfactors = [
+                k
+                for k in kfactors
+                if ((k * self.g) % self.act_group_size == 0)
+                and (w_group_size % (k * self.g) == 0)
+            ]
         cfg.define_knob("kfactor", kfactors)
         super()._define_config(cfg)
 
@@ -136,28 +151,56 @@ class QGeMMLUTBitsCodegen(OpCodegen):
         if N >= self.bn and N % self.bn != 0:
             raise TVMError("N({}) must be divisible by bn({})".format(N, self.bn))
         if K % self.act_group_size != 0:
-            raise TVMError("K({}) must be devisible by act_group_size({})".format(K, self.act_group_size))
+            raise TVMError(
+                "K({}) must be devisible by act_group_size({})".format(
+                    K, self.act_group_size
+                )
+            )
 
         k = te.reduce_axis((0, K // self.g), "k")
 
-        A = te.placeholder((M // bm, K // self.g, bm // self._ngroups_per_elem), dtype=self.weight_dtype, name="A")
-        LUT = te.placeholder((N, K // self.g, 2 ** self.g), dtype=self.dtype, name="LUT")
+        A = te.placeholder(
+            (M // bm, K // self.g, bm // self._ngroups_per_elem),
+            dtype=self.weight_dtype,
+            name="A",
+        )
+        LUT = te.placeholder((N, K // self.g, 2**self.g), dtype=self.dtype, name="LUT")
 
         if self.m_groups == -1:
             if K % self.group_size != 0:
-                raise TVMError("K({}) must be devisible by group_size({})".format(K, self.group_size))
+                raise TVMError(
+                    "K({}) must be devisible by group_size({})".format(
+                        K, self.group_size
+                    )
+                )
             if self.zero_point:
                 scales_shape = (M // bm, K // self.group_size, bm // self.bits * 2)
+
                 def _get_scale(m, k):
                     # Fake _get_scale, should be tensorized
-                    return Scales[m // bm, k * self.g // self.group_size, (m % bm) // self.bits * 2] - Scales[m // bm, k * self.g // self.group_size, (m % bm) // self.bits * 2 + 1]
+                    return (
+                        Scales[
+                            m // bm,
+                            k * self.g // self.group_size,
+                            (m % bm) // self.bits * 2,
+                        ]
+                        - Scales[
+                            m // bm,
+                            k * self.g // self.group_size,
+                            (m % bm) // self.bits * 2 + 1,
+                        ]
+                    )
             else:
                 scales_shape = (M // bm, K // self.group_size, bm // self.bits)
+
                 def _get_scale(m, k):
-                    return Scales[m // bm, k * self.g // self.group_size, (m % bm) // self.bits]
+                    return Scales[
+                        m // bm, k * self.g // self.group_size, (m % bm) // self.bits
+                    ]
         else:
             m_group_size = M // self.m_groups
             scales_shape = (self.m_groups,)
+
             def _get_scale(m, k):
                 return Scales[m // m_group_size]
 
@@ -166,29 +209,47 @@ class QGeMMLUTBitsCodegen(OpCodegen):
         alphas = [te.const(alpha, dtype=self.out_dtype) for alpha in self.alphas]
 
         if self.has_lut_scale:
-            LUT_Scales = te.placeholder((N, K // self.act_group_size), dtype=self.out_dtype, name="LUT_Scales")
-            LUT_Biases = te.placeholder((N, K // self.act_group_size), dtype=self.out_dtype, name="LUT_Biases")
+            LUT_Scales = te.placeholder(
+                (N, K // self.act_group_size), dtype=self.out_dtype, name="LUT_Scales"
+            )
+            LUT_Biases = te.placeholder(
+                (N, K // self.act_group_size), dtype=self.out_dtype, name="LUT_Biases"
+            )
+
             def _lut_scale(n, k, val):
-                return val * LUT_Scales[n, k * self.g // self.act_group_size] + LUT_Biases[n, k * self.g // self.act_group_size] * alphas[0]
+                return (
+                    val * LUT_Scales[n, k * self.g // self.act_group_size]
+                    + LUT_Biases[n, k * self.g // self.act_group_size] * alphas[0]
+                )
         else:
+
             def _lut_scale(n, k, val):
                 return val
 
         if not self.do_scale_final(K):
+
             def _scale_first(m, n, k, lut_val):
-                return _lut_scale(n, k, lut_val.astype(self.out_dtype)) * _get_scale(m, k)
+                return _lut_scale(n, k, lut_val.astype(self.out_dtype)) * _get_scale(
+                    m, k
+                )
+
             def _scale_final(m, n, cbits_sum):
                 return cbits_sum
         else:
+
             def _scale_first(m, n, k, lut_val):
                 return lut_val.astype(self.aggregation_dtype)
+
             def _scale_final(m, n, cbits_sum):
                 return _lut_scale(n, 0, cbits_sum) * _get_scale(m, k)
 
         mask = te.const((1 << self.g) - 1, dtype=self.weight_dtype)
 
         def _get_Abits(m, k):
-            return (A[m // bm, k, (m % bm) // self._ngroups_per_elem] >> (self.g * ((m % bm) % self._ngroups_per_elem))) & mask
+            return (
+                A[m // bm, k, (m % bm) // self._ngroups_per_elem]
+                >> (self.g * ((m % bm) % self._ngroups_per_elem))
+            ) & mask
 
         # placeholder computation
         # should be tensorized
@@ -203,16 +264,23 @@ class QGeMMLUTBitsCodegen(OpCodegen):
 
         C = te.compute(
             (N, M // self.bits),
-            lambda n, m: _scale_final(m, n,
-                sum([
-                    CBits[
-                        n,
-                        te.indexdiv(m, self.simd_n_out) * self.simd_n_out * self.bits
+            lambda n, m: _scale_final(
+                m,
+                n,
+                sum(
+                    [
+                        CBits[
+                            n,
+                            te.indexdiv(m, self.simd_n_out)
+                            * self.simd_n_out
+                            * self.bits
                             + te.indexmod(m, self.simd_n_out)
-                            + b * self.simd_n_out
-                    ].astype("float32") * alphas[b]
-                    for b in range(self.bits)
-                ]),
+                            + b * self.simd_n_out,
+                        ].astype("float32")
+                        * alphas[b]
+                        for b in range(self.bits)
+                    ]
+                ),
             ).astype(self.out_dtype),
             name="C",
         )
@@ -279,7 +347,7 @@ class QGeMMLUTBitsCodegen(OpCodegen):
 
         if self.num_threads > 1:
             N = int(C.shape[0])
-            if (N // self.bn >= self.num_threads):
+            if N // self.bn >= self.num_threads:
                 sch[C].parallel(no)
             else:
                 sch[C].parallel(mo)
@@ -291,106 +359,181 @@ class QGeMMLUTBitsCodegen(OpCodegen):
         err = nmse(tvm_arrays[-1].numpy(), arrays[-1])
         logger.info("NMSE: {}".format(err))
         if err > max_err:
-            logger.warning("tvm_arrays not close to arrays with nmse: {}\ntvm_arrays: {}\narrays: {}".format(err, tvm_arrays[-1].numpy(), arrays[-1]))
+            logger.warning(
+                "tvm_arrays not close to arrays with nmse: {}\ntvm_arrays: {}\narrays: {}".format(
+                    err, tvm_arrays[-1].numpy(), arrays[-1]
+                )
+            )
 
     def _reference(self, A, QLUT, LUT_Scales, LUT_Biases, Scales):
         """
         Reference implementation for Quantized General Matrix Multiplication using Lookup Tables.
-        
+
         Parameters:
             A: Preprocessed weights of shape (M//bm, K//g, bm//ngroups_per_elem)
             QLUT: Quantized lookup table of shape (N, K//g, 2^g)
             LUT_Scales: Scaling factors for LUT of shape (N, K//act_group_size)
             LUT_Biases: Bias values for LUT of shape (N, K//act_group_size)
             Scales: Weight scales of varying shape depending on quantization type
-        
+
         Returns:
             Output matrix of shape (N, M//bits)
         """
+
         # Helper function to convert TVM array to numpy if needed
         def to_numpy(arr):
             if arr is None:
                 return None
-            if hasattr(arr, 'numpy'):  # TVM array
+            if hasattr(arr, "numpy"):  # TVM array
                 return arr.numpy()
             return arr  # Already numpy
-        
+
         # Convert inputs to numpy if they are TVM arrays
         A = to_numpy(A)
         QLUT = to_numpy(QLUT)
         LUT_Scales = to_numpy(LUT_Scales)
         LUT_Biases = to_numpy(LUT_Biases)
         Scales = to_numpy(Scales)
-        
+
         # Extract dimensions from input arrays
         M_bm, K_g, _ = A.shape
         N, _, _ = QLUT.shape
         M = M_bm * self.bm
         K = K_g * self.g
-        
+
         # Initialize accumulator for bit-wise results
         cbits = np.zeros((N, M), dtype=self.out_dtype)
-        
+
         # Unpack the previously packed weight data
-        a = A.reshape(M // self.bm, K // self.g // self.kfactor, self.bm // self._ngroups_per_elem // self.simd_n_in, self.kfactor, self.simd_n_in)
-        a = np.concatenate([(a >> (self.g * ng)) & ((1 << self.g) - 1) for ng in range(self._ngroups_per_elem)], axis=-1)
-        
+        a = A.reshape(
+            M // self.bm,
+            K // self.g // self.kfactor,
+            self.bm // self._ngroups_per_elem // self.simd_n_in,
+            self.kfactor,
+            self.simd_n_in,
+        )
+        a = np.concatenate(
+            [
+                (a >> (self.g * ng)) & ((1 << self.g) - 1)
+                for ng in range(self._ngroups_per_elem)
+            ],
+            axis=-1,
+        )
+
         # Prepare scales for computation
         if self.m_groups == -1 and Scales.ndim >= 3:
             if self.zero_point and Scales.shape[-1] == self.bm // self.bits * 2:
-                scales_comp = Scales.reshape(M // self.bm, K // self.group_size, self.bm // self.bits // self.simd_n_out, 2, self.simd_n_out)
+                scales_comp = Scales.reshape(
+                    M // self.bm,
+                    K // self.group_size,
+                    self.bm // self.bits // self.simd_n_out,
+                    2,
+                    self.simd_n_out,
+                )
             else:
-                scales_comp = Scales.reshape(M // self.bm, K // self.group_size, self.bm // self.bits // self.simd_n_out, self.simd_n_out)
+                scales_comp = Scales.reshape(
+                    M // self.bm,
+                    K // self.group_size,
+                    self.bm // self.bits // self.simd_n_out,
+                    self.simd_n_out,
+                )
         else:
             scales_comp = Scales
-        
+
         # Main computation loop - accumulate LUT values
         for n in range(N):
             for k in range(K // self.g):
                 for m in range(M):
                     # Calculate block indices for hierarchical access
-                    mo = m // self.bm                                    # Major M block index
-                    ko = k // self.kfactor                               # Major K block index
-                    mi = (m % self.bm) // self._ngroups_per_elem // self.simd_n_in # Minor M block index
-                    ki = k % self.kfactor                                # Minor K block index
-                    e = (m % self.bm) % (self._ngroups_per_elem * self.simd_n_in) # Element within block
+                    mo = m // self.bm  # Major M block index
+                    ko = k // self.kfactor  # Major K block index
+                    mi = (
+                        (m % self.bm) // self._ngroups_per_elem // self.simd_n_in
+                    )  # Minor M block index
+                    ki = k % self.kfactor  # Minor K block index
+                    e = (m % self.bm) % (
+                        self._ngroups_per_elem * self.simd_n_in
+                    )  # Element within block
                     a_e = a[mo, ko, mi, ki, e]  # Extract weight index for LUT lookup
-                    
+
                     # Calculate scale indices
-                    scales_mi = (m % self.bm) // self.bits // self.simd_n_out  # Scale block index
-                    scales_e = ((m % self.bm) % self.simd_n_out)          # Scale element index
-                    
+                    scales_mi = (
+                        (m % self.bm) // self.bits // self.simd_n_out
+                    )  # Scale block index
+                    scales_e = (m % self.bm) % self.simd_n_out  # Scale element index
+
                     # Retrieve appropriate quantization scale
                     if self.m_groups == -1:  # Per-tensor or per-group quantization
                         if scales_comp.ndim >= 4:
                             if self.zero_point and scales_comp.shape[-2] == 2:
-                                s = scales_comp[mo, k * self.g // self.group_size, scales_mi, 0, scales_e]
+                                s = scales_comp[
+                                    mo,
+                                    k * self.g // self.group_size,
+                                    scales_mi,
+                                    0,
+                                    scales_e,
+                                ]
                             else:
-                                s = scales_comp[mo, k * self.g // self.group_size, scales_mi, scales_e]
+                                s = scales_comp[
+                                    mo,
+                                    k * self.g // self.group_size,
+                                    scales_mi,
+                                    scales_e,
+                                ]
                         else:
                             s = scales_comp.flat[0]  # Single scale for all
                     else:  # M-group quantization
                         m_group_size = M // self.m_groups
-                        s = scales_comp[m // m_group_size] if scales_comp.ndim > 0 else scales_comp
-                    
+                        s = (
+                            scales_comp[m // m_group_size]
+                            if scales_comp.ndim > 0
+                            else scales_comp
+                        )
+
                     # Core computation - accumulate scaled LUT value
-                    cbits[n, m] += QLUT[n, k, a_e] * LUT_Scales[n, k * self.g // self.act_group_size] * s
-                    
+                    cbits[n, m] += (
+                        QLUT[n, k, a_e]
+                        * LUT_Scales[n, k * self.g // self.act_group_size]
+                        * s
+                    )
+
                     # Add bias at group boundaries
-                    if (((k * self.g) % self.act_group_size) == 0) and ((((m % self.bm) // self.simd_n_out) % self.bits) == 0):
-                        cbits[n, m] += LUT_Biases[n, k * self.g // self.act_group_size] * s
-                        if self.zero_point and scales_comp.ndim >= 4 and scales_comp.shape[-2] == 2:
+                    if (((k * self.g) % self.act_group_size) == 0) and (
+                        (((m % self.bm) // self.simd_n_out) % self.bits) == 0
+                    ):
+                        cbits[n, m] += (
+                            LUT_Biases[n, k * self.g // self.act_group_size] * s
+                        )
+                        if (
+                            self.zero_point
+                            and scales_comp.ndim >= 4
+                            and scales_comp.shape[-2] == 2
+                        ):
                             # Additional zero-point correction
-                            cbits[n, m] += LUT_Biases[n, k * self.g // self.act_group_size] * (1 / self.alphas[0]) * scales_comp[mo, k * self.g // self.group_size, scales_mi, 1, scales_e]
-        
+                            cbits[n, m] += (
+                                LUT_Biases[n, k * self.g // self.act_group_size]
+                                * (1 / self.alphas[0])
+                                * scales_comp[
+                                    mo,
+                                    k * self.g // self.group_size,
+                                    scales_mi,
+                                    1,
+                                    scales_e,
+                                ]
+                            )
+
         # Final reconstruction - combine bit-wise results
         c = (
-            cbits.reshape((N, M // self.simd_n_out // self.bits, self.bits, self.simd_n_out))
-                .transpose(0, 1, 3, 2)
-                .dot(np.array(self.alphas, dtype=self.out_dtype))  # Apply bit position weights
-                .reshape((N, M // self.bits))  # Final output shape
+            cbits.reshape(
+                (N, M // self.simd_n_out // self.bits, self.bits, self.simd_n_out)
+            )
+            .transpose(0, 1, 3, 2)
+            .dot(
+                np.array(self.alphas, dtype=self.out_dtype)
+            )  # Apply bit position weights
+            .reshape((N, M // self.bits))  # Final output shape
         )
-        
+
         return c
 
     def get_template_name(self, M: int, N: int, K: int) -> str:
@@ -403,6 +546,7 @@ class QGeMMLUTBitsPreprocessorCodegen(OpCodegen):
     This preprocessor will compute the LUT of the activations,
     and quantize the LUT from `out_dtype` to `dtype`.
     """
+
     def __init__(
         self,
         *args,
@@ -412,7 +556,7 @@ class QGeMMLUTBitsPreprocessorCodegen(OpCodegen):
         bits: int = 4,
         fast_aggregation_k: int = 16,
         M: int = 0,
-        **kwargs
+        **kwargs,
     ):
         """
         Parameters:
@@ -427,12 +571,19 @@ class QGeMMLUTBitsPreprocessorCodegen(OpCodegen):
         is_x86 = "x86_64" in str(self.target)
         if is_x86:
             if out_dtype == "float16":
-                logger.info("x86 detected: switching out_dtype from float16 to float32 for stability.")
+                logger.info(
+                    "x86 detected: switching out_dtype from float16 to float32 for stability."
+                )
                 out_dtype = "float32"
-            
+
             # Default x86 cc_opts if not provided
             if self.cc_opts is None:
-                self.cc_opts = ["-O3", "-march=native", "-mllvm", "-inline-threshold=10000"]
+                self.cc_opts = [
+                    "-O3",
+                    "-march=native",
+                    "-mllvm",
+                    "-inline-threshold=10000",
+                ]
                 logger.info(f"x86 detected: using default cc_opts: {self.cc_opts}")
 
         self.out_dtype = out_dtype
@@ -457,10 +608,16 @@ class QGeMMLUTBitsPreprocessorCodegen(OpCodegen):
 
     def _compute(self, N: int, K: int):
         if K % self.act_group_size != 0:
-            raise TVMError("K({}) must be devisible by act_group_size({})".format(K, self.act_group_size))
+            raise TVMError(
+                "K({}) must be devisible by act_group_size({})".format(
+                    K, self.act_group_size
+                )
+            )
         # TODO: modify partial_max to support self.act_group_size % 32 != 0
         if self.act_group_size % 32 != 0:
-            raise TVMError("act_group_size({}) must be devisible by 32".format(self.act_group_size))
+            raise TVMError(
+                "act_group_size({}) must be devisible by 32".format(self.act_group_size)
+            )
 
         B = te.placeholder((N, K), dtype=self.out_dtype, name="B")
 
@@ -469,20 +626,30 @@ class QGeMMLUTBitsPreprocessorCodegen(OpCodegen):
         LUT_Scales = te.compute(
             (N, K // self.act_group_size),
             lambda n, kk: te.max(
-                te.abs(sum(B[n, kk * self.act_group_size + sk * self.g + g] for g in range(self.g))) / self.maxv,
+                te.abs(
+                    sum(
+                        B[n, kk * self.act_group_size + sk * self.g + g]
+                        for g in range(self.g)
+                    )
+                )
+                / self.maxv,
                 axis=sk,
             ),
             name="LUT_Scales",
         )
 
-        LUT_Biases = te.placeholder((N, K // self.act_group_size), dtype=self.out_dtype, name="LUT_Biases")
+        LUT_Biases = te.placeholder(
+            (N, K // self.act_group_size), dtype=self.out_dtype, name="LUT_Biases"
+        )
 
         # placeholder computation
         # should be tensorized
         QLUT = te.compute(
             (N, K // self.g, 1 << self.g),
             lambda n, k, g: (
-                B[n, k * self.g + (g % self.g)] / LUT_Scales[n, k * self.g // self.act_group_size] - LUT_Biases[n, k * self.g // self.act_group_size]
+                B[n, k * self.g + (g % self.g)]
+                / LUT_Scales[n, k * self.g // self.act_group_size]
+                - LUT_Biases[n, k * self.g // self.act_group_size]
             ).astype(self.dtype),
             name="QLUT",
         )
@@ -536,72 +703,88 @@ class QGeMMLUTBitsPreprocessorCodegen(OpCodegen):
 
     def _verify(self, tvm_arrays: List[tvm.nd.NDArray], arrays: List[np.ndarray]):
         tvm.testing.assert_allclose(tvm_arrays[-1].numpy(), arrays[-1], atol=1, rtol=0)
-        tvm.testing.assert_allclose(tvm_arrays[-2].numpy(), arrays[-2], atol=1e-2, rtol=1e-2)
-        tvm.testing.assert_allclose(tvm_arrays[-3].numpy(), arrays[-3], atol=1e-2, rtol=1e-2)
+        tvm.testing.assert_allclose(
+            tvm_arrays[-2].numpy(), arrays[-2], atol=1e-2, rtol=1e-2
+        )
+        tvm.testing.assert_allclose(
+            tvm_arrays[-3].numpy(), arrays[-3], atol=1e-2, rtol=1e-2
+        )
 
     def _reference(self, B):
         """
         Generate Lookup Tables (LUT) for activation values to accelerate matrix multiplication.
-        
+
         Core concept: pre-compute all possible products between activation groups
         For g=4 bits, we have 2^4=16 possible patterns, so we pre-compute 16 products
         This trades memory for computation speed
-        
+
         Parameters:
             B: Activation matrix of shape (N, K) - can be np.ndarray or tvm.nd.NDArray
-        
+
         Returns:
             lut_scales: Scaling factors for each LUT group
             lut_biases: Bias values for LUT groups (for handling negative values)
             qlut: Quantized lookup table with pre-computed products
         """
+
         # Helper function to convert TVM array to numpy if needed
         def to_numpy(arr):
             if arr is None:
                 return None
-            if hasattr(arr, 'numpy'):  # TVM array
+            if hasattr(arr, "numpy"):  # TVM array
                 return arr.numpy()
             return arr  # Already numpy
-        
+
         B = to_numpy(B)
-        
+
         # Extract dimensions from input array
         N, K = B.shape
-        
+
         # Step 1 - Reshape activations into groups
         b = B.reshape(N, K // self.g, self.g)
-        
+
         # Step 2 - Generate all possible bit patterns
         codes = np.array([[i] for i in range(1 << self.g)], dtype=np.uint8)
         codes = np.unpackbits(codes, axis=1, bitorder="little", count=self.g).T
-        
+
         # Convert binary (0,1) to bipolar (-1,1) representation
         def map_states(c):
             return self._states[c]
+
         m = np.vectorize(map_states)(codes).astype(self.out_dtype)
-        
+
         # Step 3 - Compute LUT by matrix multiplication
         lut = b.dot(m)
-        
+
         # Step 4 - Extract biases for handling negative values
-        lut_biases = lut.reshape(N, K // self.act_group_size, self.act_group_size // self.g, 1 << self.g)[:, :, :, 0]
+        lut_biases = lut.reshape(
+            N, K // self.act_group_size, self.act_group_size // self.g, 1 << self.g
+        )[:, :, :, 0]
         lut_biases = np.sum(lut_biases, axis=-1) * self._gamma
-        
+
         # Step 5 - Quantize LUT to int8 for memory efficiency
-        qlut = lut.reshape(N, K // self.act_group_size, self.act_group_size // self.g * (1 << self.g))
+        qlut = lut.reshape(
+            N, K // self.act_group_size, self.act_group_size // self.g * (1 << self.g)
+        )
         absmax = np.max(np.abs(qlut), axis=-1)
         lut_scales = absmax / self.maxv
-        
+
         def recp(s):
             return 1.0 / s if s != 0 else 0
+
         ils = np.vectorize(recp)(lut_scales).astype(self.out_dtype)
-        
+
         # Quantize LUT values to int8 range [-127, 127]
         qlut = np.rint(
-            (qlut.transpose(2, 0, 1).reshape(-1, qlut.shape[0] * qlut.shape[1]) * ils.reshape(1, qlut.shape[0] * qlut.shape[1]))
-            .reshape(qlut.shape[2], qlut.shape[0], qlut.shape[1]).transpose(1, 2, 0).reshape(N, K // self.g, 1 << self.g)
+            (
+                qlut.transpose(2, 0, 1).reshape(-1, qlut.shape[0] * qlut.shape[1])
+                * ils.reshape(1, qlut.shape[0] * qlut.shape[1])
+            )
+            .reshape(qlut.shape[2], qlut.shape[0], qlut.shape[1])
+            .transpose(1, 2, 0)
+            .reshape(N, K // self.g, 1 << self.g)
         ).astype(self.dtype)
-        
+
         return [lut_scales, lut_biases, qlut]
 
     def get_template_name(self, N: int, K: int) -> str:
