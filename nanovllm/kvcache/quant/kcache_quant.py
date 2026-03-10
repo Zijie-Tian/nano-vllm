@@ -127,5 +127,57 @@ def pack_kvcache_tmac(
         
         # Cleanup chunk memory
         del kv_u_chunk, w, b0, b1, p0, p1, w_bit_serial, res
-        
+
     return out
+
+
+def pack_scales_tmac(
+    scales: torch.Tensor,
+    zeros: Optional[torch.Tensor] = None,
+    bits: int = 2,
+    bm: int = 256,
+    simd_n_out: int = 8,
+) -> torch.Tensor:
+    """
+    Reshape and pack scales (and zeros) for T-MAC.
+    Follows the logic in model_utils.py preprocess_weights.
+
+    Args:
+        scales: [batch, n_head, M, K//group_size] or [M, K//group_size]
+        zeros: Optional zero points, same shape as scales
+        bits: Quantization bits
+        bm: Tiling size for M
+        simd_n_out: SIMD output lanes (8)
+
+    Returns:
+        packed_scales: Reshaped scales for TVM API
+    """
+    # Normalize to [B, H, M, num_groups]
+    if scales.dim() == 2:
+        scales = scales.unsqueeze(0).unsqueeze(0)
+        if zeros is not None:
+            zeros = zeros.unsqueeze(0).unsqueeze(0)
+
+    batch, n_head, M, num_groups = scales.shape
+    M_exp = M * bits
+
+    # Reshape: [B, H, M_exp//bm, bm//bits, num_groups]
+    s = scales.view(batch, n_head, M_exp // bm, bm // bits, num_groups)
+    s = s.permute(0, 1, 2, 4, 3)  # [B, H, M_exp//bm, num_groups, bm//bits]
+
+    # Further tiling for SIMD: [B, H, M_exp//bm, num_groups, bm//bits//simd_n_out, simd_n_out]
+    s = s.reshape(
+        batch, n_head, M_exp // bm, num_groups, bm // bits // simd_n_out, simd_n_out
+    )
+
+    if zeros is not None:
+        z = zeros.view(batch, n_head, M_exp // bm, bm // bits, num_groups)
+        z = z.permute(0, 1, 2, 4, 3).reshape(
+            batch, n_head, M_exp // bm, num_groups, bm // bits // simd_n_out, simd_n_out
+        )
+        # Stack scales and zeros: [B, H, M_exp//bm, num_groups, bm//bits//simd_n_out, 2, simd_n_out]
+        s = torch.stack([s, z], dim=-2)
+
+    # Flatten to match TVM input: [B, H, M_exp//bm, num_groups, -1]
+    return s.reshape(batch, n_head, M_exp // bm, num_groups, -1)
+

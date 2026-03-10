@@ -11,13 +11,18 @@ from nanovllm.ops.tvm_qgemm.utils.math_utils import (
     compute_sqnr,
     nmse,
 )
+from nanovllm.kvcache.quant import (
+    quantize_kcache_per_token,
+    dequantize_kcache_per_token,
+    pack_kvcache_tmac,
+    pack_scales_tmac,
+)
 from nanovllm.ops.tvm_qgemm.utils.quant import (
     quantize_weight_per_tensor,
     dequantize_weight_per_tensor,
     quantize_weight_per_group,
     dequantize_weight_per_group,
 )
-from nanovllm.ops.tvm_qgemm.utils.model_utils import preprocess_weights
 
 # Setup logging
 logging.basicConfig(format="%(levelname)s: %(message)s")
@@ -190,17 +195,28 @@ for test_strategy in strategies_to_test:
     Y_ref = weight.dot(activation.T)
     Cref = Bref.dot(Adq)
 
-    A_t, Scales_t = preprocess_weights(
-        Aref,
-        Sref,
-        zeros=Zref,
+    # Preprocess weights using the new PyTorch interface
+    import torch
+
+    A_t_torch = pack_kvcache_tmac(
+        torch.from_numpy(weight_quant).unsqueeze(0).unsqueeze(0),
+        is_key=True,
         bits=bits,
         g=g,
         bm=bm,
         kfactor=kfactor,
-        simd_n_in=simd_n_in,
+    ).squeeze(0).squeeze(0)
+
+    Scales_t_torch = pack_scales_tmac(
+        torch.from_numpy(Sref),
+        zeros=torch.from_numpy(Zref) if Zref is not None else None,
+        bits=bits,
+        bm=bm,
         simd_n_out=simd_n_out,
-    )
+    ).squeeze(0).squeeze(0)
+
+    A_t = A_t_torch.numpy()
+    Scales_t = Scales_t_torch.numpy()
 
     def preprocessor_reference(B, act_group_size, g, dtype, out_dtype):
         _states = [-1, 1]

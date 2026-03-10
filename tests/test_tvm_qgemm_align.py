@@ -11,13 +11,16 @@ import numpy as np
 import torch
 import tvm
 
-from nanovllm.kvcache.quant import quantize_kcache_per_token
+from nanovllm.kvcache.quant import (
+    quantize_kcache_per_token,
+    pack_kvcache_tmac,
+    pack_scales_tmac,
+)
 from nanovllm.ops.tvm_qgemm.qgemm import (
     QGeMMLUTBitsCodegen,
     QGeMMLUTBitsPreprocessorCodegen,
 )
 from nanovllm.ops.tvm_qgemm.utils.math_utils import nmse
-from nanovllm.ops.tvm_qgemm.utils.model_utils import preprocess_weights
 
 # =============================================================================
 # Configuration
@@ -250,18 +253,26 @@ if zp is not None:
 else:
     Zref = None
 
-# Preprocess weights
-A_t, Scales_t = preprocess_weights(
-    Aref,
-    Sref,
-    zeros=Zref,
+# Preprocess weights using the new PyTorch interface
+A_t_torch = pack_kvcache_tmac(
+    weight_quant_th.unsqueeze(0).unsqueeze(0),
+    is_key=True,
     bits=bits,
     g=g,
     bm=bm,
     kfactor=kfactor,
-    simd_n_in=simd_n_in,
+).squeeze(0).squeeze(0)
+
+Scales_t_torch = pack_scales_tmac(
+    torch.from_numpy(Sref),
+    zeros=torch.from_numpy(Zref) if Zref is not None else None,
+    bits=bits,
+    bm=bm,
     simd_n_out=simd_n_out,
-)
+).squeeze(0).squeeze(0)
+
+A_t = A_t_torch.numpy()
+Scales_t = Scales_t_torch.numpy()
 
 # Generate reference LUT
 Bref, LUT_Scales, LUT_Biases, QLUT = preprocessor_reference(
