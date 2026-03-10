@@ -13,8 +13,8 @@
 
 ## Phase 3: KV Cache Packing
 - [x] Task: Implement bit-serial interleaving packing for quantized KV blocks. [ad8ba0a]
-- [ ] Task: Optimize packing performance using Triton/CUDA kernels.
-- [ ] Task: Verify packing correctness with T-MAC's expectations.
+- [~] Task: Optimize packing performance using Triton/CUDA kernels.
+- [x] Task: Verify packing correctness with T-MAC's expectations. [940effb]
 - [ ] Task: Conductor - User Manual Verification 'Phase 3: KV Cache Packing' (Protocol in workflow.md)
 
 ## Phase 4: Final Integration and Validation
