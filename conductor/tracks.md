@@ -4,7 +4,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [~] **Track: Optimize TMAC QGEMM and Implement KVCache Quantization and Packing**
+- [x] **Track: Optimize TMAC QGEMM and Implement KVCache Quantization and Packing**
   *Link: [./tracks/optimize_tmac_20260309/](./tracks/optimize_tmac_20260309/)*
 
 ---

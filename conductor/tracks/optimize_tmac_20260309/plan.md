@@ -16,8 +16,3 @@
 - [x] Task: Optimize packing performance using bitwise PyTorch ops and chunking. [ed1edaa]
 - [x] Task: Verify packing correctness and long-context (1M) stability. [940effb]
 - [x] Task: Conductor - User Manual Verification 'Phase 3: KV Cache Packing' (Protocol in workflow.md) [ed1edaa]
-
-## Phase 4: Final Integration and Validation
-- [ ] Task: Integrate optimized QGEMM, quantization, and packing into the engine.
-- [ ] Task: Run end-to-end benchmarks and long-context validation (32k+).
-- [ ] Task: Conductor - User Manual Verification 'Phase 4: Final Integration and Validation' (Protocol in workflow.md)
