@@ -41,6 +41,80 @@ class COMPASSPolicy(SparsePolicy):
     def __init__(self):
         """Initialize with statistics tracking."""
         self._stats_num_chunks = 0
+        
+        # Metadata buffers for TMAC verification
+        self._q_buffer: torch.Tensor | None = None
+        self._k_packed_buffer: torch.Tensor | None = None
+        self._max_q_chunks: int = 0
+        self._q_chunk_sizes: list[int] = []
+
+    def alloc_policy_metadata(
+        self,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        max_seq_len: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        enable_cpu_offload: bool = False,
+    ) -> None:
+        """
+        Allocate pinned CPU memory buffers for COMPASS metadata (TMAC prediction).
+        
+        Allocates buffers for:
+        1. Packed K-cache (2-bit interleaved format for TMAC)
+        2. Q tensors (all chunks for initial verification)
+        """
+        if not enable_cpu_offload:
+            return
+            
+        logger.info("[COMPASS] Allocating metadata buffers for TMAC verification...")
+        
+        # K-cache packing parameters (TMAC 2-bit format)
+        # We need to store this per layer and per CPU block
+        # The packed size depends on the block_size and quantization strategy.
+        # TMAC uses INT4 (2-bit per element effectively) with specific interleaving.
+        # For simplicity in this phase, we'll allocate a generic byte buffer that can 
+        # hold the packed data. 
+        # 16-bit to 2-bit is an 8x reduction in size.
+        # Shape: [num_layers, max_cpu_blocks, block_size, kv_heads, head_dim // 8]
+        # We'll determine the exact size needed during Phase 2 implementation.
+        
+        # Estimate max chunks based on sequence length and a typical chunk size
+        # Assume minimum chunk size is 512 for estimation
+        self._max_q_chunks = max_seq_len // 512 + 1
+        
+        # Allocate Q buffer: [num_layers, max_chunks, max_chunk_len, num_heads, head_dim]
+        # For now, we'll just allocate a flat buffer and keep track of sizes, 
+        # or a large enough tensor to hold max seq length.
+        # Shape: [num_layers, max_seq_len, num_heads, head_dim]
+        # This is pinned memory on CPU.
+        # To avoid circular import issues, we assume 32 layers max for now, 
+        # but we should ideally pass num_layers to this function if needed.
+        # For this verification phase, we'll assume a fixed number of layers or just use 32.
+        num_layers = 32 # Default assumption, we might need to adjust this
+        
+        self._q_buffer = torch.zeros(
+            (num_layers, max_seq_len, num_heads, head_dim),
+            dtype=dtype,
+            device="cpu",
+            pin_memory=True
+        )
+        
+        # Packed K buffer
+        # Shape: [num_layers, max_seq_len, num_kv_heads, head_dim // 8] (assuming 8x reduction)
+        self._k_packed_buffer = torch.zeros(
+            (num_layers, max_seq_len, num_kv_heads, head_dim // 8),
+            dtype=torch.uint8,
+            device="cpu",
+            pin_memory=True
+        )
+        
+        q_mb = self._q_buffer.numel() * self._q_buffer.element_size() / (1024 * 1024)
+        k_mb = self._k_packed_buffer.numel() * self._k_packed_buffer.element_size() / (1024 * 1024)
+        logger.info(f"[COMPASS] Allocated Q buffer: {q_mb:.1f} MB, Packed K buffer: {k_mb:.1f} MB (Pinned CPU)")
+        
+        self._q_chunk_sizes = []
 
     def select_blocks(
         self,

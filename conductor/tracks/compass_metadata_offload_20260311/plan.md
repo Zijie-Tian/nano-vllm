@@ -1,7 +1,7 @@
 # Implementation Plan: COMPASS Metadata Offloading and TMAC Verification
 
 ## Phase 1: Metadata Buffer Allocation and Setup
-- [ ] Task: Implement `alloc_policy_metadata` in `COMPASSPolicy` to allocate pinned CPU memory for metadata.
+- [~] Task: Implement `alloc_policy_metadata` in `COMPASSPolicy` to allocate pinned CPU memory for metadata.
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: Metadata Buffer Allocation and Setup' (Protocol in workflow.md)
 
 ## Phase 2: Metadata Offloading Implementation
