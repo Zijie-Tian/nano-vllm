@@ -12,7 +12,8 @@ def _blasst_chunked_prefill_fwd_kernel(
     threshold_ln_lambda,
     Out,
     Lse,
-    LseIn,
+    MglobalIn,
+    MglobalOut,
     Mask,
     stride_qz,
     stride_qh,
@@ -33,9 +34,12 @@ def _blasst_chunked_prefill_fwd_kernel(
     stride_lsez,
     stride_lseh,
     stride_lsem,
-    stride_lsein_z,
-    stride_lsein_h,
-    stride_lsein_m,
+    stride_mgin_z,
+    stride_mgin_h,
+    stride_mgin_m,
+    stride_mgout_z,
+    stride_mgout_h,
+    stride_mgout_m,
     stride_mask_g0,
     stride_mask_g1,
     stride_mask_b,
@@ -44,8 +48,10 @@ def _blasst_chunked_prefill_fwd_kernel(
     H_KV,
     N_CTX_Q,
     N_CTX_K,
-    HAS_LSE_IN: tl.constexpr,
+    KV_OFFSET,  # Global offset of KV positions for causal masking
+    HAS_MGLOBAL_IN: tl.constexpr,
     HAS_MASK: tl.constexpr,
+    IS_CAUSAL: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -96,15 +102,21 @@ def _blasst_chunked_prefill_fwd_kernel(
     q_mask = offs_m[:, None] < N_CTX_Q
     q = tl.load(q_ptrs, mask=q_mask, other=0.0)
 
-    # 1. Global state for BLASST Pruning (from history)
-    if HAS_LSE_IN:
-        lse_in_ptrs = (
-            LseIn
-            + off_z * stride_lsein_z
-            + off_h * stride_lsein_h
-            + offs_m_i64 * stride_lsein_m
+    # Global Q positions for causal masking
+    # Q positions in the global sequence: KV_OFFSET + offs_m
+    # (Q and current-chunk KV share the same position range)
+    if IS_CAUSAL:
+        q_global_pos = KV_OFFSET + offs_m
+
+    # 1. Load m_global for BLASST pruning (running max of attention scores)
+    if HAS_MGLOBAL_IN:
+        mgin_ptrs = (
+            MglobalIn
+            + off_z * stride_mgin_z
+            + off_h * stride_mgin_h
+            + offs_m_i64 * stride_mgin_m
         )
-        m_global = tl.load(lse_in_ptrs, mask=(offs_m < N_CTX_Q), other=-float("inf"))
+        m_global = tl.load(mgin_ptrs, mask=(offs_m < N_CTX_Q), other=-float("inf"))
     else:
         m_global = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
 
@@ -122,6 +134,13 @@ def _blasst_chunked_prefill_fwd_kernel(
             if mask_val == 0:
                 do_compute = 0
 
+        # Block-level causal early exit: skip if all KV positions are in the future
+        if IS_CAUSAL:
+            kv_block_start = KV_OFFSET + start_n
+            q_block_max = KV_OFFSET + pid_m * BLOCK_M + BLOCK_M - 1
+            if kv_block_start > q_block_max:
+                do_compute = 0
+
         # Only process if mask allows it
         if do_compute == 1:
             start_n_aligned = tl.multiple_of(start_n, BLOCK_N)
@@ -131,21 +150,28 @@ def _blasst_chunked_prefill_fwd_kernel(
             qk = tl.dot(q, tl.trans(k)) * sm_scale
 
             valid_mask = q_mask & k_mask_1d[None, :]
+
+            # Apply element-wise causal mask
+            if IS_CAUSAL:
+                kv_global_pos = KV_OFFSET + start_n + offs_n
+                causal_mask = q_global_pos[:, None] >= kv_global_pos[None, :]
+                valid_mask = valid_mask & causal_mask
+
             qk = tl.where(valid_mask, qk, float("-inf"))
 
             m_local = tl.max(qk, axis=1)
 
-            # skip condition using m_global
+            # BLASST skip decision: compare m_local against historical m_global
             diff = m_local - m_global
             max_diff = tl.max(diff, axis=0)
+
+            # Update m_global UNCONDITIONALLY after check
+            m_global = tl.maximum(m_global, m_local)
 
             # Dynamic BLASST check
             if max_diff < threshold_ln_lambda:
                 do_compute = 0
             else:
-                # Update global max for FUTURE blocks in this chunk
-                m_global = tl.maximum(m_global, m_local)
-
                 # Independent Chunk Computation!
                 m_chunk_new = tl.maximum(m_chunk, m_local)
                 p = tl.math.exp2((qk - m_chunk_new[:, None]) * 1.44269504)
@@ -171,7 +197,6 @@ def _blasst_chunked_prefill_fwd_kernel(
         block_idx += 1
 
     # Finalize independent chunk output
-    # Avoid NaN if l_chunk is 0 (i.e. entire chunk was skipped)
     l_chunk_safe = tl.where(l_chunk > 0.0, l_chunk, 1.0)
     acc_chunk = acc_chunk / l_chunk_safe[:, None]
     acc_chunk = tl.where(l_chunk[:, None] > 0.0, acc_chunk, 0.0)
@@ -194,9 +219,19 @@ def _blasst_chunked_prefill_fwd_kernel(
     tl.store(out_ptrs, acc_chunk.to(Out.dtype.element_ty), mask=q_mask)
     tl.store(lse_ptrs, lse_chunk, mask=(offs_m < N_CTX_Q))
 
+    # Write m_global output
+    mgout_ptrs = (
+        MglobalOut
+        + off_z * stride_mgout_z
+        + off_h * stride_mgout_h
+        + offs_m_i64 * stride_mgout_m
+    )
+    tl.store(mgout_ptrs, m_global, mask=(offs_m < N_CTX_Q))
+
 
 def blasst_chunked_prefill(
-    q, k, v, threshold_ln_lambda=-6.9, lse_in=None, mask_buffer=None
+    q, k, v, threshold_ln_lambda=-6.9, lse_in=None, m_global_in=None,
+    mask_buffer=None, is_causal=False, kv_offset=0
 ):
     """
     Computes Chunked Prefill Attention with BLASST dynamic pruning and LSE output.
@@ -206,14 +241,16 @@ def blasst_chunked_prefill(
         k: [batch, num_heads, kv_len, head_dim]
         v: [batch, num_heads, kv_len, head_dim]
         threshold_ln_lambda: log(lambda) threshold for skipping blocks. Default -6.9.
-        lse_in: Optional previous LSE [batch, num_heads, q_len] to guide pruning.
-                It is NOT mixed into the output `out` or `lse`, ensuring the output
-                is strictly local to this KV chunk for correct mathematical merging.
+        lse_in: DEPRECATED, ignored. Use m_global_in instead.
+        m_global_in: Optional previous running max [batch, num_heads, q_len] (fp32).
         mask_buffer: Optional [grid_0, grid_1, num_blocks] tensor (int8).
-                     Acts as BOTH input (0=skip, 1=compute) and output (records final BLASST decision).
+        is_causal: If True, apply element-wise causal masking (Q[i] attends to K[j] where
+                   kv_offset+j <= kv_offset+i). Used for the current prefill chunk.
+        kv_offset: Global position offset for KV tokens (for causal mask calculation).
     Returns:
-        out: [batch, num_heads, q_len, head_dim] (Strictly local to this KV chunk)
-        lse: [batch, num_heads, q_len] (Strictly local to this KV chunk)
+        out: [batch, num_heads, q_len, head_dim]
+        lse: [batch, num_heads, q_len]
+        m_global_out: [batch, num_heads, q_len]
     """
     assert q.is_cuda and k.is_cuda and v.is_cuda
     batch, num_heads, q_len, head_dim = q.shape
@@ -221,14 +258,15 @@ def blasst_chunked_prefill(
 
     out = torch.empty_like(q)
     lse = torch.empty((batch, num_heads, q_len), device=q.device, dtype=torch.float32)
+    m_global_out = torch.empty((batch, num_heads, q_len), device=q.device, dtype=torch.float32)
 
     BLOCK_M, BLOCK_N = 128, 64
     grid = (triton.cdiv(q_len, BLOCK_M), batch * num_heads)
     sm_scale = 1.0 / (head_dim**0.5)
 
-    has_lse_in = lse_in is not None
-    _lse_in = lse_in if has_lse_in else lse
-    lsein_strides = _lse_in.stride()
+    has_mglobal_in = m_global_in is not None
+    _mgin = m_global_in if has_mglobal_in else lse
+    mgin_strides = _mgin.stride()
 
     has_mask = mask_buffer is not None
     _mask_buffer = mask_buffer if has_mask else lse
@@ -242,7 +280,8 @@ def blasst_chunked_prefill(
         threshold_ln_lambda,
         out,
         lse,
-        _lse_in,
+        _mgin,
+        m_global_out,
         _mask_buffer,
         q.stride(0),
         q.stride(1),
@@ -263,9 +302,12 @@ def blasst_chunked_prefill(
         lse.stride(0),
         lse.stride(1),
         lse.stride(2),
-        lsein_strides[0],
-        lsein_strides[1],
-        lsein_strides[2],
+        mgin_strides[0],
+        mgin_strides[1],
+        mgin_strides[2],
+        m_global_out.stride(0),
+        m_global_out.stride(1),
+        m_global_out.stride(2),
         mask_strides[0],
         mask_strides[1],
         mask_strides[2],
@@ -274,8 +316,10 @@ def blasst_chunked_prefill(
         num_kv_heads,
         q_len,
         kv_len,
-        has_lse_in,
+        kv_offset,
+        has_mglobal_in,
         has_mask,
+        is_causal,
         BLOCK_M=BLOCK_M,
         BLOCK_DMODEL=head_dim,
         BLOCK_N=BLOCK_N,
@@ -283,4 +327,4 @@ def blasst_chunked_prefill(
         num_stages=2,
     )
 
-    return out, lse
+    return out, lse, m_global_out

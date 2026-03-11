@@ -135,6 +135,7 @@ class BLASSTPolicy(SparsePolicy):
 
         historical_o = None
         historical_lse = None
+        historical_m_global = None  # Running max for BLASST pruning (separate from LSE)
 
         collect_density = layer_id == 0
         compute_density_sum = 0.0
@@ -194,14 +195,20 @@ class BLASSTPolicy(SparsePolicy):
                     # Historical blocks are fully visible
                     mask_buffer = get_mask_buffer(is_causal=False)
 
-                    out, lse = blasst_chunked_prefill(
+                    out, lse, m_global_out = blasst_chunked_prefill(
                         q=q_input,
                         k=k_input,
                         v=v_input,
                         threshold_ln_lambda=ln_lambda,
-                        lse_in=historical_lse,  # Pass historical LSE to preserve running max
+                        m_global_in=historical_m_global,
                         mask_buffer=mask_buffer,
                     )
+
+                    # Update running max for next kernel call
+                    if historical_m_global is None:
+                        historical_m_global = m_global_out
+                    else:
+                        historical_m_global = torch.maximum(historical_m_global, m_global_out)
 
                     compute_stream.synchronize()
                     if collect_density:
@@ -241,24 +248,27 @@ class BLASSTPolicy(SparsePolicy):
             k_curr_input = k_curr.transpose(1, 2).contiguous()
             v_curr_input = v_curr.transpose(1, 2).contiguous()
 
-            # Causal mask for the diagonal chunk
+            # KV offset = number of historical tokens before this chunk
+            kv_offset = len(selected_blocks) * kvcache_manager.block_size
+
+            # Use kernel-native element-wise causal masking
             curr_mask_buffer = get_mask_buffer(
-                is_causal=True, kv_len_override=num_tokens
+                is_causal=False, kv_len_override=num_tokens
             )
 
-            out_curr, lse_curr = blasst_chunked_prefill(
+            out_curr, lse_curr, _ = blasst_chunked_prefill(
                 q=q_input,
                 k=k_curr_input,
                 v=v_curr_input,
                 threshold_ln_lambda=ln_lambda,
-                lse_in=historical_lse,
+                m_global_in=historical_m_global,
                 mask_buffer=curr_mask_buffer,
+                is_causal=True,
+                kv_offset=kv_offset,
             )
 
             compute_stream.synchronize()
             if collect_density:
-                # To be completely accurate with density, we should probably ignore the causal 0s,
-                # but for overall system IO/compute view, including them is fine.
                 compute_density_sum += curr_mask_buffer.float().mean().item()
                 required_kv_mask = curr_mask_buffer.any(dim=0)
                 required_kv_density_sum += required_kv_mask.float().mean().item()

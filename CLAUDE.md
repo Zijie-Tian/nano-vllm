@@ -58,6 +58,7 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 | [`docs/sparse_policy_offload_control_guide.md`](docs/sparse_policy_offload_control_guide.md) | 🔧 GUIDE: How to control KV cache CPU offloading from custom SparsePolicies |
 | [`docs/compass_tmac_verification_design.md`](docs/compass_tmac_verification_design.md) | 📊 VERIFICATION: Design for COMPASSPolicy TMAC accuracy verification data pipeline |
 | [`docs/tmac_tvm_qgemm_migration_guide.md`](docs/tmac_tvm_qgemm_migration_guide.md) | 🔧 GUIDE: T-MAC QGeMM TVM integration, dependencies stripping, and alignment tests |
+| [`docs/blasst_bugfix_mglobal_causal.md`](docs/blasst_bugfix_mglobal_causal.md) | 🐛 BUGFIX: BLASST m_global/LSE decoupling & element-wise causal masking |
 
 ## Rules Index
 
