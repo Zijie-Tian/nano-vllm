@@ -24,8 +24,20 @@ The system pipeline philosophy is: **GPU Fused Generation/Prediction Proxy -> CP
 *   `enforce_eager`: False (Set True to disable CUDA graphs, useful for debugging).
 
 ## Documentation Index
-- Core architecture: `docs/architecture_guide.md`, `docs/sparse_policy_architecture.md`
-- BLASST/Block Sparse: `docs/sparse_attention_guide.md`, `docs/sparse_attention_blasst.md`, `docs/blasst_performance_analysis.md`, `docs/blasst_mask_visualization_guide.md`
-- XAttention: `docs/xattention_algorithm_guide.md`
-- Debugging/Perf: `docs/debugging_guide.md`, `docs/optimization_guide.md`, `docs/test_ruler_usage_guide.md`, `docs/known_issues.md`
-- TVM/Quantization: `docs/tvm_knowledge_base.md`, `docs/kcache_quantization_guide.md`, `docs/tmac_qgemm_deep_dive.md`
+- `docs/architecture_guide.md`: Core components, CPU offload design, ring buffer.
+- `docs/sparse_policy_architecture.md`: SparsePolicy abstraction and pipeline modes.
+- `docs/sparse_attention_guide.md`: Block sparse attention methods (XAttention, MInference, etc.).
+- `docs/sparse_attention_blasst.md`: BLASST sparse attention: dynamic pruning, online softmax thresholding.
+- `docs/blasst_performance_analysis.md`: Performance report for BLASST: λ vs density, accuracy stability.
+- `docs/blasst_mask_visualization_guide.md`: Step-by-step guide to export and plot BLASST attention masks.
+- `docs/xattention_algorithm_guide.md`: XAttention algorithm details & Triton kernels.
+- `docs/debugging_guide.md`: PyTorch hooks, tensor comparison, memory profiling.
+- `docs/optimization_guide.md`: Performance optimizations (sgDMA, Triton merge).
+- `docs/test_ruler_usage_guide.md`: Comprehensive guide for test_ruler.py.
+- `docs/known_issues.md`: Documented bugs and resolution history.
+- `docs/trtllm_skip_softmax_implementation_details.md`: Deep dive into Skip Softmax (BLASST) in TensorRT-LLM: math, kernels, and ModelOpt.
+- `docs/sparse_policy_offload_control_guide.md`: Guide for controlling KV cache offloading within custom SparsePolicies.
+- `docs/tvm_knowledge_base.md`: TVM troubleshooting and optimization: fallback warnings, x86 stability, etc.
+- `docs/kcache_quantization_guide.md`: 2-bit per-token K-cache quantization for T-MAC.
+- `docs/tmac_qgemm_deep_dive.md`: Technical deep dive into T-MAC QGEMM: algorithm, layout, and Phase 1 optimizations.
+- `docs/tmac_tvm_qgemm_migration_guide.md`: Migration guide for TMAC TVM QGEMM.
