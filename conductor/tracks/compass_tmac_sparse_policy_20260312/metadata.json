@@ -1,0 +1,8 @@
+{
+  "track_id": "compass_tmac_sparse_policy_20260312",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-03-12T00:00:00Z",
+  "updated_at": "2026-03-12T00:00:00Z",
+  "description": "Implement COMPASS Sparse Policy with TMAC Prediction (Sequential)"
+}

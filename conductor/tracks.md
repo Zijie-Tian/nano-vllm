@@ -11,3 +11,8 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 - [x] **Track: COMPASS Metadata Offloading for TMAC Prediction**
   *Link: [./tracks/compass_metadata_offload_20260311/](./tracks/compass_metadata_offload_20260311/)*
+
+---
+
+- [ ] **Track: Implement COMPASS Sparse Policy with TMAC Prediction (Sequential)**
+  *Link: [./tracks/compass_tmac_sparse_policy_20260312/](./tracks/compass_tmac_sparse_policy_20260312/)*
