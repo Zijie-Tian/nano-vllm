@@ -14,6 +14,7 @@ import torch
 from typing import List, TYPE_CHECKING
 
 from .policy import SparsePolicy, PolicyContext
+from ..quant.kcache_quant import quantize_kcache_per_token, pack_kvcache_tmac
 
 if TYPE_CHECKING:
     from nanovllm.kvcache.offload_engine import OffloadEngine
@@ -89,10 +90,8 @@ class COMPASSPolicy(SparsePolicy):
         # or a large enough tensor to hold max seq length.
         # Shape: [num_layers, max_seq_len, num_heads, head_dim]
         # This is pinned memory on CPU.
-        # To avoid circular import issues, we assume 32 layers max for now, 
-        # but we should ideally pass num_layers to this function if needed.
-        # For this verification phase, we'll assume a fixed number of layers or just use 32.
-        num_layers = 32 # Default assumption, we might need to adjust this
+        # For this verification phase, we'll allocate up to 64 layers to be safe for larger models like GLM-4 (40 layers).
+        num_layers = 64
         
         self._q_buffer = torch.zeros(
             (num_layers, max_seq_len, num_heads, head_dim),
@@ -102,9 +101,9 @@ class COMPASSPolicy(SparsePolicy):
         )
         
         # Packed K buffer
-        # Shape: [num_layers, max_seq_len, num_kv_heads, head_dim // 8] (assuming 8x reduction)
+        # Shape: [num_layers, max_seq_len, num_kv_heads, head_dim // 4] (assuming 8x reduction from fp16)
         self._k_packed_buffer = torch.zeros(
-            (num_layers, max_seq_len, num_kv_heads, head_dim // 8),
+            (num_layers, max_seq_len, num_kv_heads, head_dim // 4),
             dtype=torch.uint8,
             device="cpu",
             pin_memory=True
@@ -126,10 +125,26 @@ class COMPASSPolicy(SparsePolicy):
     ) -> List[int]:
         """
         Select blocks - currently returns all blocks (FullAttention behavior).
-
-        TODO: Implement COMPASS block selection logic.
-        For now, this just tests the chunked prefill flow with full attention.
+        Also offloads the current Q chunk to CPU pinned memory for later verification.
         """
+        if q is not None and self._q_buffer is not None:
+            # q shape is [seq_len, num_heads, head_dim]
+            # Convert to [1, num_heads, seq_len, head_dim] for easier concatenation later,
+            # but wait, _q_buffer is [num_layers, max_seq_len, num_heads, head_dim]
+            # So we can just copy it directly using start and end indices
+            
+            # Since q is only the current chunk, we need to know its start index.
+            # We can compute it from total_kv_len which represents the sequence length before this chunk
+            start_idx = ctx.total_kv_len
+            seq_len = q.shape[0]
+            
+            # Copy to pinned CPU buffer on a separate stream if possible, or default stream
+            # Wait for offload stream maybe? For now, simple blocking copy is fine for verification
+            self._q_buffer[ctx.layer_id, start_idx:start_idx + seq_len].copy_(q, non_blocking=True)
+            
+            if ctx.layer_id == 0:
+                self._q_chunk_sizes.append(seq_len)
+
         # For now, return all blocks to test basic chunked prefill flow
         if ctx.layer_id == 0:
             self._stats_num_chunks += 1
@@ -407,6 +422,60 @@ class COMPASSPolicy(SparsePolicy):
         num_tokens: int,
         **kwargs,
     ) -> None:
+        # Get the prefill K buffer data that is about to be offloaded
+        # Shape: [num_tokens, kv_heads, head_dim]
+        k_curr = offload_engine.prefill_k_buffer[layer_id, :num_tokens]
+
+        if self._k_packed_buffer is not None:
+            # We must quantize and pack
+            # quantize_kcache_per_token expects [..., head_dim]
+            k_q, _, _ = quantize_kcache_per_token(k_curr, bits=2, sym=False)
+            
+            # pack_kvcache_tmac expects [batch, n_head, M, K]
+            # Here batch=1, n_head=kv_heads, M=num_tokens, K=head_dim
+            # So we need to reshape k_q from [num_tokens, kv_heads, head_dim] to [1, kv_heads, num_tokens, head_dim]
+            k_q_tmac = k_q.transpose(0, 1).unsqueeze(0)
+            
+            # Note: pack_kvcache_tmac expects M (num_tokens) to be a multiple of 128 for bits=2 and bm=256
+            # If num_tokens is not aligned, we need to pad it
+            pad_m = (128 - (num_tokens % 128)) % 128
+            if pad_m > 0:
+                k_q_tmac = torch.nn.functional.pad(k_q_tmac, (0, 0, 0, pad_m))
+            
+            packed_k = pack_kvcache_tmac(k_q_tmac, is_key=True, bits=2)
+            
+            # packed_k shape is [1, kv_heads, (num_tokens+pad_m)*2//256, head_dim//4, 128]
+            # We want to store it sequentially based on the cpu_block_id or token index
+            # For verification, we can just flatten the packed_k into bytes per token 
+            # and store it in our linear _k_packed_buffer. 
+            # The size per token of packed data is (head_dim * 2 bits) / 8 bits/byte = head_dim / 4 bytes.
+            # So packed_k has total size = (num_tokens_padded) * kv_heads * head_dim / 4 bytes.
+            # Let's reshape to [kv_heads, num_tokens_padded, head_dim // 4]
+            # Then transpose back to [num_tokens_padded, kv_heads, head_dim // 4] to match our buffer layout
+            kv_heads = k_curr.shape[1]
+            head_dim = k_curr.shape[2]
+            
+            packed_k_flat = packed_k.view(kv_heads, -1, head_dim // 4).transpose(0, 1)
+            
+            # We need to know where to write it in _k_packed_buffer
+            # Since cpu_block_id gives us the block index, and block_size is fixed
+            block_size = offload_engine.block_size
+            start_idx = cpu_block_id * block_size
+            
+            # We write the valid tokens part
+            write_len = min(num_tokens, block_size)
+            
+            # Copy to pinned CPU buffer
+            # Since packed_k is padded, we only copy the write_len part, 
+            # though TMAC packing scrambles tokens in groups of 128.
+            # For now, we copy the aligned part.
+            stream = offload_engine.prefill_offload_streams[layer_id]
+            with torch.cuda.stream(stream):
+                # We need to copy to CPU buffer asynchronously
+                self._k_packed_buffer[layer_id, start_idx:start_idx + write_len].copy_(
+                    packed_k_flat[:write_len], non_blocking=True
+                )
+
         super().offload_prefill_chunk(
             offload_engine, layer_id, cpu_block_id, num_tokens, **kwargs
         )
