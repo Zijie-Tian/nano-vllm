@@ -1,8 +1,8 @@
 # Implementation Plan: Implement COMPASS Sparse Policy with TMAC Prediction
 
 ## Phase 1: TMAC Estimator Integration Setup
-- [ ] Task: Instantiate the TMAC `QGeMMLUTBitsCodegen` engine within `COMPASSPolicy` initialization. Ensure it handles the required dimensions (M, N, K) based on the model's head dimension and typical chunk sizes.
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: TMAC Estimator Integration Setup' (Protocol in workflow.md)
+- [x] Task: Instantiate the TMAC `QGeMMLUTBitsCodegen` engine within `COMPASSPolicy` initialization. Ensure it handles the required dimensions (M, N, K) based on the model's head dimension and typical chunk sizes.
+- [x] Task: Conductor - User Manual Verification 'Phase 1: TMAC Estimator Integration Setup' (Protocol in workflow.md)
 
 ## Phase 2: CPU Sparse Estimation Logic
 - [ ] Task: Implement the TMAC estimation loop inside `COMPASSPolicy.select_blocks`. This involves taking the offloaded `_q_buffer` and `_k_packed_buffer` for historical blocks and running the TMAC operator to compute the coarse attention scores.
