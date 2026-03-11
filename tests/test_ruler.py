@@ -490,6 +490,20 @@ def run_ruler_benchmark(
 
     total_time = time.time() - start_time
 
+    # Verification for COMPASS TMAC offload tracking
+    if sparse_policy and sparse_policy.upper() == "COMPASS":
+        if llm is not None and hasattr(llm, "model_runner") and hasattr(llm.model_runner, "kvcache_manager"):
+            policy = llm.model_runner.kvcache_manager.sparse_policy
+            if type(policy).__name__ == "COMPASSPolicy":
+                try:
+                    from tests.verify_tmac_offload_accuracy import verify_metadata_buffers
+                    print(f"\n{'=' * 60}")
+                    print("COMPASS TMAC Accuracy Verification")
+                    print(f"{'=' * 60}")
+                    verify_metadata_buffers(policy._q_buffer, policy._k_packed_buffer, policy._q_chunk_sizes)
+                except ImportError as e:
+                    print(f"Verification failed to import: {e}")
+
     # Cleanup (only if not fresh_llm mode, since fresh mode cleans up itself)
     if llm is not None:
         del llm
