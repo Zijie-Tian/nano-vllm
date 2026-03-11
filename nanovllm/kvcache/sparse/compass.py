@@ -16,6 +16,12 @@ from typing import List, TYPE_CHECKING
 from .policy import SparsePolicy, PolicyContext
 from ..quant.kcache_quant import quantize_kcache_per_token, pack_kvcache_tmac
 
+try:
+    from nanovllm.ops.tvm_qgemm.qgemm import QGeMMLUTBitsCodegen, QGeMMLUTBitsPreprocessorCodegen
+    HAS_TMAC = True
+except ImportError:
+    HAS_TMAC = False
+
 if TYPE_CHECKING:
     from nanovllm.kvcache.offload_engine import OffloadEngine
     from nanovllm.kvcache.manager import KVCacheManager
@@ -39,9 +45,17 @@ class COMPASSPolicy(SparsePolicy):
     supports_prefill = True
     supports_decode = True
 
-    def __init__(self):
-        """Initialize with statistics tracking."""
+    def __init__(self, lambda_threshold: float = 0.1, bits: int = 2, group_size: int = 128, act_group_size: int = 64):
+        """Initialize with statistics tracking and parameters for TMAC prediction."""
         self._stats_num_chunks = 0
+        self.lambda_threshold = lambda_threshold
+        self.bits = bits
+        self.group_size = group_size
+        self.act_group_size = act_group_size
+        
+        # TMAC Codegen
+        self.tmac_codegen = None
+        self.func_qgemm = None
         
         # Metadata buffers for TMAC verification
         self._q_buffer: torch.Tensor | None = None
@@ -123,6 +137,30 @@ class COMPASSPolicy(SparsePolicy):
         logger.info(f"[COMPASS] Allocated Q buffer: {q_mb:.1f} MB, Packed K buffer: {k_mb:.1f} MB (Pinned CPU)")
         
         self._q_chunk_sizes = []
+        
+        # Instantiate TMAC Codegen
+        if HAS_TMAC:
+            logger.info("[COMPASS] Initializing TMAC Codegen...")
+            try:
+                self.tmac_codegen = QGeMMLUTBitsCodegen(
+                    dtype="int8", # input dtype for Q (before packing)
+                    target="llvm -mtriple=x86_64-unknown-linux-gnu -mcpu=core-avx2",
+                    name="qgemm_lut",
+                    tune=False,
+                    verify=False,
+                    num_threads=1,
+                    bits=self.bits,
+                    g=4, # TMAC 2-bit default group
+                    group_size=self.group_size,
+                    act_group_size=self.act_group_size,
+                    out_dtype="float32",
+                    m_groups=-1,
+                )
+                logger.info("[COMPASS] TMAC Codegen initialized successfully.")
+            except Exception as e:
+                logger.warning(f"[COMPASS] Failed to initialize TMAC Codegen: {e}")
+        else:
+            logger.warning("[COMPASS] TMAC not available. CPU prediction will not run.")
 
     def select_blocks(
         self,
