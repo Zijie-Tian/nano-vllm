@@ -56,6 +56,7 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 | [`docs/blasst_mask_visualization_guide.md`](docs/blasst_mask_visualization_guide.md) | 🗺️ BLASST Visualization: Guide to export and plot attention masks |
 | [`docs/trtllm_skip_softmax_implementation_details.md`](docs/trtllm_skip_softmax_implementation_details.md) | 🔍 DEEP DIVE: Implementation details of Skip Softmax (BLASST) in TensorRT-LLM |
 | [`docs/sparse_policy_offload_control_guide.md`](docs/sparse_policy_offload_control_guide.md) | 🔧 GUIDE: How to control KV cache CPU offloading from custom SparsePolicies |
+| [`docs/compass_tmac_verification_design.md`](docs/compass_tmac_verification_design.md) | 📊 VERIFICATION: Design for COMPASSPolicy TMAC accuracy verification data pipeline |
 
 ## Rules Index
 
