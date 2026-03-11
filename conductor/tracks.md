@@ -9,5 +9,5 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [ ] **Track: COMPASS Metadata Offloading for TMAC Prediction**
+- [x] **Track: COMPASS Metadata Offloading for TMAC Prediction**
   *Link: [./tracks/compass_metadata_offload_20260311/](./tracks/compass_metadata_offload_20260311/)*
