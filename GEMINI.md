@@ -90,6 +90,7 @@ The architecture consists of 4 core modules:
 | [`docs/tvm_knowledge_base.md`](docs/tvm_knowledge_base.md) | TVM troubleshooting and optimization: fallback warnings, x86 stability, etc. |
 | [`docs/kcache_quantization_guide.md`](docs/kcache_quantization_guide.md) | 2-bit per-token K-cache quantization for T-MAC. |
 | [`docs/tmac_qgemm_deep_dive.md`](docs/tmac_qgemm_deep_dive.md) | Technical deep dive into T-MAC QGEMM: algorithm, layout, and Phase 1 optimizations. |
+| [`docs/tmac_tvm_qgemm_migration_guide.md`](docs/tmac_tvm_qgemm_migration_guide.md) | Migration guide: T-MAC QGeMM TVM integration, architectural placement, and tests. |
 
 ---
 
@@ -107,4 +108,3 @@ The architecture consists of 4 core modules:
 
 **Author**: Zijie Tian / Gemini CLI
 **Version**: 1.0 (Migrated from Claude Code)
-docs/tmac_tvm_qgemm_migration_guide.md
