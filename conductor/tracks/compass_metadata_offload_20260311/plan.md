@@ -9,5 +9,5 @@
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Metadata Offloading Implementation' (Protocol in workflow.md)
 
 ## Phase 3: TMAC Accuracy Verification
-- [~] Task: Develop a verification script (`tests/verify_tmac_offload_accuracy.py`).
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: TMAC Accuracy Verification' (Protocol in workflow.md)
+- [x] Task: Develop a verification script (`tests/verify_tmac_offload_accuracy.py`).
+- [x] Task: Conductor - User Manual Verification 'Phase 3: TMAC Accuracy Verification' (Protocol in workflow.md)
