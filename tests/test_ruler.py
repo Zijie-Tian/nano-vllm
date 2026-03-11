@@ -493,14 +493,24 @@ def run_ruler_benchmark(
     # Verification for COMPASS TMAC offload tracking
     if sparse_policy and sparse_policy.upper() == "COMPASS":
         if llm is not None and hasattr(llm, "model_runner") and hasattr(llm.model_runner, "kvcache_manager"):
-            policy = llm.model_runner.kvcache_manager.sparse_policy
+            kv_manager = llm.model_runner.kvcache_manager
+            policy = kv_manager.sparse_policy
             if type(policy).__name__ == "COMPASSPolicy":
                 try:
                     from tests.verify_tmac_offload_accuracy import verify_metadata_buffers
                     print(f"\n{'=' * 60}")
                     print("COMPASS TMAC Accuracy Verification")
                     print(f"{'=' * 60}")
-                    verify_metadata_buffers(policy._q_buffer, policy._k_packed_buffer, policy._q_chunk_sizes)
+                    offload_engine = getattr(kv_manager, "offload_engine", None)
+                    k_cache_cpu = getattr(offload_engine, "k_cache_cpu", None) if offload_engine else None
+                    block_size = getattr(offload_engine, "block_size", 4096) if offload_engine else 4096
+                    verify_metadata_buffers(
+                        policy._q_buffer, 
+                        policy._k_packed_buffer, 
+                        policy._q_chunk_sizes,
+                        getattr(policy, "_k_fp16_verify_buffer", None),
+                        block_size
+                    )
                 except ImportError as e:
                     print(f"Verification failed to import: {e}")
 

@@ -46,6 +46,7 @@ class COMPASSPolicy(SparsePolicy):
         # Metadata buffers for TMAC verification
         self._q_buffer: torch.Tensor | None = None
         self._k_packed_buffer: torch.Tensor | None = None
+        self._k_fp16_verify_buffer: torch.Tensor | None = None
         self._max_q_chunks: int = 0
         self._q_chunk_sizes: list[int] = []
 
@@ -105,6 +106,14 @@ class COMPASSPolicy(SparsePolicy):
         self._k_packed_buffer = torch.zeros(
             (num_layers, max_seq_len, num_kv_heads, head_dim // 4),
             dtype=torch.uint8,
+            device="cpu",
+            pin_memory=True
+        )
+        
+        # Unquantized K buffer for verification
+        self._k_fp16_verify_buffer = torch.zeros(
+            (num_layers, max_seq_len, num_kv_heads, head_dim),
+            dtype=dtype,
             device="cpu",
             pin_memory=True
         )
@@ -468,13 +477,19 @@ class COMPASSPolicy(SparsePolicy):
             # Copy to pinned CPU buffer
             # Since packed_k is padded, we only copy the write_len part, 
             # though TMAC packing scrambles tokens in groups of 128.
-            # For now, we copy the aligned part.
+            # We copy the aligned part.
             stream = offload_engine.prefill_offload_streams[layer_id]
             with torch.cuda.stream(stream):
                 # We need to copy to CPU buffer asynchronously
                 self._k_packed_buffer[layer_id, start_idx:start_idx + write_len].copy_(
                     packed_k_flat[:write_len], non_blocking=True
                 )
+
+                # Also copy original FP16 K cache for verification
+                if self._k_fp16_verify_buffer is not None:
+                    self._k_fp16_verify_buffer[layer_id, start_idx:start_idx + write_len].copy_(
+                        k_curr[:write_len], non_blocking=True
+                    )
 
         super().offload_prefill_chunk(
             offload_engine, layer_id, cpu_block_id, num_tokens, **kwargs

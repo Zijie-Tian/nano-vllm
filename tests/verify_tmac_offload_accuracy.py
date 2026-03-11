@@ -13,7 +13,7 @@ from nanovllm.ops.tvm_qgemm.qgemm import QGeMMLUTBitsCodegen
 
 logger = logging.getLogger(__name__)
 
-def verify_metadata_buffers(q_buffer, k_packed_buffer, chunk_sizes):
+def verify_metadata_buffers(q_buffer, k_packed_buffer, chunk_sizes, k_fp16_verify_buffer, block_size):
     """
     Verify the TMAC operator outputs against FP16 baseline for the stored Q chunks.
     Since actual TVM QGEMM requires compiling and is tricky to run in pure Python tests 
@@ -30,7 +30,7 @@ def verify_metadata_buffers(q_buffer, k_packed_buffer, chunk_sizes):
         logger.warning("No Q chunks recorded. Test failed or skipped.")
         return False
         
-    logger.info(f"Recorded {len(chunk_sizes)} chunks.")
+    print(f"Recorded {len(chunk_sizes)} chunks.")
     
     # We will just verify the first layer's first block to ensure the data is viable
     layer_idx = 0
@@ -46,16 +46,20 @@ def verify_metadata_buffers(q_buffer, k_packed_buffer, chunk_sizes):
     # The size per token per head is head_dim // 4 bytes.
     k_packed_chunk = k_packed_buffer[layer_idx, :seq_len] # [seq_len, num_kv_heads, head_dim // 4]
     
-    logger.info(f"Q chunk shape: {q_chunk.shape}, Packed K chunk shape: {k_packed_chunk.shape}")
+    print(f"Q chunk shape: {q_chunk.shape}, Packed K chunk shape: {k_packed_chunk.shape}")
     
-    # To fully test the accuracy without TVM compiling here, we can mock a K tensor, 
-    # quantize it, and see if the Q @ K error is acceptable (which tests the 2-bit TMAC config).
-    # Since we didn't store the original FP16 K-cache in COMPASSPolicy (only packed),
-    # we'll generate a dummy K-cache, quantize it exactly as COMPASSPolicy does,
-    # and verify the NMSE.
+    torch.cuda.synchronize()
+    print(f"Packed K mean abs (first block): {k_packed_chunk.float().abs().mean().item():.6f}")
     
-    # 1. Create a dummy FP16 K-cache for this chunk
-    k_fp16 = torch.randn(seq_len, num_kv_heads, head_dim, dtype=torch.float16, device="cpu")
+    # Get the actual unquantized FP16 K-cache from the verify buffer
+    # The data is stored in k_fp16_verify_buffer: [num_layers, max_seq_len, num_kv_heads, head_dim]
+    write_len = min(seq_len, block_size)
+    k_fp16 = k_fp16_verify_buffer[layer_idx, :write_len].to("cpu")
+    
+    if k_fp16.abs().mean().item() == 0.0:
+        print("K FP16 verify buffer is empty! Check COMPASSPolicy.offload_prefill_chunk copy logic.")
+        
+    q_chunk = q_chunk[:write_len].to("cpu")
     
     # 2. Quantize it (what COMPASSPolicy does)
     from nanovllm.kvcache.quant.kcache_quant import quantize_kcache_per_token
@@ -72,22 +76,24 @@ def verify_metadata_buffers(q_buffer, k_packed_buffer, chunk_sizes):
     k_h0 = k_fp16[:, 0, :].float() # [seq_len, head_dim]
     k_dq_h0 = k_dq[:, 0, :].float() # [seq_len, head_dim]
     
+    print(f"Q mean abs: {q_h0.abs().mean().item():.6f}")
+    print(f"K mean abs: {k_h0.abs().mean().item():.6f}")
+    
     # Q @ K^T
     attn_ref = torch.matmul(q_h0, k_h0.T)
     attn_dq = torch.matmul(q_h0, k_dq_h0.T)
     
     error = nmse(attn_ref.numpy(), attn_dq.numpy())
-    logger.info(f"TMAC Q @ K 2-bit NMSE vs FP16: {error:.4f}")
+    print(f"TMAC Q @ K 2-bit NMSE vs FP16: {error:.4f}")
     
-    # Standard 2-bit quantization on normal data usually has NMSE < 0.1
-    # However, for pure random mock data with outliers, NMSE can hit ~0.25
-    # We set threshold to 0.35 for stable CI passing in this mock verification
-    success = error < 0.35
+    # Check if the offloading flow produces reasonable numerical accuracy
+    # For actual real data, 2-bit quantization NMSE is usually around 0.05 - 0.2
+    success = error < 0.2
     
     if success:
-        logger.info("TMAC Accuracy Verification PASSED.")
+        print("TMAC Accuracy Verification PASSED.")
     else:
-        logger.error(f"TMAC Accuracy Verification FAILED. NMSE: {error:.4f}")
+        print(f"TMAC Accuracy Verification FAILED. NMSE: {error:.4f}")
         
     return success
 
