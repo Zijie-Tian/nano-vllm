@@ -59,6 +59,8 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 | [`docs/compass_tmac_verification_design.md`](docs/compass_tmac_verification_design.md) | 📊 VERIFICATION: Design for COMPASSPolicy TMAC accuracy verification data pipeline |
 | [`docs/tmac_tvm_qgemm_migration_guide.md`](docs/tmac_tvm_qgemm_migration_guide.md) | 🔧 GUIDE: T-MAC QGeMM TVM integration, dependencies stripping, and alignment tests |
 | [`docs/blasst_bugfix_mglobal_causal.md`](docs/blasst_bugfix_mglobal_causal.md) | 🐛 BUGFIX: BLASST m_global/LSE decoupling & element-wise causal masking |
+| [`docs/blasst_perhead_density_analysis.md`](docs/blasst_perhead_density_analysis.md) | 📊 ANALYSIS: Per-head KV density analysis: GQA IO implications for sparse attention offload |
+| [`docs/blasst_density_collection_guide.md`](docs/blasst_density_collection_guide.md) | 📊 GUIDE: BLASST density 数据采集流程: `test_ruler.py` 采集 → `scripts/export_blasst_density_csv.py` 导出 CSV → `scripts/analyze_blasst_density.py` 汇总分析 |
 
 ## Rules Index
 

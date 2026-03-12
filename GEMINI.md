@@ -93,6 +93,7 @@ The architecture consists of 4 core modules:
 | [`docs/tmac_tvm_qgemm_migration_guide.md`](docs/tmac_tvm_qgemm_migration_guide.md) | Migration guide: T-MAC QGeMM TVM integration, architectural placement, and tests. |
 | [`docs/blasst_bugfix_mglobal_causal.md`](docs/blasst_bugfix_mglobal_causal.md) | BLASST bugfix report: m_global/LSE decoupling & element-wise causal masking. |
 | [`docs/blasst_perhead_density_analysis.md`](docs/blasst_perhead_density_analysis.md) | Per-head KV density analysis: GQA IO implications for sparse attention offload. |
+| [`docs/blasst_density_collection_guide.md`](docs/blasst_density_collection_guide.md) | BLASST density 数据采集全流程指南。步骤：`test_ruler.py --sparse-policy BLASST` 采集日志 → `scripts/export_blasst_density_csv.py` 解析并导出 per-layer CSV（rows=chunk, cols=head）→ `scripts/analyze_blasst_density.py` 生成汇总分析。数据存放于 `results/density/`。 |
 
 ---
 

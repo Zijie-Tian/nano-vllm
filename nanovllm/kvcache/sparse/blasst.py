@@ -33,6 +33,12 @@ logger = logging.getLogger(__name__)
 DEBUG_DUMP_BLASST_MASK = False
 DUMP_BASE_DIR = "results/chunked_mask"
 
+# Density collection control:
+#   False (default) = only print density for DENSITY_DEFAULT_LAYER (layer 5)
+#   True = collect and print density for ALL layers (for CSV export / analysis)
+COLLECT_ALL_LAYERS_DENSITY = False
+DENSITY_DEFAULT_LAYER = 5
+
 
 class BLASSTPolicy(SparsePolicy):
     """
@@ -137,10 +143,12 @@ class BLASSTPolicy(SparsePolicy):
         historical_lse = None
         historical_m_global = None  # Running max for BLASST pruning (separate from LSE)
 
-        collect_density = layer_id == 0
+        collect_density = COLLECT_ALL_LAYERS_DENSITY or layer_id == DENSITY_DEFAULT_LAYER
         compute_density_sum = 0.0
         # Per-head KV density tracking: list of tensors, each shape (num_heads,)
         per_head_kv_density_list = []
+        # Per-head compute density tracking: list of tensors, each shape (num_heads,)
+        per_head_compute_density_list = []
         num_density_measurements = 0
         layer_masks = {}
 
@@ -181,6 +189,16 @@ class BLASSTPolicy(SparsePolicy):
             required_kv = mask_buf.any(dim=0).float()  # (num_heads, num_sub)
             # mean over KV sub-blocks -> per-head density
             return required_kv.mean(dim=-1)  # (num_heads,)
+
+        def _collect_per_head_compute_density(mask_buf):
+            """Collect per-head compute density from mask_buffer.
+            
+            mask_buf: (grid_0, num_heads, num_sub)
+            For each head, compute fraction of (q_block, kv_sub_block) pairs actually computed.
+            Returns per-head compute density tensor of shape (num_heads,).
+            """
+            # mean over q-blocks and kv-sub-blocks per head
+            return mask_buf.float().mean(dim=(0, 2))  # (num_heads,)
 
         # 1. Process CPU Offloaded Blocks (Historical)
         cpu_block_table = selected_blocks
@@ -228,6 +246,9 @@ class BLASSTPolicy(SparsePolicy):
                         compute_density_sum += mask_buffer.float().mean().item()
                         per_head_kv_density_list.append(
                             _collect_per_head_density(mask_buffer).cpu()
+                        )
+                        per_head_compute_density_list.append(
+                            _collect_per_head_compute_density(mask_buffer).cpu()
                         )
                         num_density_measurements += 1
                     if DEBUG_DUMP_BLASST_MASK:
@@ -285,6 +306,9 @@ class BLASSTPolicy(SparsePolicy):
                 per_head_kv_density_list.append(
                     _collect_per_head_density(curr_mask_buffer).cpu()
                 )
+                per_head_compute_density_list.append(
+                    _collect_per_head_compute_density(curr_mask_buffer).cpu()
+                )
                 num_density_measurements += 1
             if DEBUG_DUMP_BLASST_MASK:
                 layer_masks["kvchunk_current"] = curr_mask_buffer.cpu()
@@ -305,24 +329,32 @@ class BLASSTPolicy(SparsePolicy):
             os.makedirs(dump_dir, exist_ok=True)
             torch.save(layer_masks, os.path.join(dump_dir, f"layer_{layer_id}.pt"))
 
-        if layer_id == 0 and num_density_measurements > 0:
+        if num_density_measurements > 0:
             avg_comp = compute_density_sum / num_density_measurements
             # Stack per-head densities: (num_measurements, num_heads) -> mean over measurements
-            per_head_avg = torch.stack(per_head_kv_density_list).mean(dim=0)  # (num_heads,)
-            avg_req = per_head_avg.mean().item()
+            per_head_kv_avg = torch.stack(per_head_kv_density_list).mean(dim=0)  # (num_heads,)
+            per_head_comp_avg = torch.stack(per_head_compute_density_list).mean(dim=0)  # (num_heads,)
+            avg_req = per_head_kv_avg.mean().item()
 
-            # Build per-head detail string
-            head_details = ", ".join(
-                f"H{i}={per_head_avg[i].item() * 100:.1f}%"
-                for i in range(len(per_head_avg))
+            # Build per-head detail strings
+            kv_head_details = ", ".join(
+                f"H{i}={per_head_kv_avg[i].item() * 100:.1f}%"
+                for i in range(len(per_head_kv_avg))
+            )
+            comp_head_details = ", ".join(
+                f"H{i}={per_head_comp_avg[i].item() * 100:.1f}%"
+                for i in range(len(per_head_comp_avg))
             )
             logger.info(
-                f"[BLASST] Chunk {current_chunk_idx} Stats: "
+                f"[BLASST] Layer {layer_id} Chunk {current_chunk_idx} Stats: "
                 f"Compute Density={avg_comp * 100:.2f}%, "
                 f"Required KV Density(avg)={avg_req * 100:.2f}%"
             )
             logger.info(
-                f"[BLASST] Chunk {current_chunk_idx} Per-Head KV Density: {head_details}"
+                f"[BLASST] Layer {layer_id} Chunk {current_chunk_idx} Per-Head KV Density: {kv_head_details}"
+            )
+            logger.info(
+                f"[BLASST] Layer {layer_id} Chunk {current_chunk_idx} Per-Head Compute Density: {comp_head_details}"
             )
 
         torch.cuda.default_stream().wait_stream(compute_stream)
