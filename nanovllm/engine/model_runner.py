@@ -272,6 +272,7 @@ class ModelRunner:
                 dtype=hf_config.torch_dtype,
                 device=torch.device("cuda"),
                 enable_cpu_offload=config.enable_cpu_offload,
+                num_layers=hf_config.num_hidden_layers,
             )
 
             # Log policy info (handle both enum and None cases)

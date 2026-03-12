@@ -116,6 +116,7 @@ class SparsePolicy(ABC):
         dtype: torch.dtype,
         device: torch.device,
         enable_cpu_offload: bool = False,
+        num_layers: int = 64,
     ) -> None:
         """
         Pre-allocate GPU buffers for policy computation.
@@ -135,6 +136,7 @@ class SparsePolicy(ABC):
             dtype: Data type (typically float16/bfloat16)
             device: Target device (cuda)
             enable_cpu_offload: Whether CPU offload is enabled
+            num_layers: Number of transformer layers in the model
         """
         pass
 
