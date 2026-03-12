@@ -139,7 +139,8 @@ class BLASSTPolicy(SparsePolicy):
 
         collect_density = layer_id == 0
         compute_density_sum = 0.0
-        required_kv_density_sum = 0.0
+        # Per-head KV density tracking: list of tensors, each shape (num_heads,)
+        per_head_kv_density_list = []
         num_density_measurements = 0
         layer_masks = {}
 
@@ -168,6 +169,18 @@ class BLASSTPolicy(SparsePolicy):
                         if kv_start_pos >= q_end_pos:
                             mask[q_idx, :, kv_idx] = 0
             return mask
+
+        def _collect_per_head_density(mask_buf):
+            """Collect per-head KV density from mask_buffer.
+            
+            mask_buf: (grid_0, num_heads, num_sub)
+            For each head, compute fraction of KV sub-blocks required by ANY q-block.
+            Returns per-head density tensor of shape (num_heads,).
+            """
+            # any over Q-blocks dim -> (num_heads, num_sub): 1 if any Q needs this KV sub-block
+            required_kv = mask_buf.any(dim=0).float()  # (num_heads, num_sub)
+            # mean over KV sub-blocks -> per-head density
+            return required_kv.mean(dim=-1)  # (num_heads,)
 
         # 1. Process CPU Offloaded Blocks (Historical)
         cpu_block_table = selected_blocks
@@ -213,9 +226,8 @@ class BLASSTPolicy(SparsePolicy):
                     compute_stream.synchronize()
                     if collect_density:
                         compute_density_sum += mask_buffer.float().mean().item()
-                        required_kv_mask = mask_buffer.any(dim=0)
-                        required_kv_density_sum += (
-                            required_kv_mask.float().mean().item()
+                        per_head_kv_density_list.append(
+                            _collect_per_head_density(mask_buffer).cpu()
                         )
                         num_density_measurements += 1
                     if DEBUG_DUMP_BLASST_MASK:
@@ -270,8 +282,9 @@ class BLASSTPolicy(SparsePolicy):
             compute_stream.synchronize()
             if collect_density:
                 compute_density_sum += curr_mask_buffer.float().mean().item()
-                required_kv_mask = curr_mask_buffer.any(dim=0)
-                required_kv_density_sum += required_kv_mask.float().mean().item()
+                per_head_kv_density_list.append(
+                    _collect_per_head_density(curr_mask_buffer).cpu()
+                )
                 num_density_measurements += 1
             if DEBUG_DUMP_BLASST_MASK:
                 layer_masks["kvchunk_current"] = curr_mask_buffer.cpu()
@@ -294,11 +307,22 @@ class BLASSTPolicy(SparsePolicy):
 
         if layer_id == 0 and num_density_measurements > 0:
             avg_comp = compute_density_sum / num_density_measurements
-            avg_req = required_kv_density_sum / num_density_measurements
+            # Stack per-head densities: (num_measurements, num_heads) -> mean over measurements
+            per_head_avg = torch.stack(per_head_kv_density_list).mean(dim=0)  # (num_heads,)
+            avg_req = per_head_avg.mean().item()
+
+            # Build per-head detail string
+            head_details = ", ".join(
+                f"H{i}={per_head_avg[i].item() * 100:.1f}%"
+                for i in range(len(per_head_avg))
+            )
             logger.info(
                 f"[BLASST] Chunk {current_chunk_idx} Stats: "
                 f"Compute Density={avg_comp * 100:.2f}%, "
-                f"Required KV Density={avg_req * 100:.2f}%"
+                f"Required KV Density(avg)={avg_req * 100:.2f}%"
+            )
+            logger.info(
+                f"[BLASST] Chunk {current_chunk_idx} Per-Head KV Density: {head_details}"
             )
 
         torch.cuda.default_stream().wait_stream(compute_stream)
