@@ -490,6 +490,10 @@ def run_ruler_benchmark(
 
     total_time = time.time() - start_time
 
+    # Print ChunkedPrefillTimer summary (for COMPASS/BLASST timing analysis)
+    from nanovllm.layers.attention import ChunkedPrefillTimer
+    ChunkedPrefillTimer().print_final_summary()
+
     # Verification for COMPASS TMAC offload tracking
     if sparse_policy and sparse_policy.upper() == "COMPASS":
         if llm is not None and hasattr(llm, "model_runner") and hasattr(llm.model_runner, "kvcache_manager"):

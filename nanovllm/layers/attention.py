@@ -1,4 +1,5 @@
 import logging
+import time
 import torch
 import torch.cuda.nvtx
 from torch import nn
@@ -11,6 +12,87 @@ from nanovllm.utils.context import get_context
 from nanovllm.kvcache.sparse.policy import PolicyContext
 
 logger = logging.getLogger(__name__)
+
+
+class ChunkedPrefillTimer:
+    """Singleton timer for measuring COMPASS / BLASST chunked prefill phases."""
+
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._reset()
+        return cls._instance
+
+    def _reset(self):
+        self.select_blocks_total = 0.0
+        self.compute_prefill_total = 0.0
+        self.offload_total = 0.0
+        self.layer_count = 0
+        self.current_chunk = -1
+        # Per-chunk accumulators (printed at chunk boundaries)
+        self._chunk_select = 0.0
+        self._chunk_compute = 0.0
+        self._chunk_offload = 0.0
+        self._chunk_layers = 0
+
+    def record(self, chunk_idx, layer_id, t_select, t_compute, t_offload):
+        """Record timing for one layer in one chunk."""
+        # Detect chunk boundary: when chunk_idx changes, print previous chunk summary
+        if chunk_idx != self.current_chunk and self.current_chunk >= 0:
+            self._print_chunk_summary()
+            self._chunk_select = 0.0
+            self._chunk_compute = 0.0
+            self._chunk_offload = 0.0
+            self._chunk_layers = 0
+        self.current_chunk = chunk_idx
+
+        self._chunk_select += t_select
+        self._chunk_compute += t_compute
+        self._chunk_offload += t_offload
+        self._chunk_layers += 1
+
+        self.select_blocks_total += t_select
+        self.compute_prefill_total += t_compute
+        self.offload_total += t_offload
+        self.layer_count += 1
+
+    def _print_chunk_summary(self):
+        total = self._chunk_select + self._chunk_compute + self._chunk_offload
+        if total <= 0:
+            return
+        print(
+            f"[Timer] Chunk {self.current_chunk} ({self._chunk_layers} layers): "
+            f"select={self._chunk_select:.3f}s ({self._chunk_select/total*100:.1f}%), "
+            f"compute={self._chunk_compute:.3f}s ({self._chunk_compute/total*100:.1f}%), "
+            f"offload={self._chunk_offload:.3f}s ({self._chunk_offload/total*100:.1f}%), "
+            f"total={total:.3f}s"
+        )
+
+    def print_final_summary(self):
+        """Print overall summary. Call after inference completes."""
+        # Print last chunk if pending
+        if self._chunk_layers > 0:
+            self._print_chunk_summary()
+        total = self.select_blocks_total + self.compute_prefill_total + self.offload_total
+        if total <= 0:
+            return
+        print(
+            f"\n{'='*60}\n"
+            f"[Timer] OVERALL PREFILL SUMMARY ({self.layer_count} layer-calls)\n"
+            f"{'='*60}\n"
+            f"  select_blocks:          {self.select_blocks_total:8.3f}s  ({self.select_blocks_total/total*100:5.1f}%)\n"
+            f"  compute_chunked_prefill:{self.compute_prefill_total:8.3f}s  ({self.compute_prefill_total/total*100:5.1f}%)\n"
+            f"  offload_prefill_chunk:  {self.offload_total:8.3f}s  ({self.offload_total/total*100:5.1f}%)\n"
+            f"  TOTAL:                  {total:8.3f}s\n"
+            f"{'='*60}"
+        )
+
+    @classmethod
+    def reset(cls):
+        if cls._instance is not None:
+            cls._instance._reset()
 
 
 def store_kvcache(
@@ -252,8 +334,10 @@ class Attention(nn.Module):
         # Step 1: Get historical CPU blocks
         cpu_block_table = kvcache_manager.get_prefilled_cpu_blocks(seq)
 
-        # Step 2: Apply select_blocks to filter blocks (before calling compute_chunked_prefill)
-        # Always call select_blocks even for first chunk (cpu_block_table may be empty)
+        # ---- Phase 1: select_blocks ----
+        torch.cuda.synchronize()
+        t0 = time.time()
+
         num_chunks = current_chunk_idx + 1
         policy_ctx = PolicyContext(
             query_chunk_idx=current_chunk_idx,
@@ -269,17 +353,11 @@ class Attention(nn.Module):
         selected_blocks = sparse_policy.select_blocks(
             cpu_block_table, offload_engine, policy_ctx, q, k
         )
-        logger.debug(
-            f"[DEBUG] select_blocks: {len(cpu_block_table)} -> {len(selected_blocks)} blocks"
-        )
 
-        # [DEBUG] Verify execution path
-        logger.debug(
-            f"[DEBUG] Calling sparse_policy.compute_chunked_prefill, "
-            f"policy={sparse_policy}, layer={self.layer_id}, chunk={current_chunk_idx}"
-        )
+        torch.cuda.synchronize()
+        t1 = time.time()
 
-        # Delegate computation to policy with pre-selected blocks
+        # ---- Phase 2: compute_chunked_prefill ----
         final_o = sparse_policy.compute_chunked_prefill(
             q,
             k,
@@ -294,18 +372,26 @@ class Attention(nn.Module):
             selected_blocks,
         )
 
+        torch.cuda.synchronize()
+        t2 = time.time()
+
         torch.cuda.nvtx.range_pop()  # ChunkedPrefill
 
-        # Per-layer ASYNC offload: offload prefill buffer to CPU
-        # No waiting required! Each layer has its own buffer and stream.
+        # ---- Phase 3: offload_prefill_chunk ----
+        t_offload = 0.0
         if offload_engine is not None and seq is not None:
             cpu_block_ids, _ = kvcache_manager.get_all_cpu_blocks(seq)
             if current_chunk_idx < len(cpu_block_ids):
                 cpu_block_id = cpu_block_ids[current_chunk_idx]
-                # Async offload - no waiting, fully parallel across layers
+                t_off_start = time.time()
                 sparse_policy.offload_prefill_chunk(
                     offload_engine, self.layer_id, cpu_block_id, num_tokens
                 )
+                t_offload = time.time() - t_off_start
+
+        # Record timing
+        timer = ChunkedPrefillTimer()
+        timer.record(current_chunk_idx, self.layer_id, t1 - t0, t2 - t1, t_offload)
 
         return final_o
 

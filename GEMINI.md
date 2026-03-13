@@ -94,6 +94,7 @@ The architecture consists of 4 core modules:
 | [`docs/blasst_bugfix_mglobal_causal.md`](docs/blasst_bugfix_mglobal_causal.md) | BLASST bugfix report: m_global/LSE decoupling & element-wise causal masking. |
 | [`docs/blasst_perhead_density_analysis.md`](docs/blasst_perhead_density_analysis.md) | Per-head KV density analysis: GQA IO implications for sparse attention offload. |
 | [`docs/blasst_density_collection_guide.md`](docs/blasst_density_collection_guide.md) | BLASST density 数据采集全流程指南。步骤：`test_ruler.py --sparse-policy BLASST` 采集日志 → `scripts/export_blasst_density_csv.py` 解析并导出 per-layer CSV（rows=chunk, cols=head）→ `scripts/analyze_blasst_density.py` 生成汇总分析。数据存放于 `results/density/`。 |
+| [`docs/compass_tmac_l1_batching.md`](docs/compass_tmac_l1_batching.md) | COMPASS TMAC L1 批量化优化全记录：32 线程 M 维度并行、pre-compute per-head 优化、端到端 benchmark（4.7s/层）、Python 封装开销分析（`_preprocess_q_per_head` 占 81%）以及下一步优化路径。 |
 
 ---
 

@@ -73,6 +73,9 @@ class COMPASSPolicy(SparsePolicy):
         self._tmac_codegen = None
         self._tmac_preproc_codegen = None
 
+        # L1 Batched TMAC operators: {num_blocks -> compiled func}
+        self._func_qgemm_batched: dict = {}
+
         # Model dimensions (set during alloc_policy_metadata)
         self._num_heads: int = 0
         self._num_kv_heads: int = 0
@@ -151,55 +154,67 @@ class COMPASSPolicy(SparsePolicy):
             logger.warning("[COMPASS] TMAC not available. CPU prediction will not run.")
 
     def _compile_tmac_operators(self, num_heads: int, num_kv_heads: int, head_dim: int) -> None:
-        """Compile TMAC preprocessor and qGEMM operators for CPU sparse estimation."""
+        """Compile TMAC preprocessor and qGEMM operators for CPU sparse estimation.
+
+        L1 batching: compiles qGEMM for multiple M values with N=1,
+        so all sub-blocks for one head are estimated in a single call.
+        """
         target = "llvm -mtriple=x86_64-unknown-linux-gnu -mcpu=core-avx2"
         K = head_dim
-        # N=1: we process one KV head at a time (each has independent K data)
         N = 1
-        # M = fine_grain tokens * bits (TMAC bit-expansion)
-        M = self.FINE_GRAIN * self.bits  # 128 * 2 = 256
+        M_single = self.FINE_GRAIN * self.bits  # 256
+        subs_per_block = 4096 // self.FINE_GRAIN  # 32
 
-        logger.info(f"[COMPASS] Compiling TMAC operators: M={M}, N={N}, K={K}...")
+        logger.info(f"[COMPASS] Compiling TMAC operators (L1 batched)...")
 
         try:
-            # 1. Compile preprocessor: converts one Q head → QLUT
+            # 1. Compile preprocessor: N=1
             self._tmac_preproc_codegen = QGeMMLUTBitsPreprocessorCodegen(
-                dtype="int8",
-                target=target,
+                dtype="int8", target=target,
                 name="build/compass_preproc",
-                tune=False,
-                verify=False,
-                num_threads=1,
-                g=4,
-                act_group_size=self.act_group_size,
-                out_dtype="float32",
-                bits=self.bits,
+                tune=False, verify=False, num_threads=1,
+                g=4, act_group_size=self.act_group_size,
+                out_dtype="float32", bits=self.bits,
             )
-            func_preproc, arrays_preproc = self._tmac_preproc_codegen.compile(N, K)
-            logger.info("[COMPASS] TMAC Preprocessor compiled successfully.")
+            func_preproc, _ = self._tmac_preproc_codegen.compile(N, K)
+            self._func_preprocessor = func_preproc
+            logger.info("[COMPASS] TMAC Preprocessor (N=1) compiled.")
 
-            # 2. Compile qGEMM: packed_K_head × QLUT_head → attention scores
+            # 2. Compile single qGEMM (legacy): M=256, N=1
             self._tmac_codegen = QGeMMLUTBitsCodegen(
-                dtype="int8",
-                target=target,
+                dtype="int8", target=target,
                 name="build/compass_qgemm",
-                tune=False,
-                verify=False,
-                num_threads=1,
-                bits=self.bits,
-                g=4,
+                tune=False, verify=False, num_threads=32,
+                bits=self.bits, g=4,
                 group_size=self.group_size,
                 act_group_size=self.act_group_size,
-                out_dtype="float32",
-                m_groups=-1,
+                out_dtype="float32", m_groups=-1,
                 zero_point=True,
             )
-            func_qgemm, arrays_qgemm = self._tmac_codegen.compile(M, N, K)
-            logger.info("[COMPASS] TMAC QGEMM compiled successfully.")
-
-            # Store compiled functions
-            self._func_preprocessor = func_preproc
+            func_qgemm, _ = self._tmac_codegen.compile(M_single, N, K)
             self._func_qgemm = func_qgemm
+            logger.info(f"[COMPASS] TMAC QGEMM (M={M_single}, N=1, threads=32) compiled.")
+
+            # 3. Compile batched qGEMM for 1-10 blocks: M=subs*256, N=1
+            #    Each head has different K data, so N must stay 1.
+            #    We batch across the M dimension (sub-blocks) only.
+            self._func_qgemm_batched = {}
+            for nb in range(1, 11):
+                M_big = nb * subs_per_block * M_single
+                codegen_big = QGeMMLUTBitsCodegen(
+                    dtype="int8", target=target,
+                    name=f"build/compass_qgemm_L1_b{nb}",
+                    tune=False, verify=False, num_threads=32,
+                    bits=self.bits, g=4,
+                    group_size=self.group_size,
+                    act_group_size=self.act_group_size,
+                    out_dtype="float32", m_groups=-1,
+                    zero_point=True,
+                )
+                func_big, _ = codegen_big.compile(M_big, N, K)
+                self._func_qgemm_batched[nb] = func_big
+                logger.info(f"[COMPASS] TMAC QGEMM L1 (M={M_big}, N=1, threads=32) for {nb} blocks compiled.")
+
             self._tvm_device = tvm.cpu(0)
 
         except Exception as e:
@@ -208,22 +223,14 @@ class COMPASSPolicy(SparsePolicy):
             traceback.print_exc()
             self._func_preprocessor = None
             self._func_qgemm = None
+            self._func_qgemm_batched = {}
 
     # ========================================================================
     # TMAC CPU Estimation Helpers
     # ========================================================================
 
     def _preprocess_q_per_head(self, q_chunk: torch.Tensor, kv_head_idx: int) -> tuple:
-        """
-        Run compiled TMAC preprocessor for one KV head's Q representative.
-
-        Args:
-            q_chunk: [seq_len, num_heads, head_dim] on CPU
-            kv_head_idx: which KV head to process
-
-        Returns:
-            (lut_scales, lut_biases, qlut) as tvm.nd.NDArray, each with N=1
-        """
+        """Run compiled TMAC preprocessor for one KV head's Q representative."""
         head_dim = q_chunk.shape[2]
         num_heads = q_chunk.shape[1]
         heads_per_group = num_heads // self._num_kv_heads
@@ -231,96 +238,252 @@ class COMPASSPolicy(SparsePolicy):
         N = 1
         g = 4
 
-        # Average Q across seq_len, then across Q heads mapping to this KV head
         q_avg = q_chunk.float().mean(dim=0)  # [num_heads, head_dim]
         start_h = kv_head_idx * heads_per_group
         end_h = start_h + heads_per_group
         q_head = q_avg[start_h:end_h].mean(dim=0, keepdim=True)  # [1, head_dim]
 
         q_np = q_head.numpy().astype("float32")
-
-        # Allocate TVM arrays matching preprocessor tensors: [B, LUT_Scales, LUT_Biases, QLUT]
         dev = self._tvm_device
         B_tvm = tvm.nd.array(q_np, dev)
-        LUT_Scales_tvm = tvm.nd.array(
-            np.zeros((N, K // self.act_group_size), dtype="float32"), dev
-        )
-        LUT_Biases_tvm = tvm.nd.array(
-            np.zeros((N, K // self.act_group_size), dtype="float32"), dev
-        )
-        QLUT_tvm = tvm.nd.array(
-            np.zeros((N, K // g, 1 << g), dtype="int8"), dev
-        )
-
-        # Call compiled preprocessor
+        LUT_Scales_tvm = tvm.nd.array(np.zeros((N, K // self.act_group_size), dtype="float32"), dev)
+        LUT_Biases_tvm = tvm.nd.array(np.zeros((N, K // self.act_group_size), dtype="float32"), dev)
+        QLUT_tvm = tvm.nd.array(np.zeros((N, K // g, 1 << g), dtype="int8"), dev)
         self._func_preprocessor(B_tvm, LUT_Scales_tvm, LUT_Biases_tvm, QLUT_tvm)
-
         return LUT_Scales_tvm, LUT_Biases_tvm, QLUT_tvm
 
     def _estimate_subblock_score_from_packed(
-        self,
-        layer_id: int,
-        sub_start: int,
-        sub_end: int,
-        kv_head_idx: int,
-        qlut_tvm: "tvm.nd.NDArray",
-        lut_scales_tvm: "tvm.nd.NDArray",
-        lut_biases_tvm: "tvm.nd.NDArray",
+        self, layer_id, sub_start, sub_end, kv_head_idx,
+        qlut_tvm, lut_scales_tvm, lut_biases_tvm,
     ) -> float:
-        """
-        Estimate attention score for a 128-token K sub-block using pre-packed metadata.
-
-        Reads directly from _k_packed_buffer and _k_scales_buffer/_k_zeros_buffer,
-        skipping quantization and K packing. Only pack_scales_tmac is needed.
-
-        Args:
-            layer_id: which layer
-            sub_start, sub_end: token range in the K buffer
-            kv_head_idx: which KV head
-            qlut_tvm, lut_scales_tvm, lut_biases_tvm: from Q preprocessor
-
-        Returns:
-            Max absolute score for this head and sub-block
-        """
-        fine_grain = sub_end - sub_start  # 128
-
-        # 1. Read pre-packed K for this head: [128, head_dim//4] uint8
-        packed_sub = self._k_packed_buffer[layer_id, sub_start:sub_end, kv_head_idx]
-        # Reshape to TVM format: [M_exp//bm, K//g, bm//nge]
-        # For fine_grain=128, bits=2, bm=256, g=4, nge=2:
-        # [1, head_dim//g, bm//nge] = [1, 32, 128]
+        """Legacy single sub-block estimation (fallback)."""
+        fine_grain = sub_end - sub_start
         nge = 8 // self.g
         M_exp = fine_grain * self.bits
+        packed_sub = self._k_packed_buffer[layer_id, sub_start:sub_end, kv_head_idx]
         A_np = packed_sub.numpy().reshape(M_exp // self.bm, self._head_dim // self.g, self.bm // nge)
 
-        # 2. Read raw scales + zeros for this head, pack for TMAC
         k_s = self._k_scales_buffer[layer_id, sub_start:sub_end, kv_head_idx:kv_head_idx+1]
         k_z = self._k_zeros_buffer[layer_id, sub_start:sub_end, kv_head_idx:kv_head_idx+1]
-        # Convert bf16→fp16 if needed for numpy compatibility
         if k_s.dtype == torch.bfloat16:
             k_s = k_s.to(torch.float16)
             k_z = k_z.to(torch.float16)
-        # pack_scales_tmac expects [batch=1, n_head=1, M=fine_grain, K//group_size=1]
-        k_s_tmac = k_s.transpose(0, 1).unsqueeze(0)  # [1, 1, 128, 1]
+        k_s_tmac = k_s.transpose(0, 1).unsqueeze(0)
         k_z_tmac = k_z.transpose(0, 1).unsqueeze(0)
         packed_scales = pack_scales_tmac(k_s_tmac, zeros=k_z_tmac, bits=self.bits)
         Scales_np = packed_scales[0, 0].numpy()
 
-        # 3. Run TVM qGEMM
         N = 1
         dev = self._tvm_device
         try:
             A_tvm = tvm.nd.array(A_np.astype("uint8"), dev)
             Scales_tvm = tvm.nd.array(Scales_np.astype("float32"), dev)
-            C_tvm = tvm.nd.array(
-                np.zeros((N, fine_grain), dtype="float32"), dev
-            )
+            C_tvm = tvm.nd.array(np.zeros((N, fine_grain), dtype="float32"), dev)
             self._func_qgemm(A_tvm, qlut_tvm, Scales_tvm, lut_scales_tvm, lut_biases_tvm, C_tvm)
-            scores = C_tvm.numpy()  # [1, fine_grain]
+            scores = C_tvm.numpy()
             return float(np.max(np.abs(scores)))
         except Exception as e:
             logger.warning(f"[COMPASS] TMAC packed estimation error (L{layer_id} h={kv_head_idx}): {e}")
-            return float('inf')  # On error, select to be safe
+            return float('inf')
+
+    def _estimate_head_batched(
+        self,
+        layer_id: int,
+        kv_head_idx: int,
+        k_subblocks: list,
+        num_blocks: int,
+        qlut_tvm: "tvm.nd.NDArray",
+        lut_scales_tvm: "tvm.nd.NDArray",
+        lut_biases_tvm: "tvm.nd.NDArray",
+        head_data: dict = None,
+    ) -> list:
+        """
+        Estimate all sub-block scores for ONE KV head using a single batched qGEMM call.
+
+        L1 batching: all sub-blocks concatenated into large M, N=1.
+        Uses pre-computed A_tvm and Scales_tvm from _prepare_head_data.
+
+        Returns:
+            List of max-abs scores, one per sub-block.
+        """
+        num_subs = len(k_subblocks)
+        fine_grain = self.FINE_GRAIN
+
+        # Use pre-computed head data if available
+        if head_data is not None:
+            func_batched = head_data['func']
+            A_tvm = head_data['A_tvm']
+            Scales_tvm = head_data['Scales_tvm']
+            C_tvm = head_data['C_tvm']
+            M_compiled = head_data['M_compiled']
+
+            try:
+                func_batched(A_tvm, qlut_tvm, Scales_tvm, lut_scales_tvm, lut_biases_tvm, C_tvm)
+
+                # Extract per-sub-block scores from the output
+                C_np = C_tvm.numpy()[0]  # [M_compiled // bits]
+                scores = []
+                for i in range(num_subs):
+                    start_idx = i * fine_grain
+                    end_idx = start_idx + fine_grain
+                    scores.append(float(np.max(np.abs(C_np[start_idx:end_idx]))))
+                return scores
+            except Exception as e:
+                logger.warning(f"[COMPASS] Batched estimation error (L{layer_id} h={kv_head_idx}): {e}")
+                return [float('inf')] * num_subs
+
+        # Fallback: compute everything inline (legacy path)
+        nge = 8 // self.g
+        dev = self._tvm_device
+
+        func_key = num_blocks
+        if func_key not in self._func_qgemm_batched:
+            valid_keys = [k for k in self._func_qgemm_batched.keys() if k >= num_blocks]
+            if valid_keys:
+                func_key = min(valid_keys)
+            else:
+                func_key = max(self._func_qgemm_batched.keys())
+        func_batched = self._func_qgemm_batched[func_key]
+
+        subs_per_block = 4096 // fine_grain
+        M_compiled = func_key * subs_per_block * self.bm
+
+        first_start = k_subblocks[0][1]
+        last_end = k_subblocks[-1][2]
+        total_tokens = last_end - first_start
+        M_actual = total_tokens * self.bits
+
+        try:
+            packed_all = self._k_packed_buffer[layer_id, first_start:last_end, kv_head_idx]
+            A_np = packed_all.numpy().reshape(
+                M_actual // self.bm, self._head_dim // self.g, self.bm // nge
+            )
+
+            k_s = self._k_scales_buffer[layer_id, first_start:last_end, kv_head_idx:kv_head_idx+1]
+            k_z = self._k_zeros_buffer[layer_id, first_start:last_end, kv_head_idx:kv_head_idx+1]
+            if k_s.dtype == torch.bfloat16:
+                k_s = k_s.to(torch.float16)
+                k_z = k_z.to(torch.float16)
+            k_s_tmac = k_s.transpose(0, 1).unsqueeze(0)
+            k_z_tmac = k_z.transpose(0, 1).unsqueeze(0)
+            packed_scales = pack_scales_tmac(k_s_tmac, zeros=k_z_tmac, bits=self.bits)
+            Scales_np = packed_scales[0, 0].numpy()
+
+            if M_actual < M_compiled:
+                A_padded = np.zeros(
+                    (M_compiled // self.bm, self._head_dim // self.g, self.bm // nge),
+                    dtype="uint8"
+                )
+                A_padded[:M_actual // self.bm] = A_np
+                Scales_padded = np.zeros(
+                    (M_compiled // self.bm, self._head_dim // self.group_size,
+                     self.bm // self.bits * 2),
+                    dtype="float32"
+                )
+                Scales_padded[:M_actual // self.bm] = Scales_np
+            else:
+                A_padded = A_np.astype("uint8")
+                Scales_padded = Scales_np.astype("float32")
+
+            A_tvm = tvm.nd.array(A_padded, dev)
+            Scales_tvm = tvm.nd.array(Scales_padded, dev)
+            C_tvm = tvm.nd.array(np.zeros((1, M_compiled // self.bits), dtype="float32"), dev)
+
+            func_batched(A_tvm, qlut_tvm, Scales_tvm, lut_scales_tvm, lut_biases_tvm, C_tvm)
+
+            C_np = C_tvm.numpy()[0]
+            scores = []
+            for i in range(num_subs):
+                start_idx = i * fine_grain
+                end_idx = start_idx + fine_grain
+                scores.append(float(np.max(np.abs(C_np[start_idx:end_idx]))))
+            return scores
+
+        except Exception as e:
+            logger.warning(f"[COMPASS] Batched estimation error (L{layer_id} h={kv_head_idx}): {e}")
+            return [float('inf')] * num_subs
+
+    def _prepare_head_data(
+        self,
+        layer_id: int,
+        kv_head_idx: int,
+        k_subblocks: list,
+        num_blocks: int,
+    ) -> dict:
+        """
+        Pre-compute A_tvm, Scales_tvm, C_tvm for one KV head.
+        Called once per head before the Q-group loop to avoid redundant work.
+
+        Returns:
+            dict with keys: func, A_tvm, Scales_tvm, C_tvm, M_compiled
+        """
+        fine_grain = self.FINE_GRAIN
+        nge = 8 // self.g
+        dev = self._tvm_device
+
+        # Select compiled function
+        func_key = num_blocks
+        if func_key not in self._func_qgemm_batched:
+            valid_keys = [k for k in self._func_qgemm_batched.keys() if k >= num_blocks]
+            if valid_keys:
+                func_key = min(valid_keys)
+            else:
+                func_key = max(self._func_qgemm_batched.keys())
+        func_batched = self._func_qgemm_batched[func_key]
+
+        subs_per_block = 4096 // fine_grain
+        M_compiled = func_key * subs_per_block * self.bm
+
+        first_start = k_subblocks[0][1]
+        last_end = k_subblocks[-1][2]
+        total_tokens = last_end - first_start
+        M_actual = total_tokens * self.bits
+
+        # Read packed K for this head (contiguous)
+        packed_all = self._k_packed_buffer[layer_id, first_start:last_end, kv_head_idx]
+        A_np = packed_all.numpy().reshape(
+            M_actual // self.bm, self._head_dim // self.g, self.bm // nge
+        )
+
+        # Batch scales/zeros for this head
+        k_s = self._k_scales_buffer[layer_id, first_start:last_end, kv_head_idx:kv_head_idx+1]
+        k_z = self._k_zeros_buffer[layer_id, first_start:last_end, kv_head_idx:kv_head_idx+1]
+        if k_s.dtype == torch.bfloat16:
+            k_s = k_s.to(torch.float16)
+            k_z = k_z.to(torch.float16)
+        k_s_tmac = k_s.transpose(0, 1).unsqueeze(0)
+        k_z_tmac = k_z.transpose(0, 1).unsqueeze(0)
+        packed_scales = pack_scales_tmac(k_s_tmac, zeros=k_z_tmac, bits=self.bits)
+        Scales_np = packed_scales[0, 0].numpy()
+
+        # Pad to compiled M if needed
+        if M_actual < M_compiled:
+            A_padded = np.zeros(
+                (M_compiled // self.bm, self._head_dim // self.g, self.bm // nge),
+                dtype="uint8"
+            )
+            A_padded[:M_actual // self.bm] = A_np
+            Scales_padded = np.zeros(
+                (M_compiled // self.bm, self._head_dim // self.group_size,
+                 self.bm // self.bits * 2),
+                dtype="float32"
+            )
+            Scales_padded[:M_actual // self.bm] = Scales_np
+        else:
+            A_padded = A_np.astype("uint8")
+            Scales_padded = Scales_np.astype("float32")
+
+        A_tvm = tvm.nd.array(A_padded, dev)
+        Scales_tvm = tvm.nd.array(Scales_padded, dev)
+        C_tvm = tvm.nd.array(np.zeros((1, M_compiled // self.bits), dtype="float32"), dev)
+
+        return {
+            'func': func_batched,
+            'A_tvm': A_tvm,
+            'Scales_tvm': Scales_tvm,
+            'C_tvm': C_tvm,
+            'M_compiled': M_compiled,
+        }
 
     # ========================================================================
     # Block selection
@@ -386,6 +549,25 @@ class COMPASSPolicy(SparsePolicy):
 
         selected_subblock_indices = set()
         q_cpu = q.cpu()
+        num_blocks = len(available_blocks)
+
+        # Try L1 batched path: batch all sub-blocks per head per Q-group
+        use_batched = bool(self._func_qgemm_batched) and (
+            num_blocks in self._func_qgemm_batched or
+            num_blocks <= max(self._func_qgemm_batched.keys(), default=0)
+        )
+        # Pre-compute per-head TVM data ONCE (A_tvm, Scales_tvm, C_tvm)
+        # This avoids repeating pack_scales_tmac/numpy/tvm.nd.array 256 times
+        head_data_cache = {}  # kv_h -> dict
+        if use_batched:
+            for kv_h in range(self._num_kv_heads):
+                try:
+                    head_data_cache[kv_h] = self._prepare_head_data(
+                        ctx.layer_id, kv_h, k_subblocks, num_blocks
+                    )
+                except Exception as e:
+                    logger.warning(f"[COMPASS] Head data prep failed (h={kv_h}): {e}")
+                    head_data_cache[kv_h] = None
 
         for q_grp in range(num_q_groups):
             q_group = q_cpu[q_grp * fine_grain : (q_grp + 1) * fine_grain]
@@ -398,27 +580,39 @@ class COMPASSPolicy(SparsePolicy):
                 ]
             except Exception as e:
                 logger.warning(f"[COMPASS] Q preprocess failed (q_grp={q_grp}): {e}")
-                # On error, select all sub-blocks for this Q group
                 selected_subblock_indices.update(range(len(k_subblocks)))
                 continue
 
-            # Per-head BLASST estimation
+            # Per-head estimation
             for kv_h in range(self._num_kv_heads):
                 lut_s, lut_b, qlut = per_head_qluts[kv_h]
 
-                # Score all K sub-blocks using pre-packed metadata
-                scores = []
-                for _, sub_s, sub_e in k_subblocks:
-                    score = self._estimate_subblock_score_from_packed(
-                        ctx.layer_id, sub_s, sub_e, kv_h,
+                if use_batched and head_data_cache.get(kv_h) is not None:
+                    # L1 Batched with pre-computed head data
+                    scores = self._estimate_head_batched(
+                        ctx.layer_id, kv_h, k_subblocks, num_blocks,
+                        qlut, lut_s, lut_b,
+                        head_data=head_data_cache[kv_h],
+                    )
+                elif use_batched:
+                    # L1 Batched fallback (prep failed, compute inline)
+                    scores = self._estimate_head_batched(
+                        ctx.layer_id, kv_h, k_subblocks, num_blocks,
                         qlut, lut_s, lut_b,
                     )
-                    scores.append(score)
+                else:
+                    # Legacy: per-sub-block qGEMM
+                    scores = []
+                    for _, sub_s, sub_e in k_subblocks:
+                        score = self._estimate_subblock_score_from_packed(
+                            ctx.layer_id, sub_s, sub_e, kv_h,
+                            qlut, lut_s, lut_b,
+                        )
+                        scores.append(score)
 
                 # BLASST relative threshold: score >= m_global + ln(λ)
                 valid_scores = [s for s in scores if s > -float('inf') and s < float('inf')]
                 if not valid_scores:
-                    # All scores invalid → select all
                     selected_subblock_indices.update(range(len(k_subblocks)))
                     continue
 
