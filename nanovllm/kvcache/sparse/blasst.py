@@ -59,6 +59,19 @@ class BLASSTPolicy(SparsePolicy):
         self._stats_skipped_subblocks = 0
         self._stats_total_subblocks = 0
 
+        # Log lambda configuration at initialization
+        if fixed_lambda is not None:
+            ln_lam = math.log(fixed_lambda) if fixed_lambda > 0 else float('-inf')
+            logger.info(
+                f"[BLASST] Initialized with fixed_lambda={fixed_lambda}, "
+                f"ln(lambda)={ln_lam:.4f}, granularity={granularity}"
+            )
+        else:
+            logger.info(
+                f"[BLASST] Initialized with dynamic lambda: a={a}, "
+                f"lambda=a/L, granularity={granularity}"
+            )
+
     def _get_lambda(self, seq_len: int) -> float:
         if self.fixed_lambda is not None:
             return self.fixed_lambda
@@ -133,6 +146,12 @@ class BLASSTPolicy(SparsePolicy):
         total_seq_len = len(seq) if seq else num_tokens
         lambda_val = self._get_lambda(total_seq_len)
         ln_lambda = math.log(lambda_val)
+
+        if layer_id == 0:
+            logger.info(
+                f"[BLASST] Chunk {current_chunk_idx}: seq_len={total_seq_len}, "
+                f"lambda={lambda_val:.6f}, ln(lambda)={ln_lambda:.4f}"
+            )
 
         q_len = q.shape[0]
         num_heads = q.shape[1]

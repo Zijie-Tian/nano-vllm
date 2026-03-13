@@ -63,6 +63,8 @@ class COMPASSPolicy(SparsePolicy):
         self.bits = bits
         self.group_size = group_size
         self.act_group_size = act_group_size
+        self.g = 4  # TMAC group size (fixed)
+        self.bm = 256  # TMAC tile size = FINE_GRAIN * bits
 
         # TMAC compiled operators (set during alloc_policy_metadata)
         self._func_qgemm = None
@@ -80,7 +82,7 @@ class COMPASSPolicy(SparsePolicy):
         self._q_buffer: Optional[torch.Tensor] = None
         self._k_packed_buffer: Optional[torch.Tensor] = None
         self._k_scales_buffer: Optional[torch.Tensor] = None
-        self._k_fp16_verify_buffer: Optional[torch.Tensor] = None
+        self._k_zeros_buffer: Optional[torch.Tensor] = None
         self._q_chunk_sizes: list[int] = []
 
     # ========================================================================
@@ -130,9 +132,9 @@ class COMPASSPolicy(SparsePolicy):
             dtype=dtype, device="cpu", pin_memory=True,
         )
 
-        # FP16 verification buffer
-        self._k_fp16_verify_buffer = torch.zeros(
-            (num_layers, max_seq_len, num_kv_heads, head_dim),
+        # K zeros buffer for quantization: [num_layers, max_seq_len, num_kv_heads, 1]
+        self._k_zeros_buffer = torch.zeros(
+            (num_layers, max_seq_len, num_kv_heads, 1),
             dtype=dtype, device="cpu", pin_memory=True,
         )
 
@@ -255,68 +257,70 @@ class COMPASSPolicy(SparsePolicy):
 
         return LUT_Scales_tvm, LUT_Biases_tvm, QLUT_tvm
 
-    def _estimate_subblock_score(
+    def _estimate_subblock_score_from_packed(
         self,
-        k_fp16_sub: torch.Tensor,
+        layer_id: int,
+        sub_start: int,
+        sub_end: int,
         kv_head_idx: int,
         qlut_tvm: "tvm.nd.NDArray",
         lut_scales_tvm: "tvm.nd.NDArray",
         lut_biases_tvm: "tvm.nd.NDArray",
     ) -> float:
         """
-        Estimate attention score for a 128-token K sub-block of one KV head.
+        Estimate attention score for a 128-token K sub-block using pre-packed metadata.
 
-        Quantizes, packs, and runs compiled TMAC qGEMM to get score.
+        Reads directly from _k_packed_buffer and _k_scales_buffer/_k_zeros_buffer,
+        skipping quantization and K packing. Only pack_scales_tmac is needed.
 
         Args:
-            k_fp16_sub: [fine_grain, num_kv_heads, head_dim] FP16 K data
-            kv_head_idx: which KV head to process
-            qlut_tvm, lut_scales_tvm, lut_biases_tvm: from preprocessor for this head
+            layer_id: which layer
+            sub_start, sub_end: token range in the K buffer
+            kv_head_idx: which KV head
+            qlut_tvm, lut_scales_tvm, lut_biases_tvm: from Q preprocessor
 
         Returns:
             Max absolute score for this head and sub-block
         """
-        # Extract single head: [fine_grain, 1, head_dim]
-        # Convert bf16→fp16 if needed: TVM/numpy don't support bf16
-        if k_fp16_sub.dtype == torch.bfloat16:
-            k_fp16_sub = k_fp16_sub.to(torch.float16)
-        k_head = k_fp16_sub[:, kv_head_idx:kv_head_idx+1, :]
+        fine_grain = sub_end - sub_start  # 128
 
-        # Quantize per-token: k_q [fine_grain, 1, head_dim], k_s [fine_grain, 1, 1]
-        k_q, k_s, k_z = quantize_kcache_per_token(k_head, bits=self.bits, sym=False)
+        # 1. Read pre-packed K for this head: [128, head_dim//4] uint8
+        packed_sub = self._k_packed_buffer[layer_id, sub_start:sub_end, kv_head_idx]
+        # Reshape to TVM format: [M_exp//bm, K//g, bm//nge]
+        # For fine_grain=128, bits=2, bm=256, g=4, nge=2:
+        # [1, head_dim//g, bm//nge] = [1, 32, 128]
+        nge = 8 // self.g
+        M_exp = fine_grain * self.bits
+        A_np = packed_sub.numpy().reshape(M_exp // self.bm, self._head_dim // self.g, self.bm // nge)
 
-        # Pack for TMAC: [1, 1, fine_grain, head_dim] → packed
-        k_q_tmac = k_q.transpose(0, 1).unsqueeze(0)  # [1, 1, fine_grain, head_dim]
-        packed_k = pack_kvcache_tmac(k_q_tmac, is_key=True, bits=self.bits)
-        A_np = packed_k[0, 0].numpy()  # [M//bm, K//g, bm//ngroups_per_elem]
-
-        # Pack scales
-        k_s_tmac = k_s.transpose(0, 1).unsqueeze(0)  # [1, 1, fine_grain, 1]
-        k_z_tmac = k_z.transpose(0, 1).unsqueeze(0) if k_z is not None else None
+        # 2. Read raw scales + zeros for this head, pack for TMAC
+        k_s = self._k_scales_buffer[layer_id, sub_start:sub_end, kv_head_idx:kv_head_idx+1]
+        k_z = self._k_zeros_buffer[layer_id, sub_start:sub_end, kv_head_idx:kv_head_idx+1]
+        # Convert bf16→fp16 if needed for numpy compatibility
+        if k_s.dtype == torch.bfloat16:
+            k_s = k_s.to(torch.float16)
+            k_z = k_z.to(torch.float16)
+        # pack_scales_tmac expects [batch=1, n_head=1, M=fine_grain, K//group_size=1]
+        k_s_tmac = k_s.transpose(0, 1).unsqueeze(0)  # [1, 1, 128, 1]
+        k_z_tmac = k_z.transpose(0, 1).unsqueeze(0)
         packed_scales = pack_scales_tmac(k_s_tmac, zeros=k_z_tmac, bits=self.bits)
-        Scales_np = packed_scales[0, 0].numpy()  # [M//bm, K//group_size, ...]
+        Scales_np = packed_scales[0, 0].numpy()
 
-        M = self.FINE_GRAIN * self.bits
+        # 3. Run TVM qGEMM
         N = 1
         dev = self._tvm_device
-
         try:
-            # Allocate TVM arrays matching qGEMM tensors: [A, LUT, Scales, LUT_Scales, LUT_Biases, C]
             A_tvm = tvm.nd.array(A_np.astype("uint8"), dev)
             Scales_tvm = tvm.nd.array(Scales_np.astype("float32"), dev)
             C_tvm = tvm.nd.array(
-                np.zeros((N, M // self.bits), dtype="float32"), dev
+                np.zeros((N, fine_grain), dtype="float32"), dev
             )
-
-            # Call compiled qGEMM
             self._func_qgemm(A_tvm, qlut_tvm, Scales_tvm, lut_scales_tvm, lut_biases_tvm, C_tvm)
-
-            # Read output scores
-            scores = C_tvm.numpy()  # [N=1, M//bits=FINE_GRAIN]
+            scores = C_tvm.numpy()  # [1, fine_grain]
             return float(np.max(np.abs(scores)))
         except Exception as e:
-            logger.debug(f"[COMPASS] TMAC estimation error: {e}")
-            return float('inf')  # On error, select block to be safe
+            logger.warning(f"[COMPASS] TMAC packed estimation error (L{layer_id} h={kv_head_idx}): {e}")
+            return float('inf')  # On error, select to be safe
 
     # ========================================================================
     # Block selection
@@ -331,13 +335,15 @@ class COMPASSPolicy(SparsePolicy):
         k: torch.Tensor,
     ) -> List[int]:
         """
-        Select blocks using TMAC CPU prediction during prefill.
+        Select blocks using BLASST-style TMAC CPU prediction during prefill.
 
-        For each available 4096-token block, scans 128-token sub-blocks using
-        TMAC qGEMM. If any sub-block's score exceeds the threshold, the entire
-        block is selected for GPU attention.
+        Splits Q chunk (4096 tokens) into 32 Q-groups of 128 tokens.
+        Each Q-group independently estimates importance of all K sub-blocks
+        (128 tokens each) using TMAC qGEMM with BLASST relative threshold:
+            score >= m_global + ln(λ)
 
-        During decode, returns all blocks (falls back to full attention).
+        Takes union across all Q-groups, then aggregates to 4096-token IO blocks.
+        During decode, returns all blocks.
         """
         # Save Q to buffer for metadata tracking
         if q is not None and self._q_buffer is not None:
@@ -358,89 +364,89 @@ class COMPASSPolicy(SparsePolicy):
                 self._stats_selected_blocks += len(available_blocks)
             return available_blocks
 
-        # --- CPU TMAC Sparse Estimation ---
-        # Synchronize to ensure previous offload_prefill_chunk has written
-        # FP16 K data to the verify buffer (it's async on offload streams)
+        # --- BLASST-style CPU TMAC Sparse Estimation ---
+        # Synchronize to ensure offload_prefill_chunk has written packed K data
         torch.cuda.synchronize()
 
-        block_size = ctx.block_size
-        fine_grain = self.FINE_GRAIN
-        num_fine_per_block = block_size // fine_grain
-        threshold = abs(math.log(self.lambda_threshold))  # |ln(0.001)| ≈ 6.9
+        block_size = ctx.block_size       # 4096
+        fine_grain = self.FINE_GRAIN       # 128
+        num_q_groups = q.shape[0] // fine_grain  # typically 32
+        ln_lambda = math.log(self.lambda_threshold)  # e.g. ln(0.001) = -6.91
+        num_fine_per_block = block_size // fine_grain  # 32
 
-        # Step 1: Preprocess Q → QLUT for each KV head
-        q_cpu = q.cpu()
-        try:
-            per_head_qluts = []
-            for kv_h in range(self._num_kv_heads):
-                lut_s, lut_b, qlut = self._preprocess_q_per_head(q_cpu, kv_h)
-                per_head_qluts.append((lut_s, lut_b, qlut))
-        except Exception as e:
-            logger.warning(f"[COMPASS] Preprocessor failed: {e}, selecting all blocks")
-            if ctx.layer_id == 0:
-                self._stats_selected_blocks += len(available_blocks)
+        # Build K sub-block index: [(cpu_block_id, sub_start, sub_end), ...]
+        k_subblocks = []
+        for bid in available_blocks:
+            for si in range(num_fine_per_block):
+                start = bid * block_size + si * fine_grain
+                k_subblocks.append((bid, start, start + fine_grain))
+
+        if not k_subblocks:
             return available_blocks
 
-        # Step 2: For each block, scan sub-blocks across all heads
-        selected_indices = []
-        block_max_scores = []  # Track max score per block for diagnostics
-        for block_idx, cpu_block_id in enumerate(available_blocks):
-            start_token = cpu_block_id * block_size
-            block_selected = False
-            block_max_score = -float('inf')
+        selected_subblock_indices = set()
+        q_cpu = q.cpu()
 
-            for sub_idx in range(num_fine_per_block):
-                sub_start = start_token + sub_idx * fine_grain
-                sub_end = sub_start + fine_grain
+        for q_grp in range(num_q_groups):
+            q_group = q_cpu[q_grp * fine_grain : (q_grp + 1) * fine_grain]
 
-                # Get FP16 K sub-block for estimation
-                k_fp16_sub = self._k_fp16_verify_buffer[ctx.layer_id, sub_start:sub_end]
-                abssum = k_fp16_sub.abs().sum().item()
-                if block_idx == 0 and sub_idx == 0 and ctx.layer_id == 0:
-                    logger.info(
-                        f"[COMPASS-DEBUG] read L{ctx.layer_id}: block={cpu_block_id}, "
-                        f"sub_start={sub_start}, sub_end={sub_end}, "
-                        f"abssum={abssum:.2f}, shape={k_fp16_sub.shape}, "
-                        f"block_size={block_size}"
+            # Preprocess Q group → QLUT per KV head
+            try:
+                per_head_qluts = [
+                    self._preprocess_q_per_head(q_group, h)
+                    for h in range(self._num_kv_heads)
+                ]
+            except Exception as e:
+                logger.warning(f"[COMPASS] Q preprocess failed (q_grp={q_grp}): {e}")
+                # On error, select all sub-blocks for this Q group
+                selected_subblock_indices.update(range(len(k_subblocks)))
+                continue
+
+            # Per-head BLASST estimation
+            for kv_h in range(self._num_kv_heads):
+                lut_s, lut_b, qlut = per_head_qluts[kv_h]
+
+                # Score all K sub-blocks using pre-packed metadata
+                scores = []
+                for _, sub_s, sub_e in k_subblocks:
+                    score = self._estimate_subblock_score_from_packed(
+                        ctx.layer_id, sub_s, sub_e, kv_h,
+                        qlut, lut_s, lut_b,
                     )
-                if abssum == 0:
+                    scores.append(score)
+
+                # BLASST relative threshold: score >= m_global + ln(λ)
+                valid_scores = [s for s in scores if s > -float('inf') and s < float('inf')]
+                if not valid_scores:
+                    # All scores invalid → select all
+                    selected_subblock_indices.update(range(len(k_subblocks)))
                     continue
 
-                try:
-                    # Check each KV head
-                    for kv_h in range(self._num_kv_heads):
-                        lut_s, lut_b, qlut = per_head_qluts[kv_h]
-                        score = self._estimate_subblock_score(
-                            k_fp16_sub, kv_h, qlut, lut_s, lut_b,
-                        )
-                        block_max_score = max(block_max_score, score)
-                        if score > threshold:
-                            block_selected = True
-                            break
+                m_global = max(valid_scores)
+                threshold = m_global + ln_lambda
 
-                    if block_selected:
-                        break
-                except Exception as e:
-                    logger.warning(f"[COMPASS] Sub-block estimation error (L{ctx.layer_id} kv_h={kv_h}): {e}")
-                    block_selected = True  # Select on error to be safe
-                    break
+                for idx, score in enumerate(scores):
+                    if score >= threshold:
+                        selected_subblock_indices.add(idx)
 
-            block_max_scores.append(block_max_score)
-            if block_selected:
-                selected_indices.append(block_idx)
+        # Aggregate: 128-token sub-block → 4096-token IO chunk
+        selected_chunks = set()
+        for idx in selected_subblock_indices:
+            selected_chunks.add(k_subblocks[idx][0])
 
-        selected = [available_blocks[i] for i in selected_indices]
+        selected = [b for b in available_blocks if b in selected_chunks]
 
-        # Log density and score distribution
+        # Logging
         self._stats_selected_blocks += len(selected)
-        score_min = min(block_max_scores) if block_max_scores else 0
-        score_max = max(block_max_scores) if block_max_scores else 0
-        score_mean = sum(block_max_scores) / len(block_max_scores) if block_max_scores else 0
+        n_total_sub = len(k_subblocks)
+        n_sel_sub = len(selected_subblock_indices)
+        density_block = len(selected) / max(len(available_blocks), 1) * 100
+        density_sub = n_sel_sub / max(n_total_sub, 1) * 100
         logger.info(
             f"[COMPASS] layer={ctx.layer_id}, chunk={ctx.query_chunk_idx}, "
-            f"available={len(available_blocks)}, selected={len(selected)} "
-            f"(density={len(selected)/max(len(available_blocks),1)*100:.1f}%), "
-            f"threshold={threshold:.2f}, scores=[min={score_min:.2f}, mean={score_mean:.2f}, max={score_max:.2f}]"
+            f"blocks: {len(selected)}/{len(available_blocks)} ({density_block:.1f}%), "
+            f"sub-blocks: {n_sel_sub}/{n_total_sub} ({density_sub:.1f}%), "
+            f"λ={self.lambda_threshold}"
         )
 
         return selected
@@ -760,21 +766,11 @@ class COMPASSPolicy(SparsePolicy):
                         k_scales[:write_len], non_blocking=True
                     )
 
-                # Save FP16 K for verification and CPU estimation
-                if self._k_fp16_verify_buffer is not None:
-                    self._k_fp16_verify_buffer[layer_id, start_idx:start_idx + write_len].copy_(
-                        k_curr[:write_len], non_blocking=True
+                # Save zeros for TMAC estimation
+                if self._k_zeros_buffer is not None and k_zeros is not None:
+                    self._k_zeros_buffer[layer_id, start_idx:start_idx + write_len].copy_(
+                        k_zeros[:write_len], non_blocking=True
                     )
-                    if layer_id == 0:
-                        stream.synchronize()
-                        buf_check = self._k_fp16_verify_buffer[layer_id, start_idx:start_idx + write_len]
-                        logger.info(
-                            f"[COMPASS-DEBUG] offload L0: block={cpu_block_id}, "
-                            f"start_idx={start_idx}, write_len={write_len}, "
-                            f"k_curr_abssum={k_curr[:write_len].abs().sum():.2f}, "
-                            f"buf_abssum={buf_check.abs().sum():.2f}, "
-                            f"k_curr_device={k_curr.device}, k_curr_shape={k_curr.shape}"
-                        )
 
         super().offload_prefill_chunk(
             offload_engine, layer_id, cpu_block_id, num_tokens, **kwargs
