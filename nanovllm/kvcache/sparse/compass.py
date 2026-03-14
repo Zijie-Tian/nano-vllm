@@ -114,9 +114,13 @@ class COMPASSPolicy(SparsePolicy):
         """
         Estimate which blocks to keep using torch FP32 CPU GEMM.
 
-        For each available block, reads FP16 K data from offload_engine.k_cache_cpu,
-        computes Q @ K^T per KV head per Q-group, and applies BLASST-style
-        relative threshold to select important sub-blocks.
+        BLASST-consistent algorithm: for each Q-group (128 tokens), computes
+        full Q @ K^T * sm_scale per Q head, then uses per-token max logit
+        (m_local) vs running max (m_global) for skip decisions. Exactly matches
+        the BLASST Triton kernel's logic:
+            m_local = max(Q @ K^T * sm_scale, axis=kv_dim)  # per Q-token
+            diff = m_local - m_global                        # per Q-token
+            skip if max(diff) < ln(λ)                        # block-level
 
         Args:
             layer_id: Current layer index.
@@ -133,6 +137,7 @@ class COMPASSPolicy(SparsePolicy):
         num_q_groups = q_cpu.shape[0] // fine_grain
         num_fine_per_block = block_size // fine_grain  # 32
         heads_per_group = self._num_heads // self._num_kv_heads
+        sm_scale = 1.0 / (self._head_dim ** 0.5)
 
         # Build sub-block index: [(block_id, sub_idx_in_block), ...]
         # Each sub-block is fine_grain (128) tokens
@@ -147,18 +152,16 @@ class COMPASSPolicy(SparsePolicy):
         num_subblocks = len(subblock_info)
 
         # Pre-load all K blocks from CPU cache: [num_blocks, block_size, kv_heads, head_dim]
-        # k_cache_cpu shape: [num_layers, num_cpu_blocks, block_size, kv_heads, head_dim]
         k_blocks = torch.stack([
             offload_engine.k_cache_cpu[layer_id, bid]
             for bid in available_blocks
         ], dim=0).float()  # [num_blocks, block_size, kv_heads, head_dim]
 
-        # Reshape to sub-blocks: [num_blocks * num_fine_per_block, fine_grain, kv_heads, head_dim]
         num_blocks = len(available_blocks)
         k_subblocks = k_blocks.reshape(
             num_blocks * num_fine_per_block, fine_grain,
             self._num_kv_heads, self._head_dim,
-        )  # [total_subs, fine_grain, kv_heads, head_dim]
+        )  # [S, F, H, D]
 
         q_float = q_cpu.float()  # [q_len, num_heads, head_dim]
 
@@ -167,44 +170,57 @@ class COMPASSPolicy(SparsePolicy):
         S = num_subblocks       # total sub-blocks
         F = fine_grain          # 128
         D = self._head_dim      # 128
+        hpg = heads_per_group   # heads per GQA group
 
         # Truncate Q to aligned length (drop trailing tokens < fine_grain)
         aligned_len = G * F
         if aligned_len == 0:
             return available_blocks
-        q_float = q_float[:aligned_len]  # [G*F, num_heads, head_dim]
+        q_float = q_float[:aligned_len]  # [G*F, num_heads, D]
 
-        # --- BMM: compute all (q_group, kv_head) scores in one shot ---
+        # --- BLASST-consistent: keep per-token Q, no averaging ---
 
-        # 1. Pre-compute Q representatives for all q-groups and kv-heads
-        #    GQA layout: num_heads = num_kv_heads * heads_per_group
-        #    e.g., heads [0,1,2,3] → kv_head 0, heads [4,5,6,7] → kv_head 1, etc.
-        q_groups = q_float.reshape(G, F, H, heads_per_group, D)
-        q_repr_all = q_groups.mean(dim=(1, 3))  # [G, H, D]
-
-        # 2. Prepare K: [S, F, H, D] → [H, S*F, D]
+        # Prepare K: [S, F, H, D] → [H, D, S*F] (transposed for matmul)
         k_flat = k_subblocks.permute(2, 0, 1, 3).reshape(H, S * F, D)
+        k_flat_T = k_flat.transpose(1, 2).contiguous()  # [H, D, S*F]
 
-        # 3. Prepare Q: [G, H, D] → [H, D, G]
-        q_flat = q_repr_all.permute(1, 2, 0)  # [H, D, G]
+        # Process per Q-group to manage CPU memory.
+        # For each Q-group g (F=128 tokens):
+        #   Q_g: [F, num_heads, D] → GQA reshape → [H, hpg*F, D]
+        #   BMM: [H, hpg*F, D] @ [H, D, S*F] → [H, hpg*F, S*F]
+        #   Reshape → [H, hpg, F_q, S, F_k], amax over (F_q, F_k) → [H, hpg, S]
+        #   Apply BLASST threshold per (kv_head, q_head) pair
+        overall_selected = torch.zeros(S, dtype=torch.bool)
 
-        # 4. Single BMM: [H, S*F, D] @ [H, D, G] → [H, S*F, G]
-        attn_all = torch.bmm(k_flat, q_flat)
+        for g in range(G):
+            q_g = q_float[g * F : (g + 1) * F]  # [F, num_heads, D]
 
-        # 5. Reshape and reduce: [H, S, F, G] → per-sub-block scores [H, S, G]
-        attn_all = attn_all.reshape(H, S, F, G)
-        scores = attn_all.abs().amax(dim=2)  # [H, S, G]
+            # GQA reshape: [F, num_heads, D] → [F, H, hpg, D] → [H, hpg*F, D]
+            q_g = q_g.reshape(F, H, hpg, D)
+            q_g = q_g.permute(1, 2, 0, 3).reshape(H, hpg * F, D)
 
-        # 6. BLASST threshold: per (head, q-group) pair
-        m_globals = scores.amax(dim=1, keepdim=True)  # [H, 1, G]
-        thresholds = m_globals + ln_lambda
+            # BMM: [H, hpg*F, D] @ [H, D, S*F] → [H, hpg*F, S*F]
+            scores_g = torch.bmm(q_g, k_flat_T) * sm_scale
 
-        # 7. Union across all heads and q-groups → selected sub-blocks
-        selected_mask = (scores >= thresholds).any(dim=(0, 2))  # [S]
+            # Reshape: [H, hpg, F_q, S, F_k]
+            scores_g = scores_g.reshape(H, hpg, F, S, F)
+
+            # Per (kv_head, q_head, sub-block): max logit over Q & K tokens
+            # This matches BLASST's m_local = max(qk, axis=kv_dim) per Q-token,
+            # then max_diff = max(diff, axis=q_dim) for skip decision
+            m_local_g = scores_g.amax(dim=(2, 4))  # [H, hpg, S]
+
+            # BLASST threshold: m_global = max over all sub-blocks
+            m_global_g = m_local_g.amax(dim=2, keepdim=True)  # [H, hpg, 1]
+            thresholds_g = m_global_g + ln_lambda
+
+            # Select: any (kv_head, q_head) keeps this sub-block
+            selected_g = (m_local_g >= thresholds_g).any(dim=(0, 1))  # [S]
+            overall_selected |= selected_g
 
         # Aggregate: sub-block index → block ID
         selected_block_set = set()
-        for idx in selected_mask.nonzero(as_tuple=True)[0].tolist():
+        for idx in overall_selected.nonzero(as_tuple=True)[0].tolist():
             bid, _ = subblock_info[idx]
             selected_block_set.add(bid)
 
