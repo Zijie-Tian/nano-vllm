@@ -60,6 +60,9 @@ class Config:
     sparse_stride: int = 8  # Stride for Q/K downsampling
     sparse_chunk_size: int = 16384  # Triton kernel chunk size for estimation
 
+    # COMPASS specific parameters
+    lambda_threshold: float = 0.001  # Threshold for COMPASS block selection
+
     # BLASST specific parameters
     blasst_a: int = 16384  # Inverse formula numerator (λ = a / L). Default 16384 gives λ=0.5 at 32K.
     blasst_fixed_lambda: float | None = (

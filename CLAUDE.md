@@ -62,6 +62,7 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 | [`docs/blasst_perhead_density_analysis.md`](docs/blasst_perhead_density_analysis.md) | 📊 ANALYSIS: Per-head KV density analysis: GQA IO implications for sparse attention offload |
 | [`docs/blasst_density_collection_guide.md`](docs/blasst_density_collection_guide.md) | 📊 GUIDE: BLASST density 数据采集流程: `test_ruler.py` 采集 → `scripts/export_blasst_density_csv.py` 导出 CSV → `scripts/analyze_blasst_density.py` 汇总分析 |
 | [`docs/compass_tmac_l1_batching.md`](docs/compass_tmac_l1_batching.md) | 深入解析 COMPASS TMAC 中的 L1 批量化优化：数学约束、工程实现以及针对多头注意力的 Python 端瓶颈分析。 |
+| [`docs/compass_torch_gemm_migration.md`](docs/compass_torch_gemm_migration.md) | COMPASS TMAC to Torch CPU GEMM migration: BMM batching optimization, API simplification, and IO reduction benchmark results (32K context). |
 
 ## Rules Index
 

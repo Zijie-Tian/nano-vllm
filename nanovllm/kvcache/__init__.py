@@ -118,7 +118,9 @@ def create_kvcache_manager(config: "Config") -> KVCacheManager:
             "chunk_size": getattr(config, "sparse_chunk_size", 16384),
         }
     elif sparse_policy_type == SparsePolicyType.COMPASS:
-        policy_kwargs = {}  # COMPASS has no extra parameters
+        policy_kwargs = {
+            "lambda_threshold": getattr(config, "lambda_threshold", 0.001),
+        }
     elif sparse_policy_type == SparsePolicyType.BLASST:
         policy_kwargs = {
             "a": getattr(config, "blasst_a", 16384),

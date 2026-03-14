@@ -1,5 +1,6 @@
 import numpy as np
 import tvm
+import torch
 import time
 import sys
 import os
@@ -124,21 +125,86 @@ def bench_preprocessor(N, K, bits=2, num_threads=4, tune=False, n_trial=1):
     return avg_latency
 
 
+def bench_torch_fp32_gemm(seq_len, N, K, num_threads=None):
+    """Benchmark equivalent FP32 CPU torch matmul: Q[N, K] @ K_data[seq_len, K]^T.
+
+    This is the dense FP32 baseline that TMAC 2-bit qGEMM replaces.
+    seq_len corresponds to M // bits in the qGEMM benchmark.
+    """
+    if num_threads is not None:
+        torch.set_num_threads(num_threads)
+    actual_threads = torch.get_num_threads()
+
+    print(f"\n[Bench] Torch FP32 CPU GEMM (seq_len={seq_len}, N={N}, K={K}, threads={actual_threads})")
+
+    Q = torch.randn(N, K, dtype=torch.float32)
+    K_data = torch.randn(seq_len, K, dtype=torch.float32)
+
+    # Warmup
+    for _ in range(5):
+        _ = torch.mm(Q, K_data.t())
+
+    num_runs = 10
+    start_time = time.time()
+    for _ in range(num_runs):
+        _ = torch.mm(Q, K_data.t())
+    end_time = time.time()
+
+    avg_latency = (end_time - start_time) / num_runs * 1000
+    print(f"  Latency: {avg_latency:.4f} ms")
+
+    return avg_latency
+
+
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--tune", action="store_true", help="Run auto-tuning")
+    parser.add_argument("--threads", type=int, default=None,
+                        help="Number of threads for torch (default: all cores)")
     args = parser.parse_args()
 
-    # N=4096 (query chunk size), K=1024 (hidden_dim), M=seq_len (32k to 1M)
-    K_dim = 1024
-    N_queries = 4096
-    seq_lengths = [32768, 65536, 131072, 262144, 524288, 1048576]
+    BITS = 2
+    # COMPASS-realistic: K=128 (head_dim), N=1 (per-head)
+    # Ultra-fast: K=1024 (hidden_dim), N=4096 (query chunk)
+    configs = [
+        # (label, N, K, M_values)
+        ("COMPASS Per-Head (N=1, K=128)", 1, 128,
+         [256, 1024, 4096, 8192, 16384, 32768]),
+        ("Ultra-Fast QK (N=4096, K=1024)", 4096, 1024,
+         [32768, 65536, 131072, 262144, 524288, 1048576]),
+    ]
 
-    print(f"=== Ultra-Fast QGEMM QK Bench (N={N_queries}, K={K_dim}, 2-bit) ===")
-    for m in seq_lengths:
-        bench_qgemm(M=m, N=N_queries, K=K_dim, bits=2, tune=args.tune)
+    for label, N_q, K_dim, M_values in configs:
+        print(f"\n{'=' * 78}")
+        print(f"  {label}, bits={BITS}")
+        print(f"{'=' * 78}")
 
-    print("\n=== Ultra-Fast Preprocessor Bench (Query to LUT) ===")
-    bench_preprocessor(N=N_queries, K=K_dim, bits=2, tune=args.tune)
+        header = (f"{'M (TVM)':>10} | {'seq_len':>10} | {'TVM qGEMM':>12} | "
+                  f"{'Torch FP32':>12} | {'Speedup':>8}")
+        print(f"\n{header}")
+        print("-" * len(header))
+
+        for M_val in M_values:
+            seq_len = M_val // BITS
+
+            # TVM qGEMM benchmark
+            t_tvm = bench_qgemm(
+                M=M_val, N=N_q, K=K_dim, bits=BITS, tune=args.tune)
+
+            # FP32 CPU torch baseline
+            t_torch = bench_torch_fp32_gemm(
+                seq_len=seq_len, N=N_q, K=K_dim, num_threads=args.threads)
+
+            speedup = t_torch / t_tvm if t_tvm > 0 else float('inf')
+
+            print(f"\n  {M_val:>10} | {seq_len:>10} | {t_tvm:>9.4f} ms | "
+                  f"{t_torch:>9.4f} ms | {speedup:>6.2f}x")
+
+    # Preprocessor bench
+    print(f"\n{'=' * 78}")
+    print(f"  Preprocessor Bench")
+    print(f"{'=' * 78}")
+    for label, N_q, K_dim, _ in configs:
+        bench_preprocessor(N=N_q, K=K_dim, bits=BITS, tune=args.tune)

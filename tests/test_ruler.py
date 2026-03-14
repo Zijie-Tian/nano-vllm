@@ -449,9 +449,12 @@ def run_ruler_benchmark(
             llm_kwargs["sparse_threshold"] = sparse_threshold
             llm_kwargs["sparse_samples_per_chunk"] = sparse_samples
             llm_kwargs["sparse_stride"] = sparse_stride
+        elif sparse_policy_type == SparsePolicyType.COMPASS:
+            if blasst_lambda is not None:
+                llm_kwargs["lambda_threshold"] = blasst_lambda
         elif sparse_policy_type == SparsePolicyType.BLASST:
             if blasst_lambda is not None:
-                llm_kwargs["blasst_fixed_lambda"] = blasst_lambda
+                llm_kwargs["fixed_lambda"] = blasst_lambda
 
     # Factory function for fresh_llm mode
     def create_llm():
@@ -494,29 +497,20 @@ def run_ruler_benchmark(
     from nanovllm.layers.attention import ChunkedPrefillTimer
     ChunkedPrefillTimer().print_final_summary()
 
-    # Verification for COMPASS TMAC offload tracking
+    # Statistics for COMPASS
     if sparse_policy and sparse_policy.upper() == "COMPASS":
         if llm is not None and hasattr(llm, "model_runner") and hasattr(llm.model_runner, "kvcache_manager"):
             kv_manager = llm.model_runner.kvcache_manager
             policy = kv_manager.sparse_policy
             if type(policy).__name__ == "COMPASSPolicy":
-                try:
-                    from tests.verify_tmac_offload_accuracy import verify_metadata_buffers
-                    print(f"\n{'=' * 60}")
-                    print("COMPASS TMAC Accuracy Verification")
-                    print(f"{'=' * 60}")
-                    offload_engine = getattr(kv_manager, "offload_engine", None)
-                    k_cache_cpu = getattr(offload_engine, "k_cache_cpu", None) if offload_engine else None
-                    block_size = getattr(offload_engine, "block_size", 4096) if offload_engine else 4096
-                    verify_metadata_buffers(
-                        policy._q_buffer, 
-                        policy._k_packed_buffer, 
-                        policy._q_chunk_sizes,
-                        getattr(policy, "_k_fp16_verify_buffer", None),
-                        block_size
-                    )
-                except ImportError as e:
-                    print(f"Verification failed to import: {e}")
+                stats = policy.get_stats()
+                print(f"\n{'=' * 60}")
+                print("COMPASS Block Selection Statistics")
+                print(f"{'=' * 60}")
+                print(f"  Chunks: {stats['num_chunks']}")
+                print(f"  Selected blocks: {stats['selected_blocks']}/{stats['total_blocks']}")
+                print(f"  Selection rate: {stats['select_rate']:.3f}")
+                print(f"  IO reduction: {stats['io_reduction'] * 100:.1f}%")
 
     # Cleanup (only if not fresh_llm mode, since fresh mode cleans up itself)
     if llm is not None:
