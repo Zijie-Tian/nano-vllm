@@ -12,7 +12,7 @@ import torch.cuda.nvtx
 import nvtx
 from torch import Tensor
 from typing import Dict, List, Tuple
-from dataclasses import dataclass
+
 
 from nanovllm.utils.logger import get_logger
 from nanovllm.utils.memory_observer import MemoryObserver
@@ -25,16 +25,6 @@ if TYPE_CHECKING:
 
 logger = get_logger("offload_engine")
 
-
-@dataclass
-class TransferEvent:
-    """Tracks a pending async transfer."""
-
-    event: torch.cuda.Event
-    layer_id: int
-    src_block_id: int
-    dst_block_id: int
-    direction: str  # "h2d" or "d2h"
 
 
 class OffloadEngine:
@@ -100,13 +90,13 @@ class OffloadEngine:
         # Prefill: use ALL slots as ring buffer (slot[chunk_idx % N])
         # Decode: slot[0] as decode_slot, slots[1:] for loading previous chunks
         self.num_ring_slots = num_gpu_blocks
-        self.ring_slots = list(range(num_gpu_blocks))
+
 
         # Decode phase uses slot[0] for writing new token's KV
         self.decode_slot = 0
         # Decode phase uses slots[1:] for loading previous chunks from CPU
         self.decode_load_slots = list(range(1, num_gpu_blocks))
-        self.num_decode_load_slots = len(self.decode_load_slots)
+
 
         self.num_gpu_slots = num_gpu_blocks  # alias
 
@@ -238,13 +228,11 @@ class OffloadEngine:
         )
         logger.info(f"  Sub-block staging buffers: {staging_mb:.1f} MB (Pinned CPU)")
 
-        # ========== Transfer streams for async operations ==========
-        self.transfer_streams = [torch.cuda.Stream() for _ in range(num_streams)]
+        # ========== Compute stream for async operations ==========
         # IMPORTANT: Create a dedicated compute stream (not default stream!)
         # Default stream has implicit synchronization with other streams,
         # which prevents overlap between transfer and compute.
         self.compute_stream = torch.cuda.Stream()
-        self._stream_idx = 0
 
         # ========== Per-slot transfer streams for parallel H2D ==========
         # Each slot has its own stream to enable parallel transfers
@@ -259,8 +247,6 @@ class OffloadEngine:
             torch.cuda.Stream()
         )  # Main transfer stream (for legacy/batch ops)
 
-        # Decode offload event
-        self.decode_offload_done = torch.cuda.Event()
 
         # ========== Per-slot events for ring buffer ==========
         # Since GPU cache has no layer dimension and layers execute sequentially,
@@ -288,9 +274,6 @@ class OffloadEngine:
         # ========== Event tracking for async transfers ==========
         self.pending_events: Dict[Tuple[int, int], torch.cuda.Event] = {}
 
-        # ========== Debug hook mode ==========
-        self._debug_mode = False
-        self._debug_hooks: List = []  # External hooks for debug events
 
         # ========== Sparse attention policy (set at construction time) ==========
         self.sparse_policy = sparse_policy
@@ -399,32 +382,9 @@ class OffloadEngine:
         """
         return chunk_idx % self.num_ring_slots
 
-    def get_load_slots_for_prefill(self, write_slot_idx: int) -> List[int]:
-        """
-        Get available slots for loading previous chunks during prefill.
-
-        Excludes the current write slot to avoid conflict.
-
-        Args:
-            write_slot_idx: Current write slot index
-
-        Returns:
-            List of slot indices available for loading (N-1 slots)
-        """
-        return [i for i in range(self.num_ring_slots) if i != write_slot_idx]
 
     # ----- Decode: slot management -----
 
-    def get_load_slots_for_decode(self) -> List[int]:
-        """
-        Get slots available for loading during decode.
-
-        Excludes decode_slot (slot[0]) since it's used for writing new token's KV.
-
-        Returns:
-            List of slot indices for loading (slots[1:])
-        """
-        return self.decode_load_slots
 
     # ----- Per-slot Per-layer loading methods -----
 
@@ -667,28 +627,6 @@ class OffloadEngine:
         v = self.v_cache_gpu[slot_idx].unsqueeze(0)
         return k, v
 
-    def get_kv_for_slots(
-        self,
-        slot_indices: List[int],
-    ) -> Tuple[Tensor, Tensor]:
-        """
-        Get KV for multiple ring buffer slots.
-
-        GPU cache has no layer dimension - returns data from specified slots.
-
-        Args:
-            slot_indices: List of GPU slot indices
-
-        Returns:
-            (k_cache, v_cache), shape: [1, len(slots) * block_size, kv_heads, head_dim]
-        """
-        if not slot_indices:
-            return None, None
-        k = self.k_cache_gpu[slot_indices]
-        v = self.v_cache_gpu[slot_indices]
-        k = k.reshape(1, -1, self.num_kv_heads, self.head_dim)
-        v = v.reshape(1, -1, self.num_kv_heads, self.head_dim)
-        return k, v
 
     # ----- Decode slot methods (kept for decode phase) -----
     # NOTE: For decode with CPU offload, the flow is per-layer:
@@ -707,143 +645,11 @@ class OffloadEngine:
         # Reuse the existing per-layer offload method
         self.offload_slot_layer_to_cpu(self.decode_slot, layer_id, cpu_block_id)
 
-    def wait_decode_offload(self) -> None:
-        """Wait for decode slot offload to complete."""
-        self.wait_slot_offload(self.decode_slot)
-
-    def get_kv_for_decode_slot(
-        self,
-        pos_in_block: int,
-    ) -> Tuple[Tensor, Tensor]:
-        """
-        Get KV at specified position in decode slot.
-
-        GPU cache has no layer dimension - decode slot contains data for
-        whatever layer was most recently stored.
-
-        Args:
-            pos_in_block: Token position within block (0 to block_size-1)
-
-        Returns:
-            (k_cache, v_cache), shape: [1, 1, kv_heads, head_dim]
-        """
-        k = self.k_cache_gpu[self.decode_slot, pos_in_block : pos_in_block + 1]
-        v = self.v_cache_gpu[self.decode_slot, pos_in_block : pos_in_block + 1]
-        k = k.unsqueeze(0)
-        v = v.unsqueeze(0)
-        return k, v
-
-    def get_kv_for_decode_slot_accumulated(
-        self,
-        num_tokens: int,
-    ) -> Tuple[Tensor, Tensor]:
-        """
-        Get accumulated KV in decode slot (positions 0 to num_tokens-1).
-
-        GPU cache has no layer dimension - decode slot contains data for
-        whatever layer was most recently stored.
-
-        Args:
-            num_tokens: Number of accumulated tokens (1 to block_size)
-
-        Returns:
-            (k_cache, v_cache), shape: [1, num_tokens, kv_heads, head_dim]
-        """
-        k = self.k_cache_gpu[self.decode_slot, :num_tokens]
-        v = self.v_cache_gpu[self.decode_slot, :num_tokens]
-        k = k.unsqueeze(0)
-        v = v.unsqueeze(0)
-        return k, v
-
-    # ========== Debug Hook Interface ==========
-    #
-    # Minimal generic hook system for debugging.
-    # Framework only provides hook registration and tensor access.
-    # All verification logic is external.
-
-    def enable_debug_mode(self) -> None:
-        """Enable debug mode."""
-        self._debug_mode = True
-        logger.info("OffloadEngine debug mode ENABLED")
-
-    def disable_debug_mode(self) -> None:
-        """Disable debug mode and clear all hooks."""
-        self._debug_mode = False
-        self._debug_hooks.clear()
-        logger.info("OffloadEngine debug mode DISABLED")
-
-    @property
-    def debug_mode(self) -> bool:
-        """Check if debug mode is enabled."""
-        return self._debug_mode
-
-    def register_debug_hook(self, hook_fn) -> None:
-        """
-        Register a debug hook.
-
-        The hook is called after H2D load completes (after wait_slot_layer),
-        receiving the loaded tensor for inspection.
-
-        Args:
-            hook_fn: Callable with signature:
-                (slot_idx: int, layer_id: int, cpu_block_id: int, k: Tensor, v: Tensor) -> None
-                - k, v: GPU tensor views for the loaded slot
-
-        Example:
-            def my_hook(slot_idx, layer_id, cpu_block_id, k, v):
-                if layer_id == 0:
-                    k_val = k.float().mean().item()
-                    print(f"Loaded block {cpu_block_id}, K mean = {k_val}")
-
-            offload_engine.register_debug_hook(my_hook)
-        """
-        self._debug_hooks.append(hook_fn)
-
-    def remove_debug_hook(self, hook_fn) -> None:
-        """Remove a registered debug hook."""
-        if hook_fn in self._debug_hooks:
-            self._debug_hooks.remove(hook_fn)
-
-    def _call_debug_hooks(
-        self, slot_idx: int, layer_id: int, cpu_block_id: int
-    ) -> None:
-        """
-        Call all registered debug hooks with loaded tensor (internal use).
-
-        Called by attention.py after wait_slot_layer completes.
-        GPU cache has no layer dimension - slot contains data for the layer
-        that was just loaded.
-        """
-        if not self._debug_mode or not self._debug_hooks:
-            return
-
-        # Use get_kv_for_slot for consistency with attention.py
-        k, v = self.get_kv_for_slot(slot_idx)
-
-        for hook in self._debug_hooks:
-            try:
-                hook(slot_idx, layer_id, cpu_block_id, k, v)
-            except Exception as e:
-                # Allow pdb quit to propagate
-                if e.__class__.__name__ == "BdbQuit":
-                    raise
-                logger.warning(f"Debug hook error: {e}")
 
     # ========== Per-layer Prefill Buffer Methods ==========
     # These methods enable async offload during chunked prefill by using
     # per-layer buffers instead of shared GPU slots.
 
-    def get_prefill_buffer(self, layer_id: int) -> Tuple[Tensor, Tensor]:
-        """
-        Get prefill buffer for a layer.
-
-        Args:
-            layer_id: Layer index
-
-        Returns:
-            (k_buffer, v_buffer), shape: [block_size, kv_heads, head_dim]
-        """
-        return self.prefill_k_buffer[layer_id], self.prefill_v_buffer[layer_id]
 
     def get_prefill_buffer_slice(
         self,
@@ -984,111 +790,9 @@ class OffloadEngine:
         for stream in self.prefill_offload_streams:
             stream.synchronize()
 
-    def wait_prefill_offload(self, layer_id: int) -> None:
-        """Wait for a specific layer's prefill offload to complete."""
-        self.prefill_offload_events[layer_id].synchronize()
-
-    # ========== XAttention BSA Helper Methods ==========
-
-    def load_block_sample_from_cpu(
-        self,
-        cpu_block_id: int,
-        layer_id: int,
-        num_samples: int,
-    ) -> Tuple[Tensor, Tensor]:
-        """
-        Load sample tokens from a CPU block for XAttention BSA estimation.
-
-        This is used in the estimate phase of XAttention BSA to load a small
-        sample of tokens from each historical chunk for importance estimation.
-
-        Args:
-            cpu_block_id: Source CPU block ID
-            layer_id: Layer index
-            num_samples: Number of tokens to sample
-
-        Returns:
-            (k_sample, v_sample) tensors, shape: [num_samples, kv_heads, head_dim]
-        """
-        # Sample from the beginning of the block
-        k_sample = self.k_cache_cpu[layer_id, cpu_block_id, :num_samples].clone().cuda()
-        v_sample = self.v_cache_cpu[layer_id, cpu_block_id, :num_samples].clone().cuda()
-
-        # Record H2D transfer: K + V samples
-        transfer_bytes = 2 * k_sample.numel() * k_sample.element_size()
-        MemoryObserver.record_h2d(transfer_bytes, is_prefill=True)
-
-        return k_sample, v_sample
-
-    def load_block_full_from_cpu(
-        self,
-        cpu_block_id: int,
-        layer_id: int,
-    ) -> Tuple[Tensor, Tensor]:
-        """
-        Load full tokens from a CPU block for XAttention BSA computation.
-
-        This is used in the compute phase of XAttention BSA to load the full
-        data for selected important chunks.
-
-        Args:
-            cpu_block_id: Source CPU block ID
-            layer_id: Layer index
-
-        Returns:
-            (k_full, v_full) tensors, shape: [block_size, kv_heads, head_dim]
-        """
-        k_full = self.k_cache_cpu[layer_id, cpu_block_id].clone().cuda()
-        v_full = self.v_cache_cpu[layer_id, cpu_block_id].clone().cuda()
-
-        # Record H2D transfer: K + V full block
-        MemoryObserver.record_h2d(2 * self.gpu_block_bytes, is_prefill=True)
-
-        return k_full, v_full
 
     # ========== Sub-Block Gather & Load Methods ==========
-    # These methods enable sub-block level IO for sparse policies like COMPASS.
-    # Instead of loading full blocks, selected sub-blocks are gathered into a
-    # contiguous staging buffer on CPU, then bulk-transferred to a GPU slot.
 
-    def gather_subblocks_to_staging(
-        self,
-        layer_id: int,
-        selections: "List[Tuple[int, List[int]]]",
-        sub_block_size: int = 128,
-    ) -> int:
-        """
-        Gather selected sub-blocks from CPU cache into staging buffer.
-
-        Compacts sub-blocks from potentially many different blocks into a
-        contiguous pinned CPU staging buffer for efficient bulk H2D transfer.
-
-        Args:
-            layer_id: Layer index for CPU cache indexing.
-            selections: List of (cpu_block_id, sub_block_indices) tuples.
-                Each sub_block_index refers to a 128-token sub-block within
-                the block (0-indexed). E.g., sub_block_index=2 means
-                tokens [256:384] of the block.
-            sub_block_size: Tokens per sub-block (default 128).
-
-        Returns:
-            Total number of compacted tokens (= num_subblocks × sub_block_size).
-        """
-        offset = 0
-        for cpu_block_id, sub_indices in selections:
-            for si in sub_indices:
-                src_start = si * sub_block_size
-                src_end = src_start + sub_block_size
-                dst_end = offset + sub_block_size
-                # CPU→CPU pinned copy (fast, ~10 GB/s)
-                self.staging_k_cpu[offset:dst_end].copy_(
-                    self.k_cache_cpu[layer_id, cpu_block_id, src_start:src_end]
-                )
-                self.staging_v_cpu[offset:dst_end].copy_(
-                    self.v_cache_cpu[layer_id, cpu_block_id, src_start:src_end]
-                )
-                offset += sub_block_size
-        return offset
 
     def load_staging_to_slot(
         self,
@@ -1187,45 +891,4 @@ class OffloadEngine:
         max_tokens = max(per_head_tokens) if per_head_tokens else 0
         return max_tokens, per_head_tokens
 
-    def load_staging_to_slot_flat(
-        self,
-        slot_idx: int,
-        num_tokens: int,
-        layer_id: int = -1,
-        is_prefill: bool = True,
-    ) -> None:
-        """
-        Async H2D from flat staging buffer to GPU slot (flat view).
-
-        Both staging and GPU slot are viewed as [block_size * kv_heads, head_dim],
-        enabling per-head packed data to be transferred in a single bulk DMA.
-
-        Args:
-            slot_idx: Target GPU slot index.
-            num_tokens: Total tokens across all heads in staging.
-            layer_id: Layer index for NVTX labeling.
-            is_prefill: True if in prefill phase.
-        """
-        stream = self.slot_transfer_streams[slot_idx]
-
-        nvtx_label = f"H2D PerHead: L{layer_id} {num_tokens}tok->Slot[{slot_idx}]"
-        nvtx.push_range(message=nvtx_label, color="cyan")
-        with torch.cuda.stream(stream):
-            stream.wait_event(self.ring_slot_compute_done[slot_idx])
-            stream.wait_event(self.ring_slot_offload_done[slot_idx])
-
-            # Flat view: [block_size * kv_heads, head_dim]
-            gpu_k_flat = self.k_cache_gpu[slot_idx].view(-1, self.head_dim)
-            gpu_v_flat = self.v_cache_gpu[slot_idx].view(-1, self.head_dim)
-            stg_k_flat = self.staging_k_cpu.view(-1, self.head_dim)
-            stg_v_flat = self.staging_v_cpu.view(-1, self.head_dim)
-
-            gpu_k_flat[:num_tokens].copy_(stg_k_flat[:num_tokens], non_blocking=True)
-            gpu_v_flat[:num_tokens].copy_(stg_v_flat[:num_tokens], non_blocking=True)
-            self.ring_slot_ready[slot_idx].record(stream)
-        nvtx.pop_range()
-
-        # Record H2D transfer: per-head data is single-dim
-        transfer_bytes = 2 * num_tokens * self.head_dim * self.dtype_size
-        MemoryObserver.record_h2d(transfer_bytes, is_prefill=is_prefill)
 

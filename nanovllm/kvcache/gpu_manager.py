@@ -262,13 +262,6 @@ class GPUOnlyManager(KVCacheManager):
         """
         return [list(seq.block_table) for seq in seqs]
 
-    def post_attention_cleanup(
-        self,
-        seqs: List[Sequence],
-        is_prefill: bool,
-    ) -> None:
-        """No-op for GPU-only manager."""
-        pass
 
     def __repr__(self) -> str:
         return (

@@ -96,12 +96,15 @@ Introduce a `BaseCausalLM` and `BaseTransformerLayer` class. Subclasses should o
 
 A scan of the codebase reveals a significant amount of unreferenced code and unresolved TODOs that clutter the repository. 
 
-### Key Unused Code to Remove
-Based on static analysis, the following components are defined but rarely/never used and should be pruned to reduce technical debt:
-- **Unused Engine Classes:** `nanovllm/engine/block_manager.py:BlockManager`
-- **Unused Offload Mechanisms:** `nanovllm/kvcache/offload_engine.py:TransferEvent` and large portions of debug hook infrastructure (`register_debug_hook`, `remove_debug_hook`).
-- **Unused Quantization Utilities:** Several functions in `nanovllm/ops/tvm_qgemm/utils/quant.py` (e.g., `quantize_weight_per_tensor`, `dequantize_kcache_chunked`) appear orphaned.
-- **Base Policy Overrides:** Methods like `on_block_access`, `on_block_prefetched`, and `get_eviction_order` in `fifo_policy.py` and `lru_policy.py` are not invoked by the runner.
+### Cleaned Up (Completed)
+The following dead code has been identified and removed:
+- ~~**Unused Engine Classes:** `nanovllm/engine/block_manager.py:BlockManager`~~ *(Deleted)*
+- ~~**Unused Offload Mechanisms:** `nanovllm/kvcache/offload_engine.py:TransferEvent` and debug hook infrastructure~~ *(Removed)*
+- ~~**Unused Policy Methods:** `on_block_prefetched`, `on_block_deallocated` in eviction policies~~ *(Removed)*
+- ~~**Unused Quantization Stubs:** `nanovllm/kvcache/quant/packing_kernels.py`~~ *(Deleted)*
+
+### Remaining Items
+- **Quantization Utilities:** Several functions in `nanovllm/ops/tvm_qgemm/utils/quant.py` (e.g., `quantize_weight_per_tensor`, `dequantize_kcache_chunked`) appear orphaned but are used by the test suite.
 
 ### Stale TODOs
 The codebase contains over a dozen TODOs that represent neglected technical debt. Examples include:
@@ -110,5 +113,5 @@ The codebase contains over a dozen TODOs that represent neglected technical debt
 - `nanovllm/engine/model_runner.py`: "# TODO: In new GPU cache architecture (no layer dimension)..."
 
 ### Proposed Solution
-1. **Aggressive Pruning:** Delete the identified unused classes and methods. If they are meant for future use, they should be removed and introduced only when actually needed (YAGNI principle).
-2. **TODO Triage:** Convert critical TODOs into actionable GitHub/tracker issues and remove them from the source code to keep the files clean.
+1. **TODO Triage:** Convert critical TODOs into actionable GitHub/tracker issues and remove them from the source code to keep the files clean.
+

@@ -101,8 +101,6 @@ def record_h2d(cls, num_bytes: int, is_prefill: bool = True) -> None:
 | 方法 | 传输类型 | 说明 |
 |------|----------|------|
 | `load_to_slot_layer()` | H2D | 从 CPU 加载 block 到 GPU slot |
-| `load_block_sample_from_cpu()` | H2D | 采样加载（Quest） |
-| `load_block_full_from_cpu()` | H2D | 完整加载 block |
 | `offload_slot_layer_to_cpu()` | D2H | GPU slot 卸载到 CPU |
 | `offload_prefill_buffer_async()` | D2H | Prefill buffer 异步卸载 |
 | `write_to_prefill_buffer()` | D2D | 写入 prefill buffer |

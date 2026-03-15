@@ -35,9 +35,10 @@ CPU Memory (Pinned)                    Staging Buffer (Pinned)         GPU Slot
 
 | 方法 | 位置 | 功能 |
 |------|------|------|
-| `gather_subblocks_to_staging()` | `offload_engine.py` | CPU→CPU: 选中的 sub-blocks 聚合到 staging buffer |
 | `load_staging_to_slot()` | `offload_engine.py` | CPU→GPU: staging buffer 整体异步 H2D 到 GPU slot |
 | `SubBlockSelection` | `policy.py` | 数据结构: `entries = [(block_id, [sub_idx...])]` |
+
+> **Note**: `gather_subblocks_to_staging()` 已在死代码清理中移除，staging gather 逻辑现在内联于 `compass.py` 的 `compute_chunked_prefill` 中。
 
 ### Pipeline 设计
 
@@ -126,7 +127,7 @@ overall = mask.any(dim=0)              # union across H only
 | 文件 | 变更 |
 |------|------|
 | `nanovllm/config.py` | 新增 `compass_top_p` 字段 |
-| `nanovllm/kvcache/offload_engine.py` | 新增 staging buffer + `gather_subblocks_to_staging()` + `load_staging_to_slot()` |
+| `nanovllm/kvcache/offload_engine.py` | staging buffer + `load_staging_to_slot()` (注: `gather_subblocks_to_staging()` 已移除) |
 | `nanovllm/kvcache/sparse/policy.py` | 新增 `SubBlockSelection` dataclass |
 | `nanovllm/kvcache/sparse/compass.py` | 重写 `compute_chunked_prefill`（gather 管线）; 修复 top-p; 新增 BLASST L2 stats |
 | `tests/test_ruler.py` | 修复 `compass_top_p` 参数传递; 新增 L2 统计输出 |

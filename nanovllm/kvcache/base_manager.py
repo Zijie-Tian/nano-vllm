@@ -202,38 +202,6 @@ class KVCacheManager(ABC):
         """
         pass
 
-    def post_attention_cleanup(
-        self,
-        seqs: List[Sequence],
-        is_prefill: bool,
-    ) -> None:
-        """
-        Cleanup after attention computation.
-
-        Optional hook for managers to perform post-attention tasks:
-        - Offloading cold blocks to CPU
-        - Updating access statistics
-        - etc.
-
-        Default implementation does nothing.
-
-        Args:
-            seqs: Sequences that were processed
-            is_prefill: True for prefill phase, False for decode
-        """
-        pass
-
-    def get_num_blocks_needed(self, num_tokens: int) -> int:
-        """
-        Calculate number of blocks needed for given token count.
-
-        Args:
-            num_tokens: Number of tokens
-
-        Returns:
-            Number of blocks needed
-        """
-        return (num_tokens + self.block_size - 1) // self.block_size
 
     @staticmethod
     def compute_hash(token_ids: list, prefix: int = -1) -> int:

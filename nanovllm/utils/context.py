@@ -22,11 +22,6 @@ class Context:
     chunk_offset: int = 0
     # Reference to kvcache manager for loading previous KV (HybridKVCacheManager)
     kvcache_manager: Any = None
-    # Current layer's previous K/V chunks (loaded from CPU)
-    # Set by model_runner before each layer's forward
-    prev_kv_chunks: List[Tuple[torch.Tensor, torch.Tensor]] = field(
-        default_factory=list
-    )
     # Current sequence being processed (for chunked prefill to load KV)
     chunked_seq: Any = None
     # Position within block for decode (used for reading from Decode region)

@@ -139,20 +139,9 @@ class HybridKVCacheManager(KVCacheManager):
         self.free_cpu_blocks: deque[int] = deque(range(num_cpu_blocks))
         self.cpu_block_to_logical: Dict[int, int] = {}  # cpu_block -> logical_id
 
-        # Prefix cache (uses logical block IDs)
-        # NOTE: Currently WRITE-ONLY in offload mode - hashes are stored but never
-        # > used for cache hit detection. This is intentional: offload mode always
-        # > allocates new blocks and doesn't reuse existing ones.
-        self.hash_to_logical_id: Dict[int, int] = {}
-
-        # Step counter for policy
-        self.current_step = 0
 
         # Offload engine (set by allocate_cache)
         self.offload_engine: Optional[OffloadEngine] = None
-
-        # Track blocks pending GPU load (for decode graph)
-        self.pending_gpu_loads: Set[int] = set()  # logical_ids
 
         # Track blocks that have been prefilled (KV written) for chunked prefill
         self.prefilled_blocks: Set[int] = set()  # logical_ids
@@ -314,106 +303,8 @@ class HybridKVCacheManager(KVCacheManager):
             "Use run_chunked_offload_prefill/decode instead."
         )
 
-    def post_attention_cleanup(
-        self,
-        seqs: List[Sequence],
-        is_prefill: bool,
-    ) -> None:
-        """
-        Cleanup after attention.
 
-        In ring buffer mode, this is a no-op because offload is handled
-        directly in the chunked prefill/decode paths.
-        """
-        pass
-
-    # ========== Ring Buffer CPU-primary Chunked Prefill Support ==========
-
-    def get_prefilled_cpu_blocks(self, seq: Sequence) -> List[int]:
-        """
-        Get list of CPU block IDs for blocks that have been prefilled.
-
-        Used for loading previous KV during chunked prefill.
-
-        Returns:
-            List of CPU block IDs in sequence order
-        """
-        cpu_blocks = []
-        for logical_id in seq.block_table:
-            if logical_id in self.prefilled_blocks:
-                block = self.logical_blocks[logical_id]
-                if block.location == BlockLocation.CPU:
-                    cpu_blocks.append(block.cpu_block_id)
-        # logger.debug(
-        #     f"get_prefilled_cpu_blocks: prefilled_blocks={list(self.prefilled_blocks)}, "
-        #     f"returned cpu_blocks={cpu_blocks}"
-        # )
-        return cpu_blocks
-
-    # ========== Ring Buffer CPU-primary support ==========
-
-    def allocate_cpu_only(self, seq: Sequence) -> None:
-        """
-        Allocate CPU blocks for sequence (for ring buffer mode).
-
-        Unlike allocate(), here all blocks are allocated to CPU,
-        GPU is only used as ring buffer for computation.
-
-        Args:
-            seq: Sequence to allocate
-        """
-        assert not seq.block_table, "Sequence already has blocks"
-
-        for i in range(seq.num_blocks):
-            # Allocate CPU block
-            if not self.free_cpu_blocks:
-                raise RuntimeError(
-                    f"No free CPU blocks. Need {seq.num_blocks}, "
-                    f"available: {len(self.free_cpu_blocks)}"
-                )
-
-            cpu_block_id = self.free_cpu_blocks.popleft()
-
-            # Allocate logical block
-            logical_id = self.free_logical_ids.popleft()
-            block = self.logical_blocks[logical_id]
-            block.ref_count = 1
-            block.location = BlockLocation.CPU
-            block.cpu_block_id = cpu_block_id
-            block.gpu_slot = -1
-
-            self.cpu_block_to_logical[cpu_block_id] = logical_id
-            seq.block_table.append(logical_id)
-
-            # NOTE: Prefix cache disabled in offload mode
-            # If enabled, would compute hash and update:
-            #   h = self.compute_hash(seq.block(i), prefix_hash)
-            #   block.hash = h
-            #   self.hash_to_logical_id[h] = logical_id
-
-    def get_cpu_block_table(self, seq: Sequence) -> List[int]:
-        """
-        Get CPU block ID list for sequence.
-
-        Args:
-            seq: Sequence
-
-        Returns:
-            List of CPU block IDs in sequence order
-        """
-        cpu_blocks = []
-        for logical_id in seq.block_table:
-            block = self.logical_blocks[logical_id]
-            if block.location == BlockLocation.CPU:
-                cpu_blocks.append(block.cpu_block_id)
-            else:
-                # If block is on GPU, it should have a corresponding CPU block
-                # In ring buffer mode, all data ultimately resides on CPU
-                raise RuntimeError(
-                    f"Block {logical_id} not on CPU (location={block.location}). "
-                    f"In ring buffer mode, all blocks should be on CPU."
-                )
-        return cpu_blocks
+    # ========== CPU Block Access Methods ==========
 
     def get_all_cpu_blocks(self, seq: Sequence) -> Tuple[List[int], List[int]]:
         """
@@ -483,20 +374,71 @@ class HybridKVCacheManager(KVCacheManager):
             return block.cpu_block_id
         return -1
 
-    def get_write_slot_for_chunked_offload(self, seq: Sequence) -> int:
+
+    # ========== Ring Buffer CPU-primary Chunked Prefill Support ==========
+
+    def get_prefilled_cpu_blocks(self, seq: Sequence) -> List[int]:
         """
-        Get GPU slot for writing new KV during chunked offload decode.
+        Get list of CPU block IDs for blocks that have been prefilled.
 
-        In ring buffer design, always use decode_slot (slot[0]) to write new KV.
-        This avoids conflicts with loading operations which use slots[1:].
-
-        Args:
-            seq: Sequence
+        Used for loading previous KV during chunked prefill.
 
         Returns:
-            GPU slot ID (always decode_slot = 0)
+            List of CPU block IDs in sequence order
         """
-        return self.offload_engine.decode_slot
+        cpu_blocks = []
+        for logical_id in seq.block_table:
+            if logical_id in self.prefilled_blocks:
+                block = self.logical_blocks[logical_id]
+                if block.location == BlockLocation.CPU:
+                    cpu_blocks.append(block.cpu_block_id)
+        # logger.debug(
+        #     f"get_prefilled_cpu_blocks: prefilled_blocks={list(self.prefilled_blocks)}, "
+        #     f"returned cpu_blocks={cpu_blocks}"
+        # )
+        return cpu_blocks
+
+    # ========== Ring Buffer CPU-primary support ==========
+
+    def allocate_cpu_only(self, seq: Sequence) -> None:
+        """
+        Allocate CPU blocks for sequence (for ring buffer mode).
+
+        Unlike allocate(), here all blocks are allocated to CPU,
+        GPU is only used as ring buffer for computation.
+
+        Args:
+            seq: Sequence to allocate
+        """
+        assert not seq.block_table, "Sequence already has blocks"
+
+        for i in range(seq.num_blocks):
+            # Allocate CPU block
+            if not self.free_cpu_blocks:
+                raise RuntimeError(
+                    f"No free CPU blocks. Need {seq.num_blocks}, "
+                    f"available: {len(self.free_cpu_blocks)}"
+                )
+
+            cpu_block_id = self.free_cpu_blocks.popleft()
+
+            # Allocate logical block
+            logical_id = self.free_logical_ids.popleft()
+            block = self.logical_blocks[logical_id]
+            block.ref_count = 1
+            block.location = BlockLocation.CPU
+            block.cpu_block_id = cpu_block_id
+            block.gpu_slot = -1
+
+            self.cpu_block_to_logical[cpu_block_id] = logical_id
+            seq.block_table.append(logical_id)
+
+            # NOTE: Prefix cache disabled in offload mode
+            # If enabled, would compute hash and update:
+            #   h = self.compute_hash(seq.block(i), prefix_hash)
+            #   block.hash = h
+            #   self.hash_to_logical_id[h] = logical_id
+
 
     def get_decode_start_pos(self, seq: Sequence) -> int:
         """

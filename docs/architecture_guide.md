@@ -17,8 +17,9 @@ Two-phase scheduling system:
 - **Prefill phase**: Processes prompt tokens
 - **Decode phase**: Generates output tokens autoregressively
 
-### BlockManager (`block_manager.py`)
-- Paged attention implementation
+### KV Cache Managers
+- **GPUOnlyManager** (`kvcache/gpu_manager.py`): GPU-only paged attention
+- **HybridKVCacheManager** (`kvcache/hybrid_manager.py`): CPU offload with ring buffer design
 - Prefix caching using xxhash
 - Default block size: 4096 tokens
 
