@@ -97,6 +97,7 @@ The architecture consists of 4 core modules:
 | [`docs/compass_tmac_l1_batching.md`](docs/compass_tmac_l1_batching.md) | COMPASS TMAC L1 批量化优化全记录：32 线程 M 维度并行、pre-compute per-head 优化、端到端 benchmark（4.7s/层）、Python 封装开销分析（`_preprocess_q_per_head` 占 81%）以及下一步优化路径。 |
 | [`docs/compass_torch_gemm_migration.md`](docs/compass_torch_gemm_migration.md) | COMPASS Torch GEMM estimation: TMAC→Torch migration, BLASST-consistent per-token scoring algorithm, BMM optimization, and benchmark results. |
 | [`docs/compass_analysis.md`](docs/compass_analysis.md) | COMPASS pooled top-p analysis: GPU Q pooling optimization, CPU profiling breakdown, BLASST λ sweep, top_p sweep, two-level sparsity constraint, per-head IO directions. |
+| [`docs/compass_subblock_compacted_transfer.md`](docs/compass_subblock_compacted_transfer.md) | COMPASS sub-block compacted transfer: gather+bulk H2D pipeline, top-p Q-aggregation fix, two-stage (L1 CPU + L2 GPU) pruning results. |
 | [`docs/ao_cpu_gemm_benchmark.md`](docs/ao_cpu_gemm_benchmark.md) | ao (torchao) CPU GEMM 算子全面扫描：6 个可用算子对比、`_weight_int4pack_mm_for_cpu` 量化方法详解、int4 vs FP32 性能 benchmark、COMPASS 外推分析。 |
 
 ---
