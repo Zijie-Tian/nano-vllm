@@ -62,3 +62,4 @@ bash run.sh llama3.1-8b-chat synthetic --metric full --task niah_single_1,vt,qa_
 - NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.
 - Never save working files, text/mds and tests to the root folder.
 - 添加新文档时，必须同步更新 `GEMINI.md` 和 `CLAUDE.md` 的文档引用表。
+- When updating the `nanovllm` submodule, ALWAYS ensure it is checked out to the `tzj/minference` branch.

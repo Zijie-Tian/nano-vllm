@@ -152,6 +152,9 @@ class NanoVLLMModel:
         sparse_chunk_size = generation_kwargs.pop('sparse_chunk_size', 16384)
         sparse_use_triton = generation_kwargs.pop('sparse_use_triton', True)
 
+        # BLASST specific parameters
+        blasst_fixed_lambda = generation_kwargs.pop('blasst_fixed_lambda', None)
+
         # Extract nano-vllm specific configuration
         max_model_len = generation_kwargs.pop('max_model_len', 128 * 1024)
         enable_cpu_offload = generation_kwargs.pop('enable_cpu_offload', True)
@@ -176,6 +179,10 @@ class NanoVLLMModel:
             "sparse_chunk_size": sparse_chunk_size,
             "sparse_use_triton": sparse_use_triton,
         }
+
+        # Add BLASST parameters if specified
+        if blasst_fixed_lambda is not None:
+            llm_kwargs["blasst_fixed_lambda"] = blasst_fixed_lambda
 
         # Add dtype if specified (required for some models like Qwen2.5)
         if dtype:
