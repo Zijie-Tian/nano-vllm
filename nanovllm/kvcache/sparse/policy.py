@@ -78,6 +78,47 @@ class SubBlockSelection:
         return self.total_subblocks * self.sub_block_size
 
 
+@dataclass
+class PerHeadSubBlockSelection:
+    """Per-KV-head sub-block selection for per-head compacted transfer.
+
+    Each KV head has its own list of selected sub-blocks, enabling
+    independent per-head gather, transfer, and attention computation.
+    """
+
+    per_head_entries: List  # [H][(cpu_block_id, [sub_block_indices])]
+    """per_head_entries[h] = list of (cpu_block_id, sub_block_indices) for KV head h."""
+
+    sub_block_size: int = 128
+    """Tokens per sub-block."""
+
+    num_kv_heads: int = 1
+    """Number of KV heads."""
+
+    per_head_num_subblocks: List = None  # type: ignore
+    """Number of selected sub-blocks per head."""
+
+    def __post_init__(self):
+        if self.per_head_num_subblocks is None:
+            self.per_head_num_subblocks = [
+                sum(len(subs) for _, subs in entries)
+                for entries in self.per_head_entries
+            ]
+
+    @property
+    def total_subblocks(self) -> int:
+        return sum(self.per_head_num_subblocks)
+
+    @property
+    def per_head_tokens(self) -> List:
+        """Number of selected tokens per head."""
+        return [n * self.sub_block_size for n in self.per_head_num_subblocks]
+
+    @property
+    def total_tokens(self) -> int:
+        return self.total_subblocks * self.sub_block_size
+
+
 class SparsePolicy(ABC):
     """
     Abstract base class for sparse attention policies.

@@ -1131,3 +1131,101 @@ class OffloadEngine:
         # Record H2D transfer: only the compacted amount
         transfer_bytes = 2 * num_tokens * self.num_kv_heads * self.head_dim * self.dtype_size
         MemoryObserver.record_h2d(transfer_bytes, is_prefill=is_prefill)
+
+    def gather_subblocks_per_head(
+        self,
+        layer_id: int,
+        per_head_selections: "List[List]",  # [H][(bid, [si...])]
+        sub_block_size: int = 128,
+        head_offset: int = 0,
+    ) -> "Tuple[int, List[int]]":
+        """
+        Per-head gather into structured staging buffer [block_size, kv_heads, head_dim].
+
+        Each head's selected sub-blocks are written into the staging buffer at
+        the correct head dimension, packed contiguously along the token axis.
+        This preserves the [tokens, heads, head_dim] interleaved layout that matches
+        both the staging buffer and GPU slot shapes.
+
+        E.g., for head h with 3 sub-blocks of 128 tokens each:
+            staging_k[0:128, h, :] = sub-block 0
+            staging_k[128:256, h, :] = sub-block 1
+            staging_k[256:384, h, :] = sub-block 2
+
+        Args:
+            layer_id: Layer index for CPU cache indexing.
+            per_head_selections: [H] lists of (cpu_block_id, sub_block_indices).
+            sub_block_size: Tokens per sub-block (default 128).
+            head_offset: Starting KV head index (for single-head calls, pass the
+                actual head index so the correct head's data is read from CPU cache).
+
+        Returns:
+            max_tokens: Maximum tokens across all heads (for H2D transfer sizing).
+            per_head_tokens: [H] list of token counts per head.
+        """
+        per_head_tokens = []
+
+        for h_local, head_sels in enumerate(per_head_selections):
+            h_actual = h_local + head_offset
+            token_offset = 0
+            for cpu_block_id, sub_indices in head_sels:
+                for si in sub_indices:
+                    src_start = si * sub_block_size
+                    src_end = src_start + sub_block_size
+                    dst_start = token_offset
+                    dst_end = token_offset + sub_block_size
+                    # Write into structured staging: [dst_start:dst_end, h_actual, :]
+                    self.staging_k_cpu[dst_start:dst_end, h_actual, :].copy_(
+                        self.k_cache_cpu[layer_id, cpu_block_id, src_start:src_end, h_actual, :]
+                    )
+                    self.staging_v_cpu[dst_start:dst_end, h_actual, :].copy_(
+                        self.v_cache_cpu[layer_id, cpu_block_id, src_start:src_end, h_actual, :]
+                    )
+                    token_offset += sub_block_size
+            per_head_tokens.append(token_offset)
+
+        max_tokens = max(per_head_tokens) if per_head_tokens else 0
+        return max_tokens, per_head_tokens
+
+    def load_staging_to_slot_flat(
+        self,
+        slot_idx: int,
+        num_tokens: int,
+        layer_id: int = -1,
+        is_prefill: bool = True,
+    ) -> None:
+        """
+        Async H2D from flat staging buffer to GPU slot (flat view).
+
+        Both staging and GPU slot are viewed as [block_size * kv_heads, head_dim],
+        enabling per-head packed data to be transferred in a single bulk DMA.
+
+        Args:
+            slot_idx: Target GPU slot index.
+            num_tokens: Total tokens across all heads in staging.
+            layer_id: Layer index for NVTX labeling.
+            is_prefill: True if in prefill phase.
+        """
+        stream = self.slot_transfer_streams[slot_idx]
+
+        nvtx_label = f"H2D PerHead: L{layer_id} {num_tokens}tok->Slot[{slot_idx}]"
+        nvtx.push_range(message=nvtx_label, color="cyan")
+        with torch.cuda.stream(stream):
+            stream.wait_event(self.ring_slot_compute_done[slot_idx])
+            stream.wait_event(self.ring_slot_offload_done[slot_idx])
+
+            # Flat view: [block_size * kv_heads, head_dim]
+            gpu_k_flat = self.k_cache_gpu[slot_idx].view(-1, self.head_dim)
+            gpu_v_flat = self.v_cache_gpu[slot_idx].view(-1, self.head_dim)
+            stg_k_flat = self.staging_k_cpu.view(-1, self.head_dim)
+            stg_v_flat = self.staging_v_cpu.view(-1, self.head_dim)
+
+            gpu_k_flat[:num_tokens].copy_(stg_k_flat[:num_tokens], non_blocking=True)
+            gpu_v_flat[:num_tokens].copy_(stg_v_flat[:num_tokens], non_blocking=True)
+            self.ring_slot_ready[slot_idx].record(stream)
+        nvtx.pop_range()
+
+        # Record H2D transfer: per-head data is single-dim
+        transfer_bytes = 2 * num_tokens * self.head_dim * self.dtype_size
+        MemoryObserver.record_h2d(transfer_bytes, is_prefill=is_prefill)
+
