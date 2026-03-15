@@ -285,6 +285,16 @@ def get_rope(
                 rope_scaling["original_max_position_embeddings"],
                 is_interleaved,
             )
+        elif rope_type == "dynamic":
+            cache_key = (
+                head_size,
+                rotary_dim,
+                max_position,
+                base,
+                "dynamic",
+                rope_scaling.get("factor", 1.0),
+                is_interleaved,
+            )
         else:
             cache_key = (
                 head_size,
@@ -318,6 +328,14 @@ def get_rope(
                     "original_max_position_embeddings"
                 ],
             )
+        elif rope_type == "dynamic":
+            # Dynamic NTK-aware RoPE: scale base frequency by factor
+            factor = rope_scaling.get("factor", 1.0)
+            scaled_base = base * factor ** (rotary_dim / (rotary_dim - 2))
+            if is_interleaved:
+                rope = GLM4RotaryEmbedding(head_size, rotary_dim, max_position, scaled_base)
+            else:
+                rope = RotaryEmbedding(head_size, rotary_dim, max_position, scaled_base)
         else:
             raise ValueError(f"Unsupported rope_type: {rope_type}")
 
