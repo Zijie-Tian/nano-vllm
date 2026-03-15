@@ -454,7 +454,7 @@ def run_ruler_benchmark(
             if blasst_lambda is not None:
                 llm_kwargs["lambda_threshold"] = blasst_lambda
             if compass_top_p is not None:
-                llm_kwargs["top_p"] = compass_top_p
+                llm_kwargs["compass_top_p"] = compass_top_p
         elif sparse_policy_type == SparsePolicyType.BLASST:
             if blasst_lambda is not None:
                 llm_kwargs["blasst_fixed_lambda"] = blasst_lambda
@@ -513,7 +513,13 @@ def run_ruler_benchmark(
                 print(f"  Chunks: {stats['num_chunks']}")
                 print(f"  Selected sub-blocks: {stats['selected_subblocks']}/{stats['total_subblocks']}")
                 print(f"  Selection rate: {stats['select_rate']:.3f}")
-                print(f"  Sub-block pruning: {stats['io_reduction'] * 100:.1f}%")
+                print(f"  Sub-block pruning (L1 CPU): {stats['io_reduction'] * 100:.1f}%")
+                if stats.get('blasst_total_blocks', 0) > 0:
+                    blasst_pruning = (1.0 - stats['blasst_density']) * 100
+                    print(f"  BLASST density (L2 GPU):     {stats['blasst_density']:.3f}")
+                    print(f"  BLASST pruning (L2 GPU):     {blasst_pruning:.1f}%")
+                    overall = stats['select_rate'] * stats['blasst_density']
+                    print(f"  Overall compute density:     {overall:.3f} ({(1-overall)*100:.1f}% total pruning)")
                 if stats.get('prof_calls', 0) > 0:
                     total_cpu = (stats['prof_sync'] + stats['prof_q_cpu']
                                  + stats['prof_q_pool'] + stats['prof_k_collect']

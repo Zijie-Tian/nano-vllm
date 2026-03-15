@@ -53,6 +53,31 @@ class PolicyContext:
     """Total KV sequence length so far (for reference)."""
 
 
+@dataclass
+class SubBlockSelection:
+    """Sub-block level selection result for gather-based transfer.
+
+    Used by policies like COMPASS that select at sub-block (e.g., 128-token)
+    granularity. The entries list specifies which sub-blocks to gather from
+    each CPU block.
+    """
+
+    entries: List  # List[Tuple[int, List[int]]] — (cpu_block_id, [sub_block_indices])
+    """Each entry is (cpu_block_id, list_of_sub_block_indices).
+    Sub-block index i refers to tokens [i*sub_block_size : (i+1)*sub_block_size]."""
+
+    sub_block_size: int = 128
+    """Tokens per sub-block."""
+
+    @property
+    def total_subblocks(self) -> int:
+        return sum(len(subs) for _, subs in self.entries)
+
+    @property
+    def total_tokens(self) -> int:
+        return self.total_subblocks * self.sub_block_size
+
+
 class SparsePolicy(ABC):
     """
     Abstract base class for sparse attention policies.

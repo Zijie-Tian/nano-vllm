@@ -221,6 +221,23 @@ class OffloadEngine:
             f"  GPU memory: {gpu_mem_mb:.1f} MB, CPU memory: {cpu_mem_mb:.1f} MB"
         )
 
+        # ========== Staging buffers for sub-block gather ==========
+        # Used by COMPASS to compact selected sub-blocks before bulk H2D transfer.
+        # CPU staging: pinned memory for gather, shape [block_size, kv_heads, head_dim]
+        # One staging buffer is sufficient since CPU gather is fast and serial.
+        self.staging_k_cpu = torch.zeros(
+            block_size, num_kv_heads, head_dim,
+            dtype=dtype, device="cpu", pin_memory=True,
+        )
+        self.staging_v_cpu = torch.zeros(
+            block_size, num_kv_heads, head_dim,
+            dtype=dtype, device="cpu", pin_memory=True,
+        )
+        staging_mb = (
+            2 * block_size * num_kv_heads * head_dim * dtype.itemsize / (1024 * 1024)
+        )
+        logger.info(f"  Sub-block staging buffers: {staging_mb:.1f} MB (Pinned CPU)")
+
         # ========== Transfer streams for async operations ==========
         self.transfer_streams = [torch.cuda.Stream() for _ in range(num_streams)]
         # IMPORTANT: Create a dedicated compute stream (not default stream!)
@@ -1028,3 +1045,89 @@ class OffloadEngine:
         MemoryObserver.record_h2d(2 * self.gpu_block_bytes, is_prefill=True)
 
         return k_full, v_full
+
+    # ========== Sub-Block Gather & Load Methods ==========
+    # These methods enable sub-block level IO for sparse policies like COMPASS.
+    # Instead of loading full blocks, selected sub-blocks are gathered into a
+    # contiguous staging buffer on CPU, then bulk-transferred to a GPU slot.
+
+    def gather_subblocks_to_staging(
+        self,
+        layer_id: int,
+        selections: "List[Tuple[int, List[int]]]",
+        sub_block_size: int = 128,
+    ) -> int:
+        """
+        Gather selected sub-blocks from CPU cache into staging buffer.
+
+        Compacts sub-blocks from potentially many different blocks into a
+        contiguous pinned CPU staging buffer for efficient bulk H2D transfer.
+
+        Args:
+            layer_id: Layer index for CPU cache indexing.
+            selections: List of (cpu_block_id, sub_block_indices) tuples.
+                Each sub_block_index refers to a 128-token sub-block within
+                the block (0-indexed). E.g., sub_block_index=2 means
+                tokens [256:384] of the block.
+            sub_block_size: Tokens per sub-block (default 128).
+
+        Returns:
+            Total number of compacted tokens (= num_subblocks × sub_block_size).
+        """
+        offset = 0
+        for cpu_block_id, sub_indices in selections:
+            for si in sub_indices:
+                src_start = si * sub_block_size
+                src_end = src_start + sub_block_size
+                dst_end = offset + sub_block_size
+                # CPU→CPU pinned copy (fast, ~10 GB/s)
+                self.staging_k_cpu[offset:dst_end].copy_(
+                    self.k_cache_cpu[layer_id, cpu_block_id, src_start:src_end]
+                )
+                self.staging_v_cpu[offset:dst_end].copy_(
+                    self.v_cache_cpu[layer_id, cpu_block_id, src_start:src_end]
+                )
+                offset += sub_block_size
+        return offset
+
+    def load_staging_to_slot(
+        self,
+        slot_idx: int,
+        num_tokens: int,
+        layer_id: int = -1,
+        is_prefill: bool = True,
+    ) -> None:
+        """
+        Async H2D transfer from staging buffer to a GPU slot.
+
+        Uses the per-slot transfer stream and records the ring_slot_ready event,
+        so callers can use wait_slot_layer() just like regular load_to_slot_layer.
+
+        Args:
+            slot_idx: Target GPU slot index.
+            num_tokens: Number of valid tokens in staging buffer.
+            layer_id: Layer index for NVTX labeling (-1 = not specified).
+            is_prefill: True if in prefill phase.
+        """
+        stream = self.slot_transfer_streams[slot_idx]
+
+        nvtx_label = f"H2D Gather: L{layer_id} {num_tokens}tok->Slot[{slot_idx}]"
+        nvtx.push_range(message=nvtx_label, color="magenta")
+        with torch.cuda.stream(stream):
+            # Wait for previous compute on this slot to complete
+            stream.wait_event(self.ring_slot_compute_done[slot_idx])
+            stream.wait_event(self.ring_slot_offload_done[slot_idx])
+
+            # H2D: only transfer num_tokens worth of data (not full block)
+            self.k_cache_gpu[slot_idx, :num_tokens].copy_(
+                self.staging_k_cpu[:num_tokens], non_blocking=True
+            )
+            self.v_cache_gpu[slot_idx, :num_tokens].copy_(
+                self.staging_v_cpu[:num_tokens], non_blocking=True
+            )
+            self.ring_slot_ready[slot_idx].record(stream)
+        nvtx.pop_range()
+
+        # Record H2D transfer: only the compacted amount
+        transfer_bytes = 2 * num_tokens * self.num_kv_heads * self.head_dim * self.dtype_size
+        MemoryObserver.record_h2d(transfer_bytes, is_prefill=is_prefill)
