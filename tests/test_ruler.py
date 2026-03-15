@@ -365,6 +365,7 @@ def run_ruler_benchmark(
     sparse_block_size: int = 128,
     sparse_stride: int = 8,
     blasst_lambda: float = None,
+    compass_top_p: float = None,
     dtype: str = None,
 ) -> Dict:
     """
@@ -452,9 +453,11 @@ def run_ruler_benchmark(
         elif sparse_policy_type == SparsePolicyType.COMPASS:
             if blasst_lambda is not None:
                 llm_kwargs["lambda_threshold"] = blasst_lambda
+            if compass_top_p is not None:
+                llm_kwargs["top_p"] = compass_top_p
         elif sparse_policy_type == SparsePolicyType.BLASST:
             if blasst_lambda is not None:
-                llm_kwargs["fixed_lambda"] = blasst_lambda
+                llm_kwargs["blasst_fixed_lambda"] = blasst_lambda
 
     # Factory function for fresh_llm mode
     def create_llm():
@@ -508,9 +511,22 @@ def run_ruler_benchmark(
                 print("COMPASS Block Selection Statistics")
                 print(f"{'=' * 60}")
                 print(f"  Chunks: {stats['num_chunks']}")
-                print(f"  Selected blocks: {stats['selected_blocks']}/{stats['total_blocks']}")
+                print(f"  Selected sub-blocks: {stats['selected_subblocks']}/{stats['total_subblocks']}")
                 print(f"  Selection rate: {stats['select_rate']:.3f}")
-                print(f"  IO reduction: {stats['io_reduction'] * 100:.1f}%")
+                print(f"  Sub-block pruning: {stats['io_reduction'] * 100:.1f}%")
+                if stats.get('prof_calls', 0) > 0:
+                    total_cpu = (stats['prof_sync'] + stats['prof_q_cpu']
+                                 + stats['prof_q_pool'] + stats['prof_k_collect']
+                                 + stats['prof_matmul'] + stats['prof_topp']
+                                 + stats['prof_mask_build'])
+                    print(f"\n  CPU Time Breakdown ({stats['prof_calls']} calls, {total_cpu:.3f}s total):")
+                    print(f"    cuda.sync:   {stats['prof_sync']:.3f}s  ({stats['prof_sync']/max(total_cpu,1e-9)*100:5.1f}%)")
+                    print(f"    q.cpu():     {stats['prof_q_cpu']:.3f}s  ({stats['prof_q_cpu']/max(total_cpu,1e-9)*100:5.1f}%)")
+                    print(f"    Q pooling:   {stats['prof_q_pool']:.3f}s  ({stats['prof_q_pool']/max(total_cpu,1e-9)*100:5.1f}%)")
+                    print(f"    K collect:   {stats['prof_k_collect']:.3f}s  ({stats['prof_k_collect']/max(total_cpu,1e-9)*100:5.1f}%)")
+                    print(f"    cos matmul:  {stats['prof_matmul']:.3f}s  ({stats['prof_matmul']/max(total_cpu,1e-9)*100:5.1f}%)")
+                    print(f"    top-p sel:   {stats['prof_topp']:.3f}s  ({stats['prof_topp']/max(total_cpu,1e-9)*100:5.1f}%)")
+                    print(f"    mask build:  {stats['prof_mask_build']:.3f}s  ({stats['prof_mask_build']/max(total_cpu,1e-9)*100:5.1f}%)")
 
     # Cleanup (only if not fresh_llm mode, since fresh mode cleans up itself)
     if llm is not None:
@@ -728,6 +744,12 @@ if __name__ == "__main__":
         help="BLASST: fixed threshold lambda (overrides dynamic formula)",
     )
     parser.add_argument(
+        "--compass-top-p",
+        type=float,
+        default=None,
+        help="COMPASS: top-p threshold for CPU sub-block selection (default: 0.9)",
+    )
+    parser.add_argument(
         "--dtype",
         type=str,
         default=None,
@@ -771,6 +793,7 @@ if __name__ == "__main__":
         sparse_block_size=args.sparse_block_size,
         sparse_stride=args.sparse_stride,
         blasst_lambda=args.blasst_lambda,
+        compass_top_p=args.compass_top_p,
         dtype=args.dtype,
     )
 

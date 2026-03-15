@@ -2,19 +2,23 @@
 COMPASS sparse attention policy for chunked prefill.
 
 Two-tier sparse attention pipeline:
-- Tier 1 (CPU, coarse): Torch FP32 GEMM on FP16 k_cache_cpu filters which
-  4096-token blocks to load
-- Tier 2 (GPU, fine): BLASST dynamically prunes sub-blocks within loaded blocks
+- Tier 1 (CPU, coarse): Pooled cosine similarity + softmax + top-p selection
+  produces a block-sparse mask at 128-token sub-block granularity
+- Tier 2 (GPU, fine): BLASST dynamically prunes within the CPU-selected sub-blocks
 
-select_blocks uses CPU torch GEMM prediction to filter available blocks.
-compute_chunked_prefill uses BLASST-like attention with dynamic pruning on
-the CPU-pre-filtered block subset.
+Key design:
+- IO granularity: 4096-token chunks (offload_engine block_size)
+- Selection granularity: 128-token sub-blocks (FINE_GRAIN)
+- CPU produces a sub-block mask → converted to BLASST mask_buffer
+- BLASST further prunes sub-blocks dynamically via softmax thresholding
 """
 
 import logging
 import math
+import time
 import torch
-from typing import List, Optional, TYPE_CHECKING
+import torch.nn.functional as F
+from typing import List, Optional, Dict, TYPE_CHECKING
 
 from .policy import SparsePolicy, PolicyContext
 
@@ -30,26 +34,31 @@ class COMPASSPolicy(SparsePolicy):
     """
     COMPASS sparse attention policy with two-tier sparsity.
 
-    Tier 1 (CPU): Torch FP32 GEMM in select_blocks filters coarse 4096-token blocks.
-    Tier 2 (GPU): BLASST dynamic pruning in compute_chunked_prefill on loaded blocks.
+    Tier 1 (CPU): Pooled cosine similarity + softmax + top-p → sub-block mask
+                   at 128-token granularity. Passed to BLASST as mask_buffer.
+    Tier 2 (GPU): BLASST dynamic pruning on top of the CPU mask.
+
+    Selection granularity: 128 tokens (sub-block)
+    IO granularity: 4096 tokens (chunk)
     """
 
     supports_prefill = True
     supports_decode = True
 
-    # Estimation granularity (tokens per fine-grained sub-block)
+    # Selection granularity (tokens per sub-block for CPU estimation)
     FINE_GRAIN = 128
 
     def __init__(
         self,
         lambda_threshold: float = 0.001,
+        top_p: float = 0.9,
         **kwargs,
     ):
-        """Initialize with parameters for CPU estimation and BLASST GPU attention."""
         self._stats_num_chunks = 0
-        self._stats_selected_blocks = 0
-        self._stats_total_blocks = 0
+        self._stats_selected_subblocks = 0
+        self._stats_total_subblocks = 0
         self.lambda_threshold = lambda_threshold
+        self.top_p = top_p
 
         # Model dimensions (set during alloc_policy_metadata)
         self._num_heads: int = 0
@@ -59,6 +68,24 @@ class COMPASSPolicy(SparsePolicy):
         # Q buffer for metadata tracking
         self._q_buffer: Optional[torch.Tensor] = None
         self._q_chunk_sizes: list[int] = []
+
+        # Pooled K cache: layer_id -> {cpu_block_id -> pooled_k tensor}
+        # Each pooled_k has shape [num_subblocks, kv_heads, head_dim] in FP32
+        self._k_pooled_cache: Dict[int, Dict[int, torch.Tensor]] = {}
+
+        # Per-block sub-block mask from CPU estimation
+        # layer_id -> {cpu_block_id -> bool tensor [num_subblocks]}
+        self._block_masks: Dict[int, Dict[int, torch.Tensor]] = {}
+
+        # Profiling accumulators
+        self._prof_sync = 0.0
+        self._prof_q_cpu = 0.0
+        self._prof_q_pool = 0.0
+        self._prof_k_collect = 0.0
+        self._prof_matmul = 0.0
+        self._prof_topp = 0.0
+        self._prof_mask_build = 0.0
+        self._prof_calls = 0
 
     # ========================================================================
     # Initialization
@@ -75,7 +102,6 @@ class COMPASSPolicy(SparsePolicy):
         enable_cpu_offload: bool = False,
         num_layers: int = 64,
     ) -> None:
-        """Allocate CPU buffers for COMPASS estimation."""
         if not enable_cpu_offload:
             return
 
@@ -83,148 +109,204 @@ class COMPASSPolicy(SparsePolicy):
         self._num_kv_heads = num_kv_heads
         self._head_dim = head_dim
 
-        logger.info("[COMPASS] Allocating metadata buffers (torch GEMM mode)...")
+        logger.info("[COMPASS] Allocating metadata buffers (pooled top-p mode)...")
 
-        # Q buffer: [num_layers, max_seq_len, num_heads, head_dim]
         self._q_buffer = torch.zeros(
             (num_layers, max_seq_len, num_heads, head_dim),
             dtype=dtype, device="cpu", pin_memory=True,
         )
 
-        q_mb = self._q_buffer.numel() * self._q_buffer.element_size() / (1024 * 1024)
-        logger.info(f"[COMPASS] Allocated Q buffer: {q_mb:.1f} MB (Pinned CPU)")
-        logger.info("[COMPASS] Using torch FP32 CPU GEMM for block estimation "
-                     "(reads k_cache_cpu directly from OffloadEngine)")
+        # Dedicated stream for metadata GPU→CPU transfers (non-blocking)
+        self._metadata_stream = torch.cuda.Stream()
 
+        # Pre-allocated pinned CPU buffer for pooled Q
+        # Shape: [max_q_groups, num_kv_heads, head_dim] in FP32
+        max_q_groups = max_seq_len // self.FINE_GRAIN + 1
+        self._q_pooled_cpu_buf = torch.zeros(
+            (max_q_groups, num_kv_heads, head_dim),
+            dtype=torch.float32, device='cpu',
+        ).pin_memory()
+
+        q_mb = self._q_buffer.numel() * self._q_buffer.element_size() / (1024 * 1024)
+        qp_kb = self._q_pooled_cpu_buf.numel() * 4 / 1024
+        logger.info(f"[COMPASS] Allocated Q buffer: {q_mb:.1f} MB (Pinned CPU)")
+        logger.info(f"[COMPASS] Allocated pooled Q buffer: {qp_kb:.1f} KB (Pinned CPU)")
+        logger.info(f"[COMPASS] Metadata stream created")
+        logger.info(f"[COMPASS] Selection granularity: {self.FINE_GRAIN} tokens, "
+                     f"top_p={self.top_p}")
+
+        self._k_pooled_cache = {lid: {} for lid in range(num_layers)}
+        self._block_masks = {lid: {} for lid in range(num_layers)}
         self._q_chunk_sizes = []
 
     # ========================================================================
-    # CPU Torch GEMM Estimation
+    # Pooling & Estimation Helpers
     # ========================================================================
 
-    def _estimate_blocks_torch(
+    @staticmethod
+    def _pool_and_normalize(
+        x: torch.Tensor,
+        pool_size: int = 128,
+    ) -> torch.Tensor:
+        """Mean pool tokens into groups and L2 normalize for cosine similarity.
+
+        Args:
+            x: [seq_len, heads, dim] tensor.
+            pool_size: Number of tokens per pool group.
+
+        Returns:
+            [num_groups, heads, dim] pooled & L2-normalized tensor in FP32.
+        """
+        seq_len, heads, dim = x.shape
+        num_groups = seq_len // pool_size
+        if num_groups == 0:
+            pooled = x.float().mean(dim=0, keepdim=True)
+        else:
+            aligned = num_groups * pool_size
+            x_aligned = x[:aligned].float()
+            x_grouped = x_aligned.reshape(num_groups, pool_size, heads, dim)
+            pooled = x_grouped.mean(dim=1)
+
+        pooled = F.normalize(pooled, p=2, dim=-1)
+        return pooled
+
+    def _precompute_pooled_k_gpu(
+        self,
+        k_cache_gpu: torch.Tensor,
+        layer_id: int,
+        cpu_block_id: int,
+        num_tokens: int,
+    ) -> None:
+        """Compute pooled & normalized K on GPU, then store tiny result on CPU.
+
+        Called from on_prefill_offload BEFORE D2H copy, using GPU-resident k_cache.
+        The pooled result is ~32KB per block (vs ~2MB for full K), so the
+        GPU→CPU transfer of the pooled tensor is negligible.
+        """
+        # k_cache_gpu: [block_size, kv_heads, head_dim] on GPU
+        k_block = k_cache_gpu[:num_tokens]  # [num_tokens, kv_heads, head_dim]
+        # Compute on GPU: mean pool + L2 normalize
+        pooled_k_gpu = self._pool_and_normalize(k_block, self.FINE_GRAIN)
+        # Transfer only the tiny pooled result to CPU (~32 × H × D × 4 = ~32KB)
+        self._k_pooled_cache[layer_id][cpu_block_id] = pooled_k_gpu.cpu()
+
+    # ========================================================================
+    # CPU Pooled Estimation (128-token sub-block granularity)
+    # ========================================================================
+
+    def _estimate_subblock_mask(
         self,
         layer_id: int,
-        q_cpu: torch.Tensor,
+        q_pooled: torch.Tensor,
         available_blocks: list,
-        offload_engine: "OffloadEngine",
         block_size: int,
-        ln_lambda: float,
-    ) -> list:
-        """
-        Estimate which blocks to keep using torch FP32 CPU GEMM.
+    ) -> Dict[int, torch.Tensor]:
+        """Estimate which 128-token sub-blocks to keep using pooled cosine
+        similarity + softmax + top-p.
 
-        BLASST-consistent algorithm: for each Q-group (128 tokens), computes
-        full Q @ K^T * sm_scale per Q head, then uses per-token max logit
-        (m_local) vs running max (m_global) for skip decisions. Exactly matches
-        the BLASST Triton kernel's logic:
-            m_local = max(Q @ K^T * sm_scale, axis=kv_dim)  # per Q-token
-            diff = m_local - m_global                        # per Q-token
-            skip if max(diff) < ln(λ)                        # block-level
+        Algorithm:
+        1. (done by caller) Pool Q on GPU, GQA fold, L2 normalize, transfer to CPU
+        2. Collect pre-computed pooled K for available blocks → [G_k, H_kv, D]
+        3. Per KV head: Q_h @ K_h^T → [G_q, G_k] (cosine similarity)
+        4. Softmax per row → probability distribution
+        5. Top-p per row → selected K sub-blocks
+        6. Union across all rows and heads → sub-block mask per IO block
 
         Args:
             layer_id: Current layer index.
-            q_cpu: Query tensor on CPU, shape [q_len, num_heads, head_dim].
-            available_blocks: List of CPU block IDs to evaluate.
-            offload_engine: OffloadEngine with k_cache_cpu.
-            block_size: Tokens per block (4096).
-            ln_lambda: ln(lambda_threshold) for BLASST threshold.
+            q_pooled: Pre-pooled Q on CPU [G_q, num_kv_heads, head_dim] (FP32).
+            available_blocks: List of CPU block IDs.
+            block_size: Tokens per IO block (4096).
 
         Returns:
-            List of selected block IDs.
+            Dict mapping cpu_block_id → bool tensor [num_subblocks_in_block]
+            True = keep sub-block, False = skip
         """
         fine_grain = self.FINE_GRAIN  # 128
-        num_q_groups = q_cpu.shape[0] // fine_grain
         num_fine_per_block = block_size // fine_grain  # 32
-        heads_per_group = self._num_heads // self._num_kv_heads
-        sm_scale = 1.0 / (self._head_dim ** 0.5)
 
-        # Build sub-block index: [(block_id, sub_idx_in_block), ...]
-        # Each sub-block is fine_grain (128) tokens
-        subblock_info = []
+        G_q = q_pooled.shape[0]
+
+        if G_q == 0:
+            # Return all-True masks
+            return {bid: torch.ones(num_fine_per_block, dtype=torch.bool)
+                    for bid in available_blocks}
+
+        # 2. Collect pooled K
+        t_start = time.perf_counter()
+        pooled_k_list = []
+        subblock_to_block = []  # Maps global sub-block idx → (block_id, local_sub_idx)
+
         for bid in available_blocks:
-            for si in range(num_fine_per_block):
-                subblock_info.append((bid, si))
+            if bid not in self._k_pooled_cache.get(layer_id, {}):
+                logger.warning(f"[COMPASS] Pooled K cache miss for layer={layer_id}, block={bid}")
+                return {bid: torch.ones(num_fine_per_block, dtype=torch.bool)
+                        for bid in available_blocks}
 
-        if not subblock_info:
-            return available_blocks
+            pk = self._k_pooled_cache[layer_id][bid]
+            pooled_k_list.append(pk)
+            for si in range(pk.shape[0]):
+                subblock_to_block.append((bid, si))
 
-        num_subblocks = len(subblock_info)
+        if not pooled_k_list:
+            return {}
 
-        # Pre-load all K blocks from CPU cache: [num_blocks, block_size, kv_heads, head_dim]
-        k_blocks = torch.stack([
-            offload_engine.k_cache_cpu[layer_id, bid]
-            for bid in available_blocks
-        ], dim=0).float()  # [num_blocks, block_size, kv_heads, head_dim]
-
-        num_blocks = len(available_blocks)
-        k_subblocks = k_blocks.reshape(
-            num_blocks * num_fine_per_block, fine_grain,
-            self._num_kv_heads, self._head_dim,
-        )  # [S, F, H, D]
-
-        q_float = q_cpu.float()  # [q_len, num_heads, head_dim]
-
-        G = num_q_groups
+        k_pooled = torch.cat(pooled_k_list, dim=0)  # [G_k, kv_heads, D]
+        G_k = k_pooled.shape[0]
         H = self._num_kv_heads
-        S = num_subblocks       # total sub-blocks
-        F = fine_grain          # 128
-        D = self._head_dim      # 128
-        hpg = heads_per_group   # heads per GQA group
+        t_k_collect = time.perf_counter()
+        self._prof_k_collect += t_k_collect - t_start
 
-        # Truncate Q to aligned length (drop trailing tokens < fine_grain)
-        aligned_len = G * F
-        if aligned_len == 0:
-            return available_blocks
-        q_float = q_float[:aligned_len]  # [G*F, num_heads, D]
+        # 3. Compute cosine similarity + softmax
+        q_t = q_pooled.permute(1, 0, 2)  # [H, G_q, D]
+        k_t = k_pooled.permute(1, 2, 0)  # [H, D, G_k]
+        scores = torch.bmm(q_t, k_t)     # [H, G_q, G_k]
+        probs = torch.softmax(scores, dim=-1)  # [H, G_q, G_k]
+        t_matmul = time.perf_counter()
+        self._prof_matmul += t_matmul - t_k_collect
 
-        # --- BLASST-consistent: keep per-token Q, no averaging ---
+        # 4. Vectorized top-p selection (no Python loop)
+        # Sort all [H, G_q, G_k] rows at once
+        sorted_probs, sorted_indices = torch.sort(probs, dim=-1, descending=True)
+        cumsum = torch.cumsum(sorted_probs, dim=-1)  # [H, G_q, G_k]
 
-        # Prepare K: [S, F, H, D] → [H, D, S*F] (transposed for matmul)
-        k_flat = k_subblocks.permute(2, 0, 1, 3).reshape(H, S * F, D)
-        k_flat_T = k_flat.transpose(1, 2).contiguous()  # [H, D, S*F]
+        # Mask: include elements until cumsum exceeds top_p (+1 boundary element)
+        # Shift right: position 0 is always True, position i checks cumsum[i-1]
+        mask_in_sorted = torch.cat([
+            torch.ones(H, G_q, 1, dtype=torch.bool),
+            cumsum[:, :, :-1] <= self.top_p,
+        ], dim=-1)  # [H, G_q, G_k]
 
-        # Process per Q-group to manage CPU memory.
-        # For each Q-group g (F=128 tokens):
-        #   Q_g: [F, num_heads, D] → GQA reshape → [H, hpg*F, D]
-        #   BMM: [H, hpg*F, D] @ [H, D, S*F] → [H, hpg*F, S*F]
-        #   Reshape → [H, hpg, F_q, S, F_k], amax over (F_q, F_k) → [H, hpg, S]
-        #   Apply BLASST threshold per (kv_head, q_head) pair
-        overall_selected = torch.zeros(S, dtype=torch.bool)
+        # Scatter back to original index space
+        selected_mask = torch.zeros_like(probs, dtype=torch.bool)  # [H, G_q, G_k]
+        selected_mask.scatter_(2, sorted_indices, mask_in_sorted)
 
-        for g in range(G):
-            q_g = q_float[g * F : (g + 1) * F]  # [F, num_heads, D]
+        # Union across all heads and Q groups
+        overall_selected = selected_mask.any(dim=0).any(dim=0)  # [G_k]
+        t_topp = time.perf_counter()
+        self._prof_topp += t_topp - t_matmul
 
-            # GQA reshape: [F, num_heads, D] → [F, H, hpg, D] → [H, hpg*F, D]
-            q_g = q_g.reshape(F, H, hpg, D)
-            q_g = q_g.permute(1, 2, 0, 3).reshape(H, hpg * F, D)
+        # 5. Build per-block sub-block masks
+        block_masks: Dict[int, torch.Tensor] = {}
+        for bid in available_blocks:
+            pk = self._k_pooled_cache[layer_id][bid]
+            num_sub = pk.shape[0]
+            block_masks[bid] = torch.ones(num_sub, dtype=torch.bool)
 
-            # BMM: [H, hpg*F, D] @ [H, D, S*F] → [H, hpg*F, S*F]
-            scores_g = torch.bmm(q_g, k_flat_T) * sm_scale
+        for idx in range(G_k):
+            bid, si = subblock_to_block[idx]
+            block_masks[bid][si] = overall_selected[idx]
 
-            # Reshape: [H, hpg, F_q, S, F_k]
-            scores_g = scores_g.reshape(H, hpg, F, S, F)
+        t_mask = time.perf_counter()
+        self._prof_mask_build += t_mask - t_topp
 
-            # Per (kv_head, q_head, sub-block): max logit over Q & K tokens
-            # This matches BLASST's m_local = max(qk, axis=kv_dim) per Q-token,
-            # then max_diff = max(diff, axis=q_dim) for skip decision
-            m_local_g = scores_g.amax(dim=(2, 4))  # [H, hpg, S]
+        # Stats
+        total_sub = G_k
+        selected_sub = overall_selected.sum().item()
+        self._stats_total_subblocks += total_sub
+        self._stats_selected_subblocks += selected_sub
 
-            # BLASST threshold: m_global = max over all sub-blocks
-            m_global_g = m_local_g.amax(dim=2, keepdim=True)  # [H, hpg, 1]
-            thresholds_g = m_global_g + ln_lambda
-
-            # Select: any (kv_head, q_head) keeps this sub-block
-            selected_g = (m_local_g >= thresholds_g).any(dim=(0, 1))  # [S]
-            overall_selected |= selected_g
-
-        # Aggregate: sub-block index → block ID
-        selected_block_set = set()
-        for idx in overall_selected.nonzero(as_tuple=True)[0].tolist():
-            bid, _ = subblock_info[idx]
-            selected_block_set.add(bid)
-
-        return [b for b in available_blocks if b in selected_block_set]
+        return block_masks
 
     # ========================================================================
     # Block selection
@@ -238,18 +320,15 @@ class COMPASSPolicy(SparsePolicy):
         q: torch.Tensor,
         k: torch.Tensor,
     ) -> List[int]:
-        """
-        Select blocks using CPU torch GEMM prediction during prefill.
+        """Select blocks and compute sub-block masks at 128-token granularity.
 
-        Splits Q chunk (4096 tokens) into Q-groups of 128 tokens.
-        Each Q-group independently estimates importance of all K sub-blocks
-        (128 tokens each) using torch FP32 GEMM with BLASST relative threshold:
-            score >= m_global + ln(λ)
+        The sub-block masks are stored and later applied as mask_buffer
+        in compute_chunked_prefill.
 
-        Takes union across all Q-groups, then aggregates to 4096-token IO blocks.
-        During decode, returns all blocks.
+        Returns all available_blocks for IO (since IO is at 4096-token level),
+        but sets internal masks at 128-token sub-block level.
         """
-        # Save Q to buffer for metadata tracking
+        # Save Q to buffer
         if q is not None and self._q_buffer is not None:
             start_idx = ctx.total_kv_len
             seq_len = q.shape[0]
@@ -257,110 +336,162 @@ class COMPASSPolicy(SparsePolicy):
             if ctx.layer_id == 0:
                 self._q_chunk_sizes.append(seq_len)
 
-        # Track statistics (across ALL layers for correct IO reduction)
-        self._stats_total_blocks += len(available_blocks)
         if ctx.layer_id == 0:
             self._stats_num_chunks += 1
 
-        # During decode or no blocks: return all
+        # During decode or no blocks: return all, no mask
         if not ctx.is_prefill or not available_blocks:
-            self._stats_selected_blocks += len(available_blocks)
             return available_blocks
 
-        # --- CPU Torch GEMM Sparse Estimation ---
-        # Synchronize to ensure offload has written K data to k_cache_cpu
-        torch.cuda.synchronize()
+        self._prof_calls += 1
+        heads_per_group = self._num_heads // self._num_kv_heads
 
-        ln_lambda = math.log(self.lambda_threshold)
-        q_cpu = q.cpu()
+        # 1. Synchronize to ensure previous GPU work (including pooled K) is done
+        t0 = time.perf_counter()
+        torch.cuda.current_stream().synchronize()
+        t1 = time.perf_counter()
+        self._prof_sync += t1 - t0
 
-        selected = self._estimate_blocks_torch(
+        # 2. GPU-side Q pooling + GQA fold (fast on GPU)
+        q_pooled_gpu = self._pool_and_normalize(q, self.FINE_GRAIN)
+        G_q = q_pooled_gpu.shape[0]
+        # GQA fold on GPU: [G_q, H, D] → [G_q, H_kv, hpg, D] → mean → [G_q, H_kv, D]
+        q_pooled_gpu = q_pooled_gpu.reshape(G_q, self._num_kv_heads, heads_per_group, self._head_dim)
+        q_pooled_gpu = q_pooled_gpu.mean(dim=2)  # [G_q, H_kv, D]
+        t2 = time.perf_counter()
+        self._prof_q_pool += t2 - t1
+
+        # 3. Async transfer pooled Q to pinned CPU buffer (~128KB vs 32MB)
+        with torch.cuda.stream(self._metadata_stream):
+            self._q_pooled_cpu_buf[:G_q].copy_(q_pooled_gpu, non_blocking=True)
+        self._metadata_stream.synchronize()
+        q_pooled_cpu = self._q_pooled_cpu_buf[:G_q].clone()  # snapshot
+        t3 = time.perf_counter()
+        self._prof_q_cpu += t3 - t2
+
+        # 4. CPU-side estimation using pre-pooled Q
+        block_masks = self._estimate_subblock_mask(
             layer_id=ctx.layer_id,
-            q_cpu=q_cpu,
+            q_pooled=q_pooled_cpu,
             available_blocks=available_blocks,
-            offload_engine=offload_engine,
             block_size=ctx.block_size,
-            ln_lambda=ln_lambda,
         )
+        t4 = time.perf_counter()
 
-        # Logging
-        self._stats_selected_blocks += len(selected)
-        density_block = len(selected) / max(len(available_blocks), 1) * 100
+        # Store masks for use in compute_chunked_prefill
+        self._block_masks[ctx.layer_id] = block_masks
+
+        # Compute and log statistics
+        total_sub = sum(m.numel() for m in block_masks.values())
+        selected_sub = sum(m.sum().item() for m in block_masks.values())
+        density = selected_sub / max(total_sub, 1) * 100
+
         logger.info(
             f"[COMPASS] layer={ctx.layer_id}, chunk={ctx.query_chunk_idx}, "
-            f"blocks: {len(selected)}/{len(available_blocks)} ({density_block:.1f}%), "
-            f"λ={self.lambda_threshold}"
+            f"sub-blocks: {int(selected_sub)}/{total_sub} ({density:.1f}%), "
+            f"top_p={self.top_p}"
         )
 
-        return selected
+        # Return ALL blocks for IO (sub-block filtering is via mask_buffer)
+        # Optimization: skip blocks where ALL sub-blocks are masked
+        io_blocks = [bid for bid in available_blocks
+                     if bid in block_masks and block_masks[bid].any()]
+        return io_blocks
 
     # ========================================================================
     # Statistics
     # ========================================================================
 
     def reset_stats(self) -> None:
-        """Reset statistics."""
         self._stats_num_chunks = 0
-        self._stats_selected_blocks = 0
-        self._stats_total_blocks = 0
+        self._stats_selected_subblocks = 0
+        self._stats_total_subblocks = 0
 
     def get_stats(self) -> dict:
-        """Get statistics including IO reduction."""
         select_rate = 0.0
         io_reduction = 0.0
-        if self._stats_total_blocks > 0:
-            select_rate = self._stats_selected_blocks / self._stats_total_blocks
+        if self._stats_total_subblocks > 0:
+            select_rate = self._stats_selected_subblocks / self._stats_total_subblocks
             io_reduction = 1.0 - select_rate
         return {
             "num_chunks": self._stats_num_chunks,
-            "selected_blocks": self._stats_selected_blocks,
-            "total_blocks": self._stats_total_blocks,
+            "selected_subblocks": self._stats_selected_subblocks,
+            "total_subblocks": self._stats_total_subblocks,
             "select_rate": select_rate,
             "io_reduction": io_reduction,
+            "prof_calls": self._prof_calls,
+            "prof_sync": self._prof_sync,
+            "prof_q_cpu": self._prof_q_cpu,
+            "prof_q_pool": self._prof_q_pool,
+            "prof_k_collect": self._prof_k_collect,
+            "prof_matmul": self._prof_matmul,
+            "prof_topp": self._prof_topp,
+            "prof_mask_build": self._prof_mask_build,
         }
 
     # ========================================================================
-    # GPU-only methods (non-chunked) - Not supported
+    # GPU-only methods - Not supported
     # ========================================================================
 
     def compute_prefill(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        cu_seqlens_q: torch.Tensor,
-        cu_seqlens_k: torch.Tensor,
-        max_seqlen_q: int,
-        max_seqlen_k: int,
-        softmax_scale: float,
-        layer_id: int,
-        block_tables=None,
+        self, q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
+        softmax_scale, layer_id, block_tables=None,
     ) -> torch.Tensor:
-        """GPU-only prefill - not supported, use FullAttentionPolicy instead."""
-        raise NotImplementedError(
-            "COMPASS policy only supports chunked prefill mode. "
-            "Use FullAttentionPolicy for GPU-only mode."
-        )
+        raise NotImplementedError("COMPASS only supports chunked prefill mode.")
 
     def compute_decode(
-        self,
-        q: torch.Tensor,
-        k_cache: torch.Tensor,
-        v_cache: torch.Tensor,
-        cache_seqlens: torch.Tensor,
-        softmax_scale: float,
-        layer_id: int,
-        block_tables=None,
+        self, q, k_cache, v_cache, cache_seqlens, softmax_scale, layer_id, block_tables=None,
     ) -> torch.Tensor:
-        """GPU-only decode - not supported, use FullAttentionPolicy instead."""
-        raise NotImplementedError(
-            "COMPASS policy only supports chunked decode mode. "
-            "Use FullAttentionPolicy for GPU-only mode."
-        )
+        raise NotImplementedError("COMPASS only supports chunked decode mode.")
 
     # ========================================================================
-    # Chunked offload methods — BLASST-like GPU attention
+    # Chunked offload methods — BLASST-like GPU attention with CPU mask
     # ========================================================================
+
+    def _build_mask_buffer(
+        self,
+        block_id: int,
+        layer_id: int,
+        q_len: int,
+        kv_len: int,
+        num_heads: int,
+        device: torch.device,
+    ) -> Optional[torch.Tensor]:
+        """Convert 128-token sub-block mask to BLASST mask_buffer format.
+
+        BLASST mask_buffer shape: [grid_0, grid_1, num_kv_blocks]
+        - grid_0 = ceil(q_len / BLOCK_M), where BLOCK_M = 128
+        - grid_1 = num_heads (batch=1)
+        - num_kv_blocks = ceil(kv_len / BLOCK_N), where BLOCK_N = 64
+
+        Our sub-block mask is at 128-token granularity.
+        Each 128-token sub-block → 2 BLASST BLOCK_N's (64 tokens each).
+        """
+        BLOCK_M = 128
+        BLOCK_N = 64
+        grid_0 = (q_len + BLOCK_M - 1) // BLOCK_M
+        num_kv_blocks = (kv_len + BLOCK_N - 1) // BLOCK_N
+
+        masks = self._block_masks.get(layer_id, {})
+        if block_id not in masks:
+            return None
+
+        submask = masks[block_id]  # [num_128_subblocks] bool
+        num_subblocks = submask.shape[0]
+
+        # Expand 128-token mask → 64-token BLASST blocks (each sub-block = 2 BLOCK_N's)
+        expanded = submask.repeat_interleave(self.FINE_GRAIN // BLOCK_N)
+        # Pad or truncate to match num_kv_blocks
+        if expanded.shape[0] < num_kv_blocks:
+            expanded = F.pad(expanded, (0, num_kv_blocks - expanded.shape[0]), value=True)
+        elif expanded.shape[0] > num_kv_blocks:
+            expanded = expanded[:num_kv_blocks]
+
+        # Build [grid_0, grid_1, num_kv_blocks] mask
+        # Same mask for all Q groups and all heads (CPU selects globally)
+        mask = expanded.to(torch.int8).unsqueeze(0).unsqueeze(0)
+        mask = mask.expand(grid_0, num_heads, num_kv_blocks).contiguous().to(device)
+        return mask
 
     def compute_chunked_prefill(
         self,
@@ -376,52 +507,25 @@ class COMPASSPolicy(SparsePolicy):
         num_tokens: int,
         selected_blocks: List[int],
     ) -> torch.Tensor:
-        """
-        Compute attention with BLASST-like dynamic pruning on CPU-pre-filtered blocks.
-
-        The selected_blocks have already been filtered by CPU torch GEMM prediction.
-        This method applies BLASST dynamic pruning on top for fine-grained sparsity.
-        """
+        """Compute attention with CPU sub-block mask + BLASST dynamic pruning."""
         from nanovllm.ops.chunked_attention import (
             merge_attention_outputs_flashinfer as merge_attention_outputs,
         )
         from nanovllm.ops.blasst_chunked_prefill import blasst_chunked_prefill
 
-        total_seq_len = len(seq) if seq else num_tokens
         lambda_val = self.lambda_threshold
         ln_lambda = math.log(lambda_val)
 
         q_len = q.shape[0]
         num_heads = q.shape[1]
         compute_stream = offload_engine.compute_stream
-        q_input = q.unsqueeze(0).transpose(1, 2).contiguous()  # [1, num_heads, q_len, head_dim]
+        q_input = q.unsqueeze(0).transpose(1, 2).contiguous()
 
         historical_o = None
         historical_lse = None
-        historical_m_global = None  # Running max for BLASST pruning
+        historical_m_global = None
 
         TRITON_BLOCK_M, TRITON_BLOCK_N = 128, 64
-        grid_0 = (q_len + TRITON_BLOCK_M - 1) // TRITON_BLOCK_M
-        grid_1 = num_heads
-        num_kv_subblocks = kvcache_manager.block_size // TRITON_BLOCK_N
-
-        def get_mask_buffer(is_causal=False, kv_len_override=None):
-            num_sub = (
-                num_kv_subblocks
-                if kv_len_override is None
-                else (kv_len_override + TRITON_BLOCK_N - 1) // TRITON_BLOCK_N
-            )
-            mask = torch.ones(
-                (grid_0, grid_1, num_sub), device=q.device, dtype=torch.int8
-            )
-            if is_causal:
-                for q_idx in range(grid_0):
-                    q_end_pos = (q_idx + 1) * TRITON_BLOCK_M
-                    for kv_idx in range(num_sub):
-                        kv_start_pos = kv_idx * TRITON_BLOCK_N
-                        if kv_start_pos >= q_end_pos:
-                            mask[q_idx, :, kv_idx] = 0
-            return mask
 
         logger.debug(
             f"[COMPASS] compute_chunked_prefill: layer={layer_id}, "
@@ -429,7 +533,7 @@ class COMPASSPolicy(SparsePolicy):
             f"selected_blocks={len(selected_blocks)}"
         )
 
-        # 1. Process CPU-pre-filtered historical blocks with BLASST pruning
+        # 1. Process historical blocks with CPU mask + BLASST
         cpu_block_table = selected_blocks
         if cpu_block_table:
             load_slots = list(range(offload_engine.num_ring_slots))
@@ -450,8 +554,13 @@ class COMPASSPolicy(SparsePolicy):
                     prev_k, prev_v = offload_engine.get_kv_for_slot(current_slot)
                     k_input = prev_k.transpose(1, 2).contiguous()
                     v_input = prev_v.transpose(1, 2).contiguous()
+                    kv_len = k_input.shape[2]
 
-                    mask_buffer = get_mask_buffer(is_causal=False)
+                    # Build mask_buffer from CPU sub-block selection
+                    block_id = cpu_block_table[block_idx]
+                    mask_buffer = self._build_mask_buffer(
+                        block_id, layer_id, q_len, kv_len, num_heads, q.device
+                    )
 
                     out, lse, m_global_out = blasst_chunked_prefill(
                         q=q_input,
@@ -462,7 +571,6 @@ class COMPASSPolicy(SparsePolicy):
                         mask_buffer=mask_buffer,
                     )
 
-                    # Update running max for next kernel call
                     if historical_m_global is None:
                         historical_m_global = m_global_out
                     else:
@@ -490,7 +598,7 @@ class COMPASSPolicy(SparsePolicy):
                         cpu_block_table[next_block_idx],
                     )
 
-        # 2. Process current prefill chunk (GPU buffer, causal)
+        # 2. Process current prefill chunk (causal, no CPU mask)
         with torch.cuda.stream(compute_stream):
             k_curr, v_curr = offload_engine.get_prefill_buffer_slice(
                 layer_id, num_tokens
@@ -500,17 +608,13 @@ class COMPASSPolicy(SparsePolicy):
 
             kv_offset = len(selected_blocks) * kvcache_manager.block_size
 
-            curr_mask_buffer = get_mask_buffer(
-                is_causal=False, kv_len_override=num_tokens
-            )
-
             out_curr, lse_curr, _ = blasst_chunked_prefill(
                 q=q_input,
                 k=k_curr_input,
                 v=v_curr_input,
                 threshold_ln_lambda=ln_lambda,
                 m_global_in=historical_m_global,
-                mask_buffer=curr_mask_buffer,
+                mask_buffer=None,  # No CPU mask for current chunk (causal handles it)
                 is_causal=True,
                 kv_offset=kv_offset,
             )
@@ -527,7 +631,6 @@ class COMPASSPolicy(SparsePolicy):
                     historical_o, historical_lse, block_o, block_lse
                 )
 
-        # 3. Finalize
         torch.cuda.default_stream().wait_stream(compute_stream)
         return final_o.squeeze(0)
 
@@ -541,31 +644,29 @@ class COMPASSPolicy(SparsePolicy):
         seq: "Sequence",
         selected_blocks: List[int],
     ) -> torch.Tensor:
-        """
-        Compute attention for chunked decode.
-        Falls back to FullAttentionPolicy for decode phase.
-        """
         from .full_policy import FullAttentionPolicy
-
-        logger.debug(
-            f"[COMPASS] compute_chunked_decode using FullAttentionPolicy, "
-            f"layer={layer_id}, selected_blocks={len(selected_blocks)}"
-        )
-
         fallback_policy = FullAttentionPolicy()
         return fallback_policy.compute_chunked_decode(
-            q,
-            layer_id,
-            softmax_scale,
-            offload_engine,
-            kvcache_manager,
-            seq,
-            selected_blocks,
+            q, layer_id, softmax_scale, offload_engine, kvcache_manager, seq, selected_blocks,
         )
 
     # ========================================================================
     # Offload hooks
     # ========================================================================
+
+    def on_prefill_offload(
+        self,
+        cpu_block_id: int,
+        layer_id: int,
+        k_cache: torch.Tensor,
+        num_valid_tokens: int,
+    ) -> None:
+        """Hook called BEFORE GPU→CPU copy with GPU-resident k_cache.
+
+        Computes pooled K on GPU and stores the tiny result on CPU.
+        This avoids waiting for D2H completion and leverages GPU speed.
+        """
+        self._precompute_pooled_k_gpu(k_cache, layer_id, cpu_block_id, num_valid_tokens)
 
     def offload_prefill_chunk(
         self,
@@ -575,10 +676,8 @@ class COMPASSPolicy(SparsePolicy):
         num_tokens: int,
         **kwargs,
     ) -> None:
-        """Offload prefill chunk. K data is saved to k_cache_cpu by OffloadEngine."""
-        # No additional processing needed — k_cache_cpu is populated by the
-        # offload engine's standard D2H path, and we read from it directly
-        # in _estimate_blocks_torch.
+        # on_prefill_offload is called inside super() with GPU k_cache data
+        # → pooled K is computed on GPU before D2H copy
         super().offload_prefill_chunk(
             offload_engine, layer_id, cpu_block_id, num_tokens, **kwargs
         )
@@ -593,4 +692,4 @@ class COMPASSPolicy(SparsePolicy):
         super().offload_decode_chunk(offload_engine, layer_id, cpu_block_id, **kwargs)
 
     def __repr__(self) -> str:
-        return f"COMPASSPolicy(lambda={self.lambda_threshold})"
+        return f"COMPASSPolicy(top_p={self.top_p}, lambda={self.lambda_threshold})"
