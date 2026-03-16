@@ -8,3 +8,7 @@
 [submodule "3rdparty/ao"]
 	path = 3rdparty/ao
 	url = git@github.com:Zijie-Tian/ao.git
+[submodule "3rdparty/vllm"]
+	path = 3rdparty/vllm
+	url = git@github.com:Zijie-Tian/vllm.git
+	branch = tzj/minference
