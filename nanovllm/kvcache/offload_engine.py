@@ -873,19 +873,29 @@ class OffloadEngine:
             h_actual = h_local + head_offset
             token_offset = 0
             for cpu_block_id, sub_indices in head_sels:
-                for si in sub_indices:
-                    src_start = si * sub_block_size
-                    src_end = src_start + sub_block_size
+                # Coalesce contiguous sub-indices into runs to minimize copy_() calls.
+                # E.g., [0,1,2,5,6] → [(0,3), (5,2)] → 2 copies instead of 5.
+                i = 0
+                while i < len(sub_indices):
+                    run_start = sub_indices[i]
+                    run_len = 1
+                    while (i + run_len < len(sub_indices)
+                           and sub_indices[i + run_len] == run_start + run_len):
+                        run_len += 1
+
+                    n_tok = run_len * sub_block_size
+                    src_start = run_start * sub_block_size
+                    src_end = src_start + n_tok
                     dst_start = token_offset
-                    dst_end = token_offset + sub_block_size
-                    # Write into structured staging: [dst_start:dst_end, h_actual, :]
+                    dst_end = token_offset + n_tok
                     self.staging_k_cpu[dst_start:dst_end, h_actual, :].copy_(
                         self.k_cache_cpu[layer_id, cpu_block_id, src_start:src_end, h_actual, :]
                     )
                     self.staging_v_cpu[dst_start:dst_end, h_actual, :].copy_(
                         self.v_cache_cpu[layer_id, cpu_block_id, src_start:src_end, h_actual, :]
                     )
-                    token_offset += sub_block_size
+                    token_offset += n_tok
+                    i += run_len
             per_head_tokens.append(token_offset)
 
         max_tokens = max(per_head_tokens) if per_head_tokens else 0

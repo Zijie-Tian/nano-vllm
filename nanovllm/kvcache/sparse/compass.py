@@ -18,6 +18,7 @@ import math
 import time
 import torch
 import torch.nn.functional as F
+import nvtx
 from typing import List, Optional, Dict, TYPE_CHECKING
 
 from .policy import SparsePolicy, PolicyContext, SubBlockSelection, PerHeadSubBlockSelection
@@ -509,9 +510,13 @@ class COMPASSPolicy(SparsePolicy):
 
             per_head_o_list = []
             per_head_lse_list = []
-            slot = 0
             # m_global starts fresh each chunk — DO NOT persist across chunks.
             per_head_mgin: list = [None] * kv_heads
+
+            # Double-buffered async pipeline: alternate between 2 GPU slots
+            # to overlap GPU compute (BLASST) with CPU gather + H2D transfer.
+            NUM_PIPELINE_SLOTS = 2
+            pipeline_slots = [0, 1]
 
             for h in range(kv_heads):
                 if selection.per_head_tokens[h] == 0:
@@ -534,28 +539,49 @@ class COMPASSPolicy(SparsePolicy):
                 ]
 
                 head_o, head_lse, mgin_h = None, None, None
+                batch_idx = 0
 
+                num_batches = (len(flat_subs) + max_subs_per_batch - 1) // max_subs_per_batch
                 for batch_start in range(0, len(flat_subs), max_subs_per_batch):
                     batch_subs = flat_subs[batch_start:batch_start + max_subs_per_batch]
                     batch_tokens = len(batch_subs) * fine_grain
+                    curr_slot = pipeline_slots[batch_idx % NUM_PIPELINE_SLOTS]
+                    nvtx_prefix = f"COMPASS L{layer_id} H{h} B{batch_idx}/{num_batches}"
+
+                    # Guard staging buffer: wait for previous H2D to finish
+                    # reading from the shared staging buffer before overwriting.
+                    if batch_idx > 0:
+                        prev_slot = pipeline_slots[(batch_idx - 1) % NUM_PIPELINE_SLOTS]
+                        nvtx.push_range(f"{nvtx_prefix}: staging_sync slot{prev_slot}", color="yellow")
+                        offload_engine.slot_transfer_streams[prev_slot].synchronize()
+                        nvtx.pop_range()
 
                     # Regroup into {bid: [si...]} for gather API
                     grouped: Dict[int, list] = {}
                     for bid, si in batch_subs:
                         grouped.setdefault(bid, []).append(si)
 
-                    # CPU gather → staging buffer → H2D → GPU slot
+                    # CPU gather → staging buffer
+                    nvtx.push_range(f"{nvtx_prefix}: CPU gather {len(batch_subs)}subs {batch_tokens}tok", color="orange")
                     max_tok, _ = offload_engine.gather_subblocks_per_head(
                         layer_id, [list(grouped.items())],
                         fine_grain, head_offset=h,
                     )
-                    offload_engine.load_staging_to_slot(slot, max_tok, layer_id=layer_id)
-                    offload_engine.wait_slot_layer(slot)
+                    nvtx.pop_range()
 
-                    # BLASST on single KV head
+                    # Async H2D: staging → GPU slot
+                    nvtx.push_range(f"{nvtx_prefix}: H2D staging→slot{curr_slot} {max_tok}tok", color="green")
+                    offload_engine.load_staging_to_slot(curr_slot, max_tok, layer_id=layer_id)
+                    offload_engine.wait_slot_layer(curr_slot)
+                    nvtx.pop_range()
+
+                    # BLASST on single KV head (async, NO synchronize!)
+                    # Stream ordering on compute_stream guarantees that each
+                    # BLASST call sees the previous call's m_global output.
                     with torch.cuda.stream(compute_stream):
-                        k_b = offload_engine.k_cache_gpu[slot, :batch_tokens, h, :].unsqueeze(0).unsqueeze(0)
-                        v_b = offload_engine.v_cache_gpu[slot, :batch_tokens, h, :].unsqueeze(0).unsqueeze(0)
+                        nvtx.push_range(f"{nvtx_prefix}: BLASST {batch_tokens}tok slot{curr_slot}", color="blue")
+                        k_b = offload_engine.k_cache_gpu[curr_slot, :batch_tokens, h, :].unsqueeze(0).unsqueeze(0)
+                        v_b = offload_engine.v_cache_gpu[curr_slot, :batch_tokens, h, :].unsqueeze(0).unsqueeze(0)
                         q_h = q_input[:, h * gqa_ratio:(h + 1) * gqa_ratio, :, :]
 
                         out_b, lse_b, mgin_h = blasst_chunked_prefill(
@@ -563,18 +589,27 @@ class COMPASSPolicy(SparsePolicy):
                             threshold_ln_lambda=ln_lambda,
                             m_global_in=mgin_h,
                         )
+                        nvtx.pop_range()
 
                         # Merge batches within this head
-                        out_b_t = out_b.transpose(1, 2).contiguous()
                         if head_o is None:
-                            head_o, head_lse = out_b_t, lse_b
+                            head_o = out_b.transpose(1, 2).contiguous()
+                            head_lse = lse_b
                         else:
+                            nvtx.push_range(f"{nvtx_prefix}: merge", color="purple")
+                            out_b_t = out_b.transpose(1, 2).contiguous()
                             head_o, head_lse = merge_attention_outputs(
                                 head_o, head_lse, out_b_t, lse_b
                             )
-                        compute_stream.synchronize()
-                    offload_engine.record_slot_compute_done(slot)
+                            nvtx.pop_range()
+                        # Record compute_done on compute_stream (not default stream!)
+                        # This lets load_staging_to_slot know when this slot is safe to reuse.
+                        offload_engine.ring_slot_compute_done[curr_slot].record(compute_stream)
 
+                    batch_idx += 1
+
+                # Sync compute_stream once per head to materialize outputs
+                compute_stream.synchronize()
                 per_head_mgin[h] = mgin_h
                 per_head_o_list.append(head_o)
                 per_head_lse_list.append(head_lse)
@@ -584,6 +619,7 @@ class COMPASSPolicy(SparsePolicy):
             historical_lse = torch.cat(per_head_lse_list, dim=1) # [1, H, q_len]
 
         # ---- Current prefill chunk (causal) ----
+        nvtx.push_range(f"COMPASS L{layer_id}: current_chunk_causal {num_tokens}tok", color="cyan")
         with torch.cuda.stream(compute_stream):
             k_curr, v_curr = offload_engine.get_prefill_buffer_slice(layer_id, num_tokens)
             k_curr_input = k_curr.transpose(1, 2).contiguous()
@@ -611,11 +647,14 @@ class COMPASSPolicy(SparsePolicy):
             if historical_o is None:
                 final_o = curr_o
             else:
+                nvtx.push_range(f"COMPASS L{layer_id}: merge_final", color="purple")
                 final_o, _ = merge_attention_outputs(
                     historical_o, historical_lse, curr_o, lse_curr
                 )
+                nvtx.pop_range()
 
         torch.cuda.default_stream().wait_stream(compute_stream)
+        nvtx.pop_range()
         return final_o.squeeze(0)
 
     def compute_chunked_decode(

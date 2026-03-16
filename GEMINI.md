@@ -100,6 +100,7 @@ The architecture consists of 4 core modules:
 | [`docs/compass_subblock_compacted_transfer.md`](docs/compass_subblock_compacted_transfer.md) | COMPASS sub-block compacted transfer: gather+bulk H2D pipeline, top-p Q-aggregation fix, two-stage (L1 CPU + L2 GPU) pruning results. |
 | [`docs/ao_cpu_gemm_benchmark.md`](docs/ao_cpu_gemm_benchmark.md) | ao (torchao) CPU GEMM 算子全面扫描：6 个可用算子对比、`_weight_int4pack_mm_for_cpu` 量化方法详解、int4 vs FP32 性能 benchmark、COMPASS 外推分析。 |
 | [`docs/compass_perhead_scheduling_guide.md`](docs/compass_perhead_scheduling_guide.md) | COMPASS per-head KV cache 调度设计：独立 head 选择/传输/计算、staging buffer 内存布局、同步模型、m_global 跨 chunk bug 修复、IO 节省实测数据。 |
+| [`docs/compass_async_pipeline_guide.md`](docs/compass_async_pipeline_guide.md) | COMPASS async double-buffered pipeline：双 slot 交替、coalesced gather、同步模型、NVTX 标记、性能对比（prefill −47%）。 |
 
 ---
 

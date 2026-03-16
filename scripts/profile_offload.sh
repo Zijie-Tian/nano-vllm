@@ -208,7 +208,7 @@ fi
 # Run nsys profile and capture exit code
 CUDA_VISIBLE_DEVICES=$GPU_ID PYTHONPATH="$PROJECT_ROOT:$PYTHONPATH" \
 nsys profile \
-    --trace=cuda,nvtx \
+    --trace=cuda,nvtx,osrt \
     --force-overwrite=true \
     --output="$OUTPUT_FILE" \
     python "$TEST_SCRIPT" \
