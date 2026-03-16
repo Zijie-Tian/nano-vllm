@@ -513,10 +513,10 @@ class COMPASSPolicy(SparsePolicy):
             # m_global starts fresh each chunk — DO NOT persist across chunks.
             per_head_mgin: list = [None] * kv_heads
 
-            # Double-buffered async pipeline: alternate between 2 GPU slots
-            # to overlap GPU compute (BLASST) with CPU gather + H2D transfer.
-            NUM_PIPELINE_SLOTS = 2
-            pipeline_slots = [0, 1]
+            # N-stage async pipeline: use ALL available GPU ring slots
+            # to maximize overlap between GPU compute and CPU gather + H2D.
+            num_slots = offload_engine.num_ring_slots
+            pipeline_slots = list(range(num_slots))
 
             for h in range(kv_heads):
                 if selection.per_head_tokens[h] == 0:
@@ -545,13 +545,13 @@ class COMPASSPolicy(SparsePolicy):
                 for batch_start in range(0, len(flat_subs), max_subs_per_batch):
                     batch_subs = flat_subs[batch_start:batch_start + max_subs_per_batch]
                     batch_tokens = len(batch_subs) * fine_grain
-                    curr_slot = pipeline_slots[batch_idx % NUM_PIPELINE_SLOTS]
+                    curr_slot = pipeline_slots[batch_idx % num_slots]
                     nvtx_prefix = f"COMPASS L{layer_id} H{h} B{batch_idx}/{num_batches}"
 
                     # Guard staging buffer: wait for previous H2D to finish
                     # reading from the shared staging buffer before overwriting.
                     if batch_idx > 0:
-                        prev_slot = pipeline_slots[(batch_idx - 1) % NUM_PIPELINE_SLOTS]
+                        prev_slot = pipeline_slots[(batch_idx - 1) % num_slots]
                         nvtx.push_range(f"{nvtx_prefix}: staging_sync slot{prev_slot}", color="yellow")
                         offload_engine.slot_transfer_streams[prev_slot].synchronize()
                         nvtx.pop_range()
