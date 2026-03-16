@@ -422,12 +422,20 @@ class FullAttentionPolicy(SparsePolicy):
         with torch.cuda.stream(compute_stream):
             if num_accumulated > 0:
                 # Read from per-layer decode buffer
-                decode_k = offload_engine.decode_k_buffer[
-                    layer_id, decode_start_pos_in_block : decode_pos_in_block + 1
-                ]
-                decode_v = offload_engine.decode_v_buffer[
-                    layer_id, decode_start_pos_in_block : decode_pos_in_block + 1
-                ]
+                if getattr(offload_engine, 'is_head_first', False):
+                    decode_k = offload_engine.decode_k_buffer[
+                        layer_id, :, decode_start_pos_in_block : decode_pos_in_block + 1
+                    ].transpose(0, 1)
+                    decode_v = offload_engine.decode_v_buffer[
+                        layer_id, :, decode_start_pos_in_block : decode_pos_in_block + 1
+                    ].transpose(0, 1)
+                else:
+                    decode_k = offload_engine.decode_k_buffer[
+                        layer_id, decode_start_pos_in_block : decode_pos_in_block + 1
+                    ]
+                    decode_v = offload_engine.decode_v_buffer[
+                        layer_id, decode_start_pos_in_block : decode_pos_in_block + 1
+                    ]
                 decode_k = decode_k.unsqueeze(0)
                 decode_v = decode_v.unsqueeze(0)
 

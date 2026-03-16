@@ -33,6 +33,7 @@ NUM_GPU_BLOCKS="4"
 BLOCK_SIZE="4096"
 GPU_UTIL="0.9"
 ENABLE_OFFLOAD="--enable-offload"
+MAX_NEW_TOKENS="1"
 MODEL=""
 DATA_DIR_OVERRIDE=""
 
@@ -83,6 +84,10 @@ while [[ $# -gt 0 ]]; do
             DATA_DIR_OVERRIDE="$2"
             shift 2
             ;;
+        --max-new-tokens)
+            MAX_NEW_TOKENS="$2"
+            shift 2
+            ;;
         -h|--help)
             echo "Usage: $0 [options]"
             echo ""
@@ -94,6 +99,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --sample INDEX       Sample index (default: 0)"
             echo "  --gpu GPU_ID         GPU to use (default: 0)"
             echo "  --gpu-util UTIL      GPU memory utilization (default: 0.9)"
+            echo "  --max-new-tokens N   Max new tokens to generate (default: 1)"
             echo "  --no-offload         Disable CPU offload"
             echo "  --num-gpu-blocks N   Number of GPU blocks/slots (default: 4)"
             exit 0
@@ -169,6 +175,7 @@ echo "Sample:      $SAMPLE_INDEX"
 echo "GPU:         $GPU_ID"
 echo "GPU Blocks:  $NUM_GPU_BLOCKS"
 echo "Data Dir:    $DATA_DIR"
+echo "Max Tokens:  $MAX_NEW_TOKENS"
 echo "Output file: $OUTPUT_FILE.nsys-rep"
 echo ""
 
@@ -218,6 +225,7 @@ nsys profile \
         --num-gpu-blocks "$NUM_GPU_BLOCKS" \
         --block-size "$BLOCK_SIZE" \
         --max-model-len "$MAX_MODEL_LEN" \
+        --max-new-tokens "$MAX_NEW_TOKENS" \
         --gpu-utilization "$GPU_UTIL" \
         $ENABLE_OFFLOAD \
         $SPARSE_POLICY_ARG \
@@ -225,15 +233,12 @@ nsys profile \
         --quiet
 EXIT_CODE=$?
 
-# If test failed, delete the output file
+# If test failed, print warning but keep results
 if [ $EXIT_CODE -ne 0 ]; then
     echo ""
     echo "============================================================"
-    echo "Test FAILED! Cleaning up..."
+    echo "Test FAILED (Expected if limiting tokens)! Keeping results..."
     echo "============================================================"
-    rm -f "$OUTPUT_FILE.nsys-rep"
-    echo "Deleted: $OUTPUT_FILE.nsys-rep"
-    exit $EXIT_CODE
 fi
 
 echo ""

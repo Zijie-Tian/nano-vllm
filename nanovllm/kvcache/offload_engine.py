@@ -107,102 +107,52 @@ class OffloadEngine:
         )
 
         # ========== Fixed-address GPU KV cache ==========
-        # Shape: [num_gpu_blocks, block_size, kv_heads, head_dim]
-        # NOTE: No num_layers dimension! GPU slots are shared across layers.
-        # Each layer reuses the same slots (layers execute sequentially).
-        # This saves 28x GPU memory compared to per-layer allocation.
-        self.k_cache_gpu = torch.zeros(
-            num_gpu_blocks,
-            block_size,
-            num_kv_heads,
-            head_dim,
-            dtype=dtype,
-            device="cuda",
+        # ========== Layout configuration ==========
+        self.sparse_policy = sparse_policy
+        self.is_head_first = (
+            sparse_policy is not None 
+            and getattr(sparse_policy.__class__, '__name__', '') == "COMPASSPolicy"
         )
-        self.v_cache_gpu = torch.zeros(
-            num_gpu_blocks,
-            block_size,
-            num_kv_heads,
-            head_dim,
-            dtype=dtype,
-            device="cuda",
-        )
+        if self.is_head_first:
+            logger.info("Using Head-First layout: [..., Heads, Tokens, Head_Dim] for COMPASS")
+            self._gpu_shape = (num_gpu_blocks, num_kv_heads, block_size, head_dim)
+            self._layer_shape = (num_layers, num_kv_heads, block_size, head_dim)
+            self._cpu_shape = (num_layers, num_cpu_blocks, num_kv_heads, block_size, head_dim)
+            self._staging_shape = (num_kv_heads, block_size, head_dim)
+        else:
+            self._gpu_shape = (num_gpu_blocks, block_size, num_kv_heads, head_dim)
+            self._layer_shape = (num_layers, block_size, num_kv_heads, head_dim)
+            self._cpu_shape = (num_layers, num_cpu_blocks, block_size, num_kv_heads, head_dim)
+            self._staging_shape = (block_size, num_kv_heads, head_dim)
+
+        # ========== Fixed-address GPU KV cache ==========
+        self.k_cache_gpu = torch.zeros(*self._gpu_shape, dtype=dtype, device="cuda")
+        self.v_cache_gpu = torch.zeros(*self._gpu_shape, dtype=dtype, device="cuda")
 
         # ========== Per-layer decode buffer ==========
-        # During decode, all layers share decode_slot (no layer dimension in GPU cache).
-        # This causes accumulated tokens to be overwritten by each layer.
-        # Solution: Maintain separate per-layer buffers for decode tokens.
-        # Shape: [num_layers, block_size, kv_heads, head_dim]
-        # Memory: num_layers * block_size * kv_heads * head_dim * dtype_size
-        #         e.g., 28 * 1024 * 8 * 128 * 2 = 58.7 MB (acceptable)
-        self.decode_k_buffer = torch.zeros(
-            num_layers, block_size, num_kv_heads, head_dim, dtype=dtype, device="cuda"
-        )
-        self.decode_v_buffer = torch.zeros(
-            num_layers, block_size, num_kv_heads, head_dim, dtype=dtype, device="cuda"
-        )
+        self.decode_k_buffer = torch.zeros(*self._layer_shape, dtype=dtype, device="cuda")
+        self.decode_v_buffer = torch.zeros(*self._layer_shape, dtype=dtype, device="cuda")
         decode_buf_mb = (
-            2
-            * num_layers
-            * block_size
-            * num_kv_heads
-            * head_dim
-            * dtype.itemsize
-            / (1024 * 1024)
+            2 * num_layers * block_size * num_kv_heads * head_dim * dtype.itemsize / (1024 * 1024)
         )
         logger.info(f"  Per-layer decode buffer: {decode_buf_mb:.1f} MB")
 
         # ========== Per-layer prefill buffer for async offload ==========
-        # During chunked prefill, all layers share the same GPU slot. This means
-        # each layer must wait for offload to complete before the next layer can
-        # write to the same slot. This serializes offloads and hurts performance.
-        # Solution: Maintain separate per-layer buffers for prefill.
-        # Each layer writes to its own buffer, enabling fully async offloads.
-        # Shape: [num_layers, block_size, kv_heads, head_dim]
-        self.prefill_k_buffer = torch.zeros(
-            num_layers, block_size, num_kv_heads, head_dim, dtype=dtype, device="cuda"
-        )
-        self.prefill_v_buffer = torch.zeros(
-            num_layers, block_size, num_kv_heads, head_dim, dtype=dtype, device="cuda"
-        )
+        self.prefill_k_buffer = torch.zeros(*self._layer_shape, dtype=dtype, device="cuda")
+        self.prefill_v_buffer = torch.zeros(*self._layer_shape, dtype=dtype, device="cuda")
         prefill_buf_mb = (
-            2
-            * num_layers
-            * block_size
-            * num_kv_heads
-            * head_dim
-            * dtype.itemsize
-            / (1024 * 1024)
+            2 * num_layers * block_size * num_kv_heads * head_dim * dtype.itemsize / (1024 * 1024)
         )
         logger.info(f"  Per-layer prefill buffer: {prefill_buf_mb:.1f} MB")
 
         # Per-layer offload events for async prefill offload
-        # Each layer has its own event to track offload completion
         self.prefill_offload_events = [torch.cuda.Event() for _ in range(num_layers)]
         # Per-layer transfer streams for parallel offloads
         self.prefill_offload_streams = [torch.cuda.Stream() for _ in range(num_layers)]
 
         # ========== Fixed-address CPU KV cache (pinned memory) ==========
-        self.k_cache_cpu = torch.zeros(
-            num_layers,
-            num_cpu_blocks,
-            block_size,
-            num_kv_heads,
-            head_dim,
-            dtype=dtype,
-            device="cpu",
-            pin_memory=True,
-        )
-        self.v_cache_cpu = torch.zeros(
-            num_layers,
-            num_cpu_blocks,
-            block_size,
-            num_kv_heads,
-            head_dim,
-            dtype=dtype,
-            device="cpu",
-            pin_memory=True,
-        )
+        self.k_cache_cpu = torch.zeros(*self._cpu_shape, dtype=dtype, device="cpu", pin_memory=True)
+        self.v_cache_cpu = torch.zeros(*self._cpu_shape, dtype=dtype, device="cpu", pin_memory=True)
 
         # Log memory allocation
         gpu_mem_mb = self.gpu_memory_bytes() / (1024 * 1024)
@@ -212,22 +162,13 @@ class OffloadEngine:
         )
 
         # ========== Staging buffers for sub-block gather ==========
-        # Used by COMPASS to compact selected sub-blocks before bulk H2D transfer.
-        # Multiple independent staging buffers eliminate the staging_sync bottleneck:
-        # CPU gather into buffer[i] can overlap with H2D reading from buffer[i-1].
-        self.num_staging_buffers = 2 * num_gpu_blocks  # 2× ring slots for deep overlap
+        self.num_staging_buffers = 2 * num_gpu_blocks
         self.staging_k_cpu = [
-            torch.zeros(
-                block_size, num_kv_heads, head_dim,
-                dtype=dtype, device="cpu", pin_memory=True,
-            )
+            torch.zeros(*self._staging_shape, dtype=dtype, device="cpu", pin_memory=True)
             for _ in range(self.num_staging_buffers)
         ]
         self.staging_v_cpu = [
-            torch.zeros(
-                block_size, num_kv_heads, head_dim,
-                dtype=dtype, device="cpu", pin_memory=True,
-            )
+            torch.zeros(*self._staging_shape, dtype=dtype, device="cpu", pin_memory=True)
             for _ in range(self.num_staging_buffers)
         ]
         per_buf_mb = (
@@ -301,7 +242,11 @@ class OffloadEngine:
             (k_cache, v_cache) tensors
             Shape: [num_gpu_blocks, block_size, kv_heads, head_dim]
         """
-        return self.k_cache_gpu, self.v_cache_gpu
+        k, v = self.k_cache_gpu, self.v_cache_gpu
+        if self.is_head_first:
+            k = k.transpose(1, 2).contiguous()
+            v = v.transpose(1, 2).contiguous()
+        return k, v
 
     def reset(self) -> None:
         """
@@ -633,9 +578,12 @@ class OffloadEngine:
         Returns:
             (k_cache, v_cache), shape: [1, block_size, kv_heads, head_dim]
         """
-        k = self.k_cache_gpu[slot_idx].unsqueeze(0)  # [1, block_size, heads, dim]
-        v = self.v_cache_gpu[slot_idx].unsqueeze(0)
-        return k, v
+        k = self.k_cache_gpu[slot_idx]
+        v = self.v_cache_gpu[slot_idx]
+        if self.is_head_first:
+            k = k.transpose(0, 1).contiguous()
+            v = v.transpose(0, 1).contiguous()
+        return k.unsqueeze(0), v.unsqueeze(0)
 
 
     # ----- Decode slot methods (kept for decode phase) -----
@@ -676,9 +624,13 @@ class OffloadEngine:
         Returns:
             (k, v) with shape [1, num_tokens, kv_heads, head_dim]
         """
-        k = self.prefill_k_buffer[layer_id, :num_tokens].unsqueeze(0)
-        v = self.prefill_v_buffer[layer_id, :num_tokens].unsqueeze(0)
-        return k, v
+        if self.is_head_first:
+            k = self.prefill_k_buffer[layer_id, :, :num_tokens].transpose(0, 1).contiguous()
+            v = self.prefill_v_buffer[layer_id, :, :num_tokens].transpose(0, 1).contiguous()
+        else:
+            k = self.prefill_k_buffer[layer_id, :num_tokens]
+            v = self.prefill_v_buffer[layer_id, :num_tokens]
+        return k.unsqueeze(0), v.unsqueeze(0)
 
     def write_to_prefill_buffer(
         self,
@@ -708,8 +660,12 @@ class OffloadEngine:
             nvtx_label = f"D2D: L{layer_id} WritePrefillBuffer"
 
         torch.cuda.nvtx.range_push(nvtx_label)
-        self.prefill_k_buffer[layer_id, :num_tokens].copy_(k)
-        self.prefill_v_buffer[layer_id, :num_tokens].copy_(v)
+        if self.is_head_first:
+            self.prefill_k_buffer[layer_id, :, :num_tokens].copy_(k.transpose(0, 1))
+            self.prefill_v_buffer[layer_id, :, :num_tokens].copy_(v.transpose(0, 1))
+        else:
+            self.prefill_k_buffer[layer_id, :num_tokens].copy_(k)
+            self.prefill_v_buffer[layer_id, :num_tokens].copy_(v)
         torch.cuda.nvtx.range_pop()
 
         # Record D2D transfer: K + V
@@ -737,8 +693,12 @@ class OffloadEngine:
         torch.cuda.nvtx.range_push(
             f"D2D: L{layer_id} Pos{pos_in_block} WriteDecodeBuffer"
         )
-        self.decode_k_buffer[layer_id, pos_in_block].copy_(k)
-        self.decode_v_buffer[layer_id, pos_in_block].copy_(v)
+        if getattr(self, 'is_head_first', False):
+            self.decode_k_buffer[layer_id, :, pos_in_block].copy_(k)
+            self.decode_v_buffer[layer_id, :, pos_in_block].copy_(v)
+        else:
+            self.decode_k_buffer[layer_id, pos_in_block].copy_(k)
+            self.decode_v_buffer[layer_id, pos_in_block].copy_(v)
         torch.cuda.nvtx.range_pop()
 
         # Record D2D transfer: K + V (single token)
@@ -811,6 +771,7 @@ class OffloadEngine:
         layer_id: int = -1,
         is_prefill: bool = True,
         staging_idx: int = 0,
+        head_idx: int = -1,
     ) -> None:
         """
         Async H2D transfer from staging buffer to a GPU slot.
@@ -824,6 +785,7 @@ class OffloadEngine:
             layer_id: Layer index for NVTX labeling (-1 = not specified).
             is_prefill: True if in prefill phase.
             staging_idx: Index of the staging buffer to read from.
+            head_idx: Specific head to transfer (only used if is_head_first).
         """
         stream = self.slot_transfer_streams[slot_idx]
         staging_k = self.staging_k_cpu[staging_idx]
@@ -837,17 +799,28 @@ class OffloadEngine:
             stream.wait_event(self.ring_slot_offload_done[slot_idx])
 
             # H2D: only transfer num_tokens worth of data (not full block)
-            self.k_cache_gpu[slot_idx, :num_tokens].copy_(
-                staging_k[:num_tokens], non_blocking=True
-            )
-            self.v_cache_gpu[slot_idx, :num_tokens].copy_(
-                staging_v[:num_tokens], non_blocking=True
-            )
+            if self.is_head_first and head_idx != -1:
+                self.k_cache_gpu[slot_idx, head_idx, :num_tokens].copy_(
+                    staging_k[head_idx, :num_tokens], non_blocking=True
+                )
+                self.v_cache_gpu[slot_idx, head_idx, :num_tokens].copy_(
+                    staging_v[head_idx, :num_tokens], non_blocking=True
+                )
+            else:
+                self.k_cache_gpu[slot_idx, :num_tokens].copy_(
+                    staging_k[:num_tokens], non_blocking=True
+                )
+                self.v_cache_gpu[slot_idx, :num_tokens].copy_(
+                    staging_v[:num_tokens], non_blocking=True
+                )
             self.ring_slot_ready[slot_idx].record(stream)
         nvtx.pop_range()
 
         # Record H2D transfer: only the compacted amount
-        transfer_bytes = 2 * num_tokens * self.num_kv_heads * self.head_dim * self.dtype_size
+        if self.is_head_first and head_idx != -1:
+            transfer_bytes = 2 * num_tokens * self.head_dim * self.dtype_size
+        else:
+            transfer_bytes = 2 * num_tokens * self.num_kv_heads * self.head_dim * self.dtype_size
         MemoryObserver.record_h2d(transfer_bytes, is_prefill=is_prefill)
 
     def gather_subblocks_per_head(
@@ -906,12 +879,20 @@ class OffloadEngine:
                     src_end = src_start + n_tok
                     dst_start = token_offset
                     dst_end = token_offset + n_tok
-                    staging_k[dst_start:dst_end, h_actual, :].copy_(
-                        self.k_cache_cpu[layer_id, cpu_block_id, src_start:src_end, h_actual, :]
-                    )
-                    staging_v[dst_start:dst_end, h_actual, :].copy_(
-                        self.v_cache_cpu[layer_id, cpu_block_id, src_start:src_end, h_actual, :]
-                    )
+                    if self.is_head_first:
+                        staging_k[h_actual, dst_start:dst_end, :].copy_(
+                            self.k_cache_cpu[layer_id, cpu_block_id, h_actual, src_start:src_end, :]
+                        )
+                        staging_v[h_actual, dst_start:dst_end, :].copy_(
+                            self.v_cache_cpu[layer_id, cpu_block_id, h_actual, src_start:src_end, :]
+                        )
+                    else:
+                        staging_k[dst_start:dst_end, h_actual, :].copy_(
+                            self.k_cache_cpu[layer_id, cpu_block_id, src_start:src_end, h_actual, :]
+                        )
+                        staging_v[dst_start:dst_end, h_actual, :].copy_(
+                            self.v_cache_cpu[layer_id, cpu_block_id, src_start:src_end, h_actual, :]
+                        )
                     token_offset += n_tok
                     i += run_len
             per_head_tokens.append(token_offset)

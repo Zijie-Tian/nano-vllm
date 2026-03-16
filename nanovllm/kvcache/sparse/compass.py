@@ -51,8 +51,8 @@ class COMPASSPolicy(SparsePolicy):
 
     def __init__(
         self,
-        lambda_threshold: float = 0.001,
-        top_p: float = 0.9,
+        lambda_threshold: float = 0.01,
+        top_p: float = 0.5,
         **kwargs,
     ):
         self._stats_num_chunks = 0
@@ -185,8 +185,11 @@ class COMPASSPolicy(SparsePolicy):
         The pooled result is ~32KB per block (vs ~2MB for full K), so the
         GPU→CPU transfer of the pooled tensor is negligible.
         """
-        # k_cache_gpu: [block_size, kv_heads, head_dim] on GPU
-        k_block = k_cache_gpu[:num_tokens]  # [num_tokens, kv_heads, head_dim]
+        # k_cache_gpu: [kv_heads, max_tokens, head_dim] on GPU if Head-First
+        if k_cache_gpu.shape[0] == self._num_kv_heads:
+            k_block = k_cache_gpu[:, :num_tokens, :].transpose(0, 1)  # [num_tokens, kv_heads, head_dim]
+        else:
+            k_block = k_cache_gpu[:num_tokens]  # [num_tokens, kv_heads, head_dim]
         # Compute on GPU: mean pool + L2 normalize
         pooled_k_gpu = self._pool_and_normalize(k_block, self.FINE_GRAIN)
         # Transfer only the tiny pooled result to CPU (~32 × H × D × 4 = ~32KB)
@@ -219,6 +222,7 @@ class COMPASSPolicy(SparsePolicy):
                     for bid in available_blocks}
 
         # 2. Collect pooled K
+        nvtx.push_range("compass_k_collect", color="green")
         t_start = time.perf_counter()
         pooled_k_list = []
         subblock_to_block = []  # Maps global sub-block idx → (block_id, local_sub_idx)
@@ -226,6 +230,7 @@ class COMPASSPolicy(SparsePolicy):
         for bid in available_blocks:
             if bid not in self._k_pooled_cache.get(layer_id, {}):
                 logger.warning(f"[COMPASS] Pooled K cache miss for layer={layer_id}, block={bid}")
+                nvtx.pop_range()
                 return {bid: torch.ones(num_fine_per_block, dtype=torch.bool)
                         for bid in available_blocks}
 
@@ -235,6 +240,7 @@ class COMPASSPolicy(SparsePolicy):
                 subblock_to_block.append((bid, si))
 
         if not pooled_k_list:
+            nvtx.pop_range()
             return {}
 
         k_pooled = torch.cat(pooled_k_list, dim=0)  # [G_k, kv_heads, D]
@@ -242,10 +248,12 @@ class COMPASSPolicy(SparsePolicy):
         H = self._num_kv_heads
         t_k_collect = time.perf_counter()
         self._prof_k_collect += t_k_collect - t_start
+        nvtx.pop_range()
 
         # 3. Compute cosine similarity: [H, G_q, G_k]
         #    Then AGGREGATE across Q sub-blocks (mean) to get [H, G_k]
         #    This avoids the problem where union of per-Q top-p sets covers everything.
+        nvtx.push_range("compass_matmul", color="blue")
         q_t = q_pooled.permute(1, 0, 2)  # [H, G_q, D]
         k_t = k_pooled.permute(1, 2, 0)  # [H, D, G_k]
         scores = torch.bmm(q_t, k_t)     # [H, G_q, G_k]
@@ -253,8 +261,10 @@ class COMPASSPolicy(SparsePolicy):
         probs = torch.softmax(avg_scores, dim=-1)  # [H, G_k]
         t_matmul = time.perf_counter()
         self._prof_matmul += t_matmul - t_k_collect
+        nvtx.pop_range()
 
         # 4. Vectorized top-p selection on averaged probabilities
+        nvtx.push_range("compass_topp", color="red")
         sorted_probs, sorted_indices = torch.sort(probs, dim=-1, descending=True)
         cumsum = torch.cumsum(sorted_probs, dim=-1)  # [H, G_k]
 
@@ -271,8 +281,10 @@ class COMPASSPolicy(SparsePolicy):
         # Per-head selection: keep per-head mask, do NOT union
         t_topp = time.perf_counter()
         self._prof_topp += t_topp - t_matmul
+        nvtx.pop_range()
 
         # Stats: per-head selected sub-blocks
+        nvtx.push_range("compass_mask_build", color="yellow")
         per_head_counts = selected_mask.sum(dim=1)  # [H]
         overall_selected = selected_mask.any(dim=0)  # [G_k] for IO/stats
         total_sub = G_k * H  # total = G_k per head × H heads
@@ -282,6 +294,7 @@ class COMPASSPolicy(SparsePolicy):
 
         t_mask = time.perf_counter()
         self._prof_mask_build += t_mask - t_topp
+        nvtx.pop_range()
 
         return selected_mask, subblock_to_block  # [H, G_k], [(bid, si)]
 
@@ -324,12 +337,15 @@ class COMPASSPolicy(SparsePolicy):
         heads_per_group = self._num_heads // self._num_kv_heads
 
         # 1. Synchronize to ensure previous GPU work (including pooled K) is done
+        nvtx.push_range("compass_cuda_sync", color="gray")
         t0 = time.perf_counter()
         torch.cuda.current_stream().synchronize()
         t1 = time.perf_counter()
         self._prof_sync += t1 - t0
+        nvtx.pop_range()
 
         # 2. GPU-side Q pooling + GQA fold (fast on GPU)
+        nvtx.push_range("compass_q_pool_gpu", color="magenta")
         q_pooled_gpu = self._pool_and_normalize(q, self.FINE_GRAIN)
         G_q = q_pooled_gpu.shape[0]
         # GQA fold on GPU: [G_q, H, D] → [G_q, H_kv, hpg, D] → mean → [G_q, H_kv, D]
@@ -337,14 +353,17 @@ class COMPASSPolicy(SparsePolicy):
         q_pooled_gpu = q_pooled_gpu.mean(dim=2)  # [G_q, H_kv, D]
         t2 = time.perf_counter()
         self._prof_q_pool += t2 - t1
+        nvtx.pop_range()
 
         # 3. Async transfer pooled Q to pinned CPU buffer (~128KB vs 32MB)
+        nvtx.push_range("compass_q_d2h", color="cyan")
         with torch.cuda.stream(self._metadata_stream):
             self._q_pooled_cpu_buf[:G_q].copy_(q_pooled_gpu, non_blocking=True)
         self._metadata_stream.synchronize()
         q_pooled_cpu = self._q_pooled_cpu_buf[:G_q].clone()  # snapshot
         t3 = time.perf_counter()
         self._prof_q_cpu += t3 - t2
+        nvtx.pop_range()
 
         # 4. CPU-side estimation using pre-pooled Q
         result = self._estimate_subblock_mask(
@@ -577,7 +596,7 @@ class COMPASSPolicy(SparsePolicy):
                     nvtx.push_range(f"{nvtx_prefix}: H2D stg{staging_idx}→slot{curr_slot} {max_tok}tok", color="green")
                     offload_engine.load_staging_to_slot(
                         curr_slot, max_tok, layer_id=layer_id,
-                        staging_idx=staging_idx,
+                        staging_idx=staging_idx, head_idx=h,
                     )
                     offload_engine.wait_slot_layer(curr_slot)
                     nvtx.pop_range()
@@ -587,8 +606,12 @@ class COMPASSPolicy(SparsePolicy):
                     # BLASST call sees the previous call's m_global output.
                     with torch.cuda.stream(compute_stream):
                         nvtx.push_range(f"{nvtx_prefix}: BLASST {batch_tokens}tok slot{curr_slot}", color="blue")
-                        k_b = offload_engine.k_cache_gpu[curr_slot, :batch_tokens, h, :].unsqueeze(0).unsqueeze(0)
-                        v_b = offload_engine.v_cache_gpu[curr_slot, :batch_tokens, h, :].unsqueeze(0).unsqueeze(0)
+                        if getattr(offload_engine, 'is_head_first', False):
+                            k_b = offload_engine.k_cache_gpu[curr_slot, h, :batch_tokens, :].unsqueeze(0).unsqueeze(0)
+                            v_b = offload_engine.v_cache_gpu[curr_slot, h, :batch_tokens, :].unsqueeze(0).unsqueeze(0)
+                        else:
+                            k_b = offload_engine.k_cache_gpu[curr_slot, :batch_tokens, h, :].unsqueeze(0).unsqueeze(0)
+                            v_b = offload_engine.v_cache_gpu[curr_slot, :batch_tokens, h, :].unsqueeze(0).unsqueeze(0)
                         q_h = q_input[:, h * gqa_ratio:(h + 1) * gqa_ratio, :, :]
 
                         out_b, lse_b, mgin_h = blasst_chunked_prefill(

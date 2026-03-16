@@ -64,6 +64,7 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 | [`docs/compass_tmac_l1_batching.md`](docs/compass_tmac_l1_batching.md) | 深入解析 COMPASS TMAC 中的 L1 批量化优化：数学约束、工程实现以及针对多头注意力的 Python 端瓶颈分析。 |
 | [`docs/compass_torch_gemm_migration.md`](docs/compass_torch_gemm_migration.md) | COMPASS TMAC to Torch CPU GEMM migration: BMM batching optimization, API simplification, and IO reduction benchmark results (32K context). |
 | [`docs/ao_cpu_gemm_benchmark.md`](docs/ao_cpu_gemm_benchmark.md) | ao (torchao) CPU GEMM 算子全面扫描：6 个可用算子对比、`_weight_int4pack_mm_for_cpu` 量化方法详解、int4 vs FP32 性能 benchmark、COMPASS 外推分析。 |
+| [`docs/compass_head_first_layout_and_async_staging.md`](docs/compass_head_first_layout_and_async_staging.md) | COMPASS Head-First KV Cache layout eliminating H2D IO amplification, and fully asynchronous multi-staging buffers avoiding CPU blocking overhead. |
 
 ## Rules Index
 
