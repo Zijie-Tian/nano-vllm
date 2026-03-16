@@ -213,20 +213,30 @@ class OffloadEngine:
 
         # ========== Staging buffers for sub-block gather ==========
         # Used by COMPASS to compact selected sub-blocks before bulk H2D transfer.
-        # CPU staging: pinned memory for gather, shape [block_size, kv_heads, head_dim]
-        # One staging buffer is sufficient since CPU gather is fast and serial.
-        self.staging_k_cpu = torch.zeros(
-            block_size, num_kv_heads, head_dim,
-            dtype=dtype, device="cpu", pin_memory=True,
-        )
-        self.staging_v_cpu = torch.zeros(
-            block_size, num_kv_heads, head_dim,
-            dtype=dtype, device="cpu", pin_memory=True,
-        )
-        staging_mb = (
+        # Multiple independent staging buffers eliminate the staging_sync bottleneck:
+        # CPU gather into buffer[i] can overlap with H2D reading from buffer[i-1].
+        self.num_staging_buffers = 2 * num_gpu_blocks  # 2× ring slots for deep overlap
+        self.staging_k_cpu = [
+            torch.zeros(
+                block_size, num_kv_heads, head_dim,
+                dtype=dtype, device="cpu", pin_memory=True,
+            )
+            for _ in range(self.num_staging_buffers)
+        ]
+        self.staging_v_cpu = [
+            torch.zeros(
+                block_size, num_kv_heads, head_dim,
+                dtype=dtype, device="cpu", pin_memory=True,
+            )
+            for _ in range(self.num_staging_buffers)
+        ]
+        per_buf_mb = (
             2 * block_size * num_kv_heads * head_dim * dtype.itemsize / (1024 * 1024)
         )
-        logger.info(f"  Sub-block staging buffers: {staging_mb:.1f} MB (Pinned CPU)")
+        logger.info(
+            f"  Sub-block staging buffers: {self.num_staging_buffers} x {per_buf_mb:.1f} MB "
+            f"= {self.num_staging_buffers * per_buf_mb:.1f} MB total (Pinned CPU)"
+        )
 
         # ========== Compute stream for async operations ==========
         # IMPORTANT: Create a dedicated compute stream (not default stream!)
@@ -800,6 +810,7 @@ class OffloadEngine:
         num_tokens: int,
         layer_id: int = -1,
         is_prefill: bool = True,
+        staging_idx: int = 0,
     ) -> None:
         """
         Async H2D transfer from staging buffer to a GPU slot.
@@ -812,10 +823,13 @@ class OffloadEngine:
             num_tokens: Number of valid tokens in staging buffer.
             layer_id: Layer index for NVTX labeling (-1 = not specified).
             is_prefill: True if in prefill phase.
+            staging_idx: Index of the staging buffer to read from.
         """
         stream = self.slot_transfer_streams[slot_idx]
+        staging_k = self.staging_k_cpu[staging_idx]
+        staging_v = self.staging_v_cpu[staging_idx]
 
-        nvtx_label = f"H2D Gather: L{layer_id} {num_tokens}tok->Slot[{slot_idx}]"
+        nvtx_label = f"H2D Gather: L{layer_id} stg{staging_idx} {num_tokens}tok->Slot[{slot_idx}]"
         nvtx.push_range(message=nvtx_label, color="magenta")
         with torch.cuda.stream(stream):
             # Wait for previous compute on this slot to complete
@@ -824,10 +838,10 @@ class OffloadEngine:
 
             # H2D: only transfer num_tokens worth of data (not full block)
             self.k_cache_gpu[slot_idx, :num_tokens].copy_(
-                self.staging_k_cpu[:num_tokens], non_blocking=True
+                staging_k[:num_tokens], non_blocking=True
             )
             self.v_cache_gpu[slot_idx, :num_tokens].copy_(
-                self.staging_v_cpu[:num_tokens], non_blocking=True
+                staging_v[:num_tokens], non_blocking=True
             )
             self.ring_slot_ready[slot_idx].record(stream)
         nvtx.pop_range()
@@ -842,6 +856,7 @@ class OffloadEngine:
         per_head_selections: "List[List]",  # [H][(bid, [si...])]
         sub_block_size: int = 128,
         head_offset: int = 0,
+        staging_idx: int = 0,
     ) -> "Tuple[int, List[int]]":
         """
         Per-head gather into structured staging buffer [block_size, kv_heads, head_dim].
@@ -862,11 +877,14 @@ class OffloadEngine:
             sub_block_size: Tokens per sub-block (default 128).
             head_offset: Starting KV head index (for single-head calls, pass the
                 actual head index so the correct head's data is read from CPU cache).
+            staging_idx: Index of the staging buffer to write to.
 
         Returns:
             max_tokens: Maximum tokens across all heads (for H2D transfer sizing).
             per_head_tokens: [H] list of token counts per head.
         """
+        staging_k = self.staging_k_cpu[staging_idx]
+        staging_v = self.staging_v_cpu[staging_idx]
         per_head_tokens = []
 
         for h_local, head_sels in enumerate(per_head_selections):
@@ -888,10 +906,10 @@ class OffloadEngine:
                     src_end = src_start + n_tok
                     dst_start = token_offset
                     dst_end = token_offset + n_tok
-                    self.staging_k_cpu[dst_start:dst_end, h_actual, :].copy_(
+                    staging_k[dst_start:dst_end, h_actual, :].copy_(
                         self.k_cache_cpu[layer_id, cpu_block_id, src_start:src_end, h_actual, :]
                     )
-                    self.staging_v_cpu[dst_start:dst_end, h_actual, :].copy_(
+                    staging_v[dst_start:dst_end, h_actual, :].copy_(
                         self.v_cache_cpu[layer_id, cpu_block_id, src_start:src_end, h_actual, :]
                     )
                     token_offset += n_tok

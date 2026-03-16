@@ -540,20 +540,23 @@ class COMPASSPolicy(SparsePolicy):
 
                 head_o, head_lse, mgin_h = None, None, None
                 batch_idx = 0
+                num_staging = offload_engine.num_staging_buffers
 
                 num_batches = (len(flat_subs) + max_subs_per_batch - 1) // max_subs_per_batch
                 for batch_start in range(0, len(flat_subs), max_subs_per_batch):
                     batch_subs = flat_subs[batch_start:batch_start + max_subs_per_batch]
                     batch_tokens = len(batch_subs) * fine_grain
                     curr_slot = pipeline_slots[batch_idx % num_slots]
+                    staging_idx = batch_idx % num_staging
                     nvtx_prefix = f"COMPASS L{layer_id} H{h} B{batch_idx}/{num_batches}"
 
-                    # Guard staging buffer: wait for previous H2D to finish
-                    # reading from the shared staging buffer before overwriting.
-                    if batch_idx > 0:
-                        prev_slot = pipeline_slots[(batch_idx - 1) % num_slots]
-                        nvtx.push_range(f"{nvtx_prefix}: staging_sync slot{prev_slot}", color="yellow")
-                        offload_engine.slot_transfer_streams[prev_slot].synchronize()
+                    # Guard staging buffer: only wait if we're about to reuse a staging
+                    # buffer whose previous H2D may still be reading from it.
+                    # With N staging buffers, wrap-around occurs at batch_idx >= N.
+                    if batch_idx >= num_staging:
+                        wrap_slot = pipeline_slots[(batch_idx - num_staging) % num_slots]
+                        nvtx.push_range(f"{nvtx_prefix}: staging_sync stg{staging_idx}", color="yellow")
+                        offload_engine.slot_transfer_streams[wrap_slot].synchronize()
                         nvtx.pop_range()
 
                     # Regroup into {bid: [si...]} for gather API
@@ -561,17 +564,21 @@ class COMPASSPolicy(SparsePolicy):
                     for bid, si in batch_subs:
                         grouped.setdefault(bid, []).append(si)
 
-                    # CPU gather → staging buffer
-                    nvtx.push_range(f"{nvtx_prefix}: CPU gather {len(batch_subs)}subs {batch_tokens}tok", color="orange")
+                    # CPU gather → staging buffer[staging_idx]
+                    nvtx.push_range(f"{nvtx_prefix}: CPU gather {len(batch_subs)}subs {batch_tokens}tok stg{staging_idx}", color="orange")
                     max_tok, _ = offload_engine.gather_subblocks_per_head(
                         layer_id, [list(grouped.items())],
                         fine_grain, head_offset=h,
+                        staging_idx=staging_idx,
                     )
                     nvtx.pop_range()
 
-                    # Async H2D: staging → GPU slot
-                    nvtx.push_range(f"{nvtx_prefix}: H2D staging→slot{curr_slot} {max_tok}tok", color="green")
-                    offload_engine.load_staging_to_slot(curr_slot, max_tok, layer_id=layer_id)
+                    # Async H2D: staging[staging_idx] → GPU slot
+                    nvtx.push_range(f"{nvtx_prefix}: H2D stg{staging_idx}→slot{curr_slot} {max_tok}tok", color="green")
+                    offload_engine.load_staging_to_slot(
+                        curr_slot, max_tok, layer_id=layer_id,
+                        staging_idx=staging_idx,
+                    )
                     offload_engine.wait_slot_layer(curr_slot)
                     nvtx.pop_range()
 

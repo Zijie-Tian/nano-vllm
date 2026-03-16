@@ -44,7 +44,7 @@ The architecture consists of 4 core modules:
 
 ### 1.5 Testing & Profiling Standards
 *   **Test Style**: Minimal prints, use structured data (e.g., all ones) for easy manual verification, use `assert` for validation, and only print `test_xxx: PASSED` at the end.
-*   **Profiling (nsys)**: **MUST** use `scripts/profile_offload.sh`. Do NOT run `nsys` directly.
+*   **Profiling (nsys)**: **MUST** use `scripts/profile_offload.sh`. Do NOT run `nsys` directly. **MUST** profile on a single GPU only — do NOT run other GPU workloads in parallel during profiling, as PCIe bus contention skews H2D/D2H transfer measurements.
 *   **Benchmarking**: Before running `bench*.py`, ensure exclusive GPU access by checking for other compute-intensive PIDs.
 
 ---
