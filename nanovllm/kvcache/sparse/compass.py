@@ -51,8 +51,8 @@ class COMPASSPolicy(SparsePolicy):
 
     def __init__(
         self,
-        lambda_threshold: float = 0.01,
-        top_p: float = 0.5,
+        lambda_threshold: float = 0.001,
+        top_p: float = 0.9,
         **kwargs,
     ):
         self._stats_num_chunks = 0
@@ -377,6 +377,7 @@ class COMPASSPolicy(SparsePolicy):
         G_k = selected_mask.shape[1]
         t4 = time.perf_counter()
 
+        nvtx.push_range("compass_build_entries", color="purple")
         # Build per-head selections
         per_head_entries = [[] for _ in range(H)]  # [H] -> [(bid, [si...])]
         per_head_grouped = [{} for _ in range(H)]  # [H] -> {bid: [si...]}
@@ -394,7 +395,9 @@ class COMPASSPolicy(SparsePolicy):
             num_kv_heads=H,
         )
         self._compacted_selections[ctx.layer_id] = selection
+        nvtx.pop_range()
 
+        nvtx.push_range("compass_log_io", color="brown")
         # Log per-head statistics
         per_head_counts = selection.per_head_num_subblocks
         total_ph = sum(per_head_counts)
@@ -415,6 +418,7 @@ class COMPASSPolicy(SparsePolicy):
             for bid, _ in h_entries:
                 io_blocks.add(bid)
         io_blocks = sorted(io_blocks)
+        nvtx.pop_range()
 
         return io_blocks
 
@@ -520,12 +524,14 @@ class COMPASSPolicy(SparsePolicy):
             block_size = kvcache_manager.block_size
             max_subs_per_batch = block_size // fine_grain
 
+            nvtx.push_range("compass_prefill_log", color="brown")
             logger.info(
                 f"[COMPASS] layer={layer_id}, chunk={current_chunk_idx}: "
                 f"per-head gather {selection.total_subblocks} sub-blocks "
                 f"({selection.total_tokens} tokens, "
                 f"per-head: {selection.per_head_tokens})"
             )
+            nvtx.pop_range()
 
             per_head_o_list = []
             per_head_lse_list = []
@@ -550,12 +556,14 @@ class COMPASSPolicy(SparsePolicy):
                     ))
                     continue
 
+                nvtx.push_range("compass_flatten_subs", color="purple")
                 # Flatten sub-blocks for this head: [(bid, si), ...]
                 flat_subs = [
                     (bid, si)
                     for bid, sub_indices in selection.per_head_entries[h]
                     for si in sub_indices
                 ]
+                nvtx.pop_range()
 
                 head_o, head_lse, mgin_h = None, None, None
                 batch_idx = 0

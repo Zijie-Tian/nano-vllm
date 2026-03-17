@@ -335,7 +335,9 @@ class Attention(nn.Module):
         cpu_block_table = kvcache_manager.get_prefilled_cpu_blocks(seq)
 
         # ---- Phase 1: select_blocks ----
-        torch.cuda.synchronize()
+        torch.cuda.nvtx.range_push("compass_global_sync")
+        torch.cuda.current_stream().synchronize()
+        torch.cuda.nvtx.range_pop()
         t0 = time.time()
 
         num_chunks = current_chunk_idx + 1
@@ -354,7 +356,7 @@ class Attention(nn.Module):
             cpu_block_table, offload_engine, policy_ctx, q, k
         )
 
-        torch.cuda.synchronize()
+        torch.cuda.current_stream().synchronize()
         t1 = time.time()
 
         # ---- Phase 2: compute_chunked_prefill ----
@@ -372,7 +374,7 @@ class Attention(nn.Module):
             selected_blocks,
         )
 
-        torch.cuda.synchronize()
+        torch.cuda.current_stream().synchronize()
         t2 = time.time()
 
         torch.cuda.nvtx.range_pop()  # ChunkedPrefill
