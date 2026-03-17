@@ -61,12 +61,16 @@ The architecture consists of 4 core modules:
 *   **Environment Setup (MANDATORY)**: Before executing **any** code or scripts in this repository, you **MUST** configure the environment by sourcing `build/nano-vllm-envs.sh`. This script configures `PYTHONPATH=$(pwd):$PYTHONPATH` and sets up TVM paths.
     *   **Pre-execution Check**: Always check if `build/nano-vllm-envs.sh` exists.
     *   **TVM Configuration**: If the script does *not* exist, you must configure TVM first by running: `python3 scripts/setup_tvm.py`. Wait for the build to complete, then source the script: `source build/nano-vllm-envs.sh`.
-*   **test_ruler.py**: Read `docs/test_ruler_usage_guide.md` before running. Do not use `--help`. Match `data-dir` with appropriate `max-model-len`.
+*   **test_ruler.py**: Read `docs/test_ruler_usage_guide.md` before running. Do not use `--help`. Match `data-dir` with appropriate `max-model-len`. **MANDATORY**: When tuning COMPASS hyperparameters (`top-p` and `lambda_threshold`), you MUST use the explicitly added CLI arguments (`--compass-top-p` and `--compass-lambda`) rather than modifying defaults in `config.py`.
 *   **Documentation Indexing**: Whenever a new document is added to the `docs/` directory, its path and purpose **MUST** be immediately indexed in both `GEMINI.md` and `CLAUDE.md`.
 *   **Planning Files**: Use `findings.md`, `task_plan.md`, and `progress.md` for complex tasks. These are excluded from git. **At the beginning of every new task, you MUST automatically delete any existing `task_plan.md`, `findings.md`, and `progress.md` files to ensure a fresh state.**
 
 ### 2.3 Monitoring
 *   **GPU Monitoring**: For profiling or OOM debugging, run monitoring commands in the background. Prefer `nvidia-smi` queries or specialized profiling tools (nsys) directed to background output files.
+
+### 2.4 Assistant Interaction Rules
+*   **Image Generation**: 在我们的对话中，当提示词涉及到具体的物体、场景概念（例如“反重力”、“科幻设备”等），或者要求“展示”某个画面时，请务必直接调用图像生成工具生成实际的图像。在这些情况下，绝对不要使用 Mermaid.js 或代码块来绘制图表，除非明确在提示词中使用了“流程图”、“架构图”或“Mermaid”等词汇。
+*   **Default Rule Scope**: 除非我明确指定，否则以后要求添加的新规则，请默认添加到当前项目的 `GEMINI.md` 中，而不是全局 `~/.gemini/GEMINI.md`。
 
 ---
 

@@ -58,10 +58,13 @@ CUDA_VISIBLE_DEVICES=<GPU_ID> PYTHONPATH=/home/zijie/Code/nano-vllm:$PYTHONPATH 
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--sparse-policy` | - | 稀疏策略: `FULL`, `QUEST`, `XATTN_BSA` |
+| `--sparse-policy` | - | 稀疏策略: `FULL`, `QUEST`, `XATTN_BSA`, `COMPASS`, `BLASST` |
 | `--sparse-threshold` | 0.9 | XAttn cumulative attention 阈值 |
 | `--sparse-samples` | 128 | XAttn 每 chunk 采样数 |
 | `--sparse-stride` | 8 | XAttn Q/K 下采样步长 |
+| `--compass-top-p` | 0.9 | COMPASS: CPU 子块选择的 top-p 阈值 (决定挑选多少块) |
+| `--compass-lambda` | 0.001 | COMPASS: CPU 粗筛时的第一级绝对过滤阈值 |
+| `--blasst-lambda` | - | BLASST: 强制固定动态跳过阈值 (覆盖自适应公式) |
 
 ### 输出控制
 
