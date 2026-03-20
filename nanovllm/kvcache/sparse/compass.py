@@ -536,55 +536,95 @@ class COMPASSPolicy(SparsePolicy):
             nvtx.pop_range()
 
             nvtx.push_range("compass_v2_regroup", color="purple")
-            grouped_per_head = []
+            # 1. Collect all unique selected block IDs across all heads
+            unique_bids = set()
             for h in range(selection.num_kv_heads):
-                flat_subs = [
-                    (bid, si)
-                    for bid, sub_indices in selection.per_head_entries[h]
-                    for si in sub_indices
-                ]
-                grouped: Dict[int, list] = {}
-                for bid, si in flat_subs:
-                    grouped.setdefault(bid, []).append(si)
-                grouped_per_head.append(list(grouped.items()))
+                for bid, _ in selection.per_head_entries[h]:
+                    unique_bids.add(bid)
+            unique_bids = sorted(list(unique_bids))
+
+            # 2. Divide blocks into chunks (e.g., 2 blocks = 8192 tokens max per chunk)
+            blocks_per_chunk = 2
+            bid_chunks = [unique_bids[i:i + blocks_per_chunk] for i in range(0, len(unique_bids), blocks_per_chunk)]
             nvtx.pop_range()
 
-            curr_slot = 0
-            staging_idx = 0
+            # 3. Intra-layer Pipelining: Loop through chunks
+            for chunk_iter_idx, active_bids in enumerate(bid_chunks):
+                active_bids_set = set(active_bids)
 
-            nvtx.push_range(f"COMPASS L{layer_id}: staging_sync", color="yellow")
-            offload_engine.staging_read_done[staging_idx].synchronize()
-            nvtx.pop_range()
+                grouped_per_head = []
+                for h in range(selection.num_kv_heads):
+                    flat_subs = [
+                        (bid, si)
+                        for bid, sub_indices in selection.per_head_entries[h]
+                        if bid in active_bids_set
+                        for si in sub_indices
+                    ]
+                    grouped: Dict[int, list] = {}
+                    for bid, si in flat_subs:
+                        grouped.setdefault(bid, []).append(si)
+                    grouped_per_head.append(list(grouped.items()))
 
-            nvtx.push_range(f"COMPASS L{layer_id}: V2 Packed Gather", color="orange")
-            max_tok, kv_indptr_cpu = offload_engine.gather_packed_subblocks_all_heads(
-                layer_id, grouped_per_head, fine_grain, staging_idx=staging_idx
-            )
-            # Must copy offsets tensor to GPU
-            kv_indptr_gpu = kv_indptr_cpu.to(q.device, non_blocking=True)
-            nvtx.pop_range()
+                # Multi-buffer slot assignment for intra-layer ping-pong overlap
+                slot_idx = chunk_iter_idx % offload_engine.num_jagged_slots
 
-            nvtx.push_range(f"COMPASS L{layer_id}: V2 H2D Packed", color="green")
-            offload_engine.load_packed_staging_to_jagged_gpu(
-                total_tokens=max_tok, stream=compute_stream
-            )
-            nvtx.pop_range()
-
-            from nanovllm.ops.compass import compass_jagged_chunked_prefill
-            with torch.cuda.stream(compute_stream):
-                nvtx.push_range(f"COMPASS L{layer_id}: V2 Jagged Kernel", color="blue")
-                
-                # Fetch as 1D from dedicated jagged buffers
-                k_packed = offload_engine.jagged_k_gpu
-                v_packed = offload_engine.jagged_v_gpu
-                
-                sm_scale = 1.0 / math.sqrt(self._head_dim)
-                historical_o, historical_lse = compass_jagged_chunked_prefill(
-                    q.unsqueeze(0), k_packed, v_packed, kv_indptr_gpu, 
-                    sm_scale=sm_scale, causal=False
-                )
-                
+                nvtx.push_range(f"COMPASS L{layer_id}: jagged_slot_sync", color="yellow")
+                # Wait for previous computation on this slot to complete before overwriting staging buffers
+                offload_engine.jagged_compute_done[slot_idx].synchronize()
                 nvtx.pop_range()
+
+                nvtx.push_range(f"COMPASS L{layer_id}: V2 Packed Gather", color="orange")
+                max_tok, kv_indptr_cpu = offload_engine.gather_packed_subblocks_all_heads(
+                    layer_id, grouped_per_head, fine_grain, slot_idx=slot_idx
+                )
+                if max_tok == 0:
+                    nvtx.pop_range()
+                    continue
+                nvtx.pop_range()
+
+                transfer_stream = offload_engine.slot_transfer_streams[slot_idx]
+                with torch.cuda.stream(transfer_stream):
+                    nvtx.push_range(f"COMPASS L{layer_id}: V2 H2D Packed", color="green")
+                    
+                    # Must copy offsets tensor to GPU
+                    kv_indptr_gpu = kv_indptr_cpu.to(q.device, non_blocking=True)
+                    
+                    offload_engine.load_packed_staging_to_jagged_gpu(
+                        total_tokens=max_tok, stream=transfer_stream, slot_idx=slot_idx
+                    )
+                    
+                    offload_engine.ring_slot_ready[slot_idx].record(transfer_stream)
+                    nvtx.pop_range()
+
+                from nanovllm.ops.compass import compass_jagged_chunked_prefill
+                with torch.cuda.stream(compute_stream):
+                    compute_stream.wait_event(offload_engine.ring_slot_ready[slot_idx])
+                    
+                    nvtx.push_range(f"COMPASS L{layer_id}: V2 Jagged Kernel", color="blue")
+                    
+                    # Fetch as 1D from dedicated jagged buffers for this slot
+                    k_packed = offload_engine.jagged_k_gpu[slot_idx]
+                    v_packed = offload_engine.jagged_v_gpu[slot_idx]
+                    
+                    sm_scale = 1.0 / math.sqrt(self._head_dim)
+                    o, lse = compass_jagged_chunked_prefill(
+                        q.unsqueeze(0), k_packed, v_packed, kv_indptr_gpu, 
+                        sm_scale=sm_scale, causal=False
+                    )
+                    
+                    if historical_o is None:
+                        historical_o = o
+                        historical_lse = lse
+                    else:
+                        historical_o, historical_lse = merge_attention_outputs(
+                            historical_o, historical_lse, o, lse
+                        )
+                    
+                    # Record completion of the GPU kernel so CPU knows when it's safe to overwrite the slot
+                    offload_engine.jagged_compute_done[slot_idx].record(compute_stream)
+                    
+                    nvtx.pop_range()
+                    
             # m_global was used in V1 batching across seqlen loop. V2 processes all tokens simultaneously without slicing seqs.
             historical_m_global = None
             

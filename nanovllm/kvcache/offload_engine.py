@@ -181,14 +181,20 @@ class OffloadEngine:
 
         # ========== V2 Jagged Buffers ==========
         # For V2 jagged attention, gather dynamically sized subblocks across ALL heads.
-        # This can easily exceed the capacity of a single ring slot (which is block_size per head).
-        max_jagged_tokens = max_capacity_tokens * num_kv_heads
-        self.jagged_staging_k = torch.zeros((max_jagged_tokens, head_dim), dtype=dtype, device="cpu", pin_memory=True)
-        self.jagged_staging_v = torch.zeros((max_jagged_tokens, head_dim), dtype=dtype, device="cpu", pin_memory=True)
-        self.jagged_k_gpu = torch.zeros((max_jagged_tokens, head_dim), dtype=dtype, device="cuda")
-        self.jagged_v_gpu = torch.zeros((max_jagged_tokens, head_dim), dtype=dtype, device="cuda")
+        self.num_jagged_slots = self.num_ring_slots
+        max_jagged_tokens = num_cpu_blocks * block_size * num_kv_heads
         
-        logger.info(f"  V2 Jagged buffers allocated (Capacity {max_jagged_tokens} tokens)")
+        self.jagged_staging_k = [torch.zeros((max_jagged_tokens, head_dim), dtype=dtype, device="cpu", pin_memory=True) for _ in range(self.num_jagged_slots)]
+        self.jagged_staging_v = [torch.zeros((max_jagged_tokens, head_dim), dtype=dtype, device="cpu", pin_memory=True) for _ in range(self.num_jagged_slots)]
+        self.jagged_k_gpu = [torch.zeros((max_jagged_tokens, head_dim), dtype=dtype, device="cuda") for _ in range(self.num_jagged_slots)]
+        self.jagged_v_gpu = [torch.zeros((max_jagged_tokens, head_dim), dtype=dtype, device="cuda") for _ in range(self.num_jagged_slots)]
+        
+        # Events to track when the GPU is done computing with a specific jagged slot
+        self.jagged_compute_done = [torch.cuda.Event() for _ in range(self.num_jagged_slots)]
+        for slot_idx in range(self.num_jagged_slots):
+            self.jagged_compute_done[slot_idx].record()
+        
+        logger.info(f"  V2 Jagged buffers allocated ({self.num_jagged_slots} slots, {max_jagged_tokens} max tokens)")
 
         # ========== Compute stream for async operations ==========
         # IMPORTANT: Create a dedicated compute stream (not default stream!)
@@ -929,7 +935,7 @@ class OffloadEngine:
         layer_id: int,
         per_head_selections: "List[List]",  # [H_KV][(bid, [si...])]
         sub_block_size: int = 128,
-        staging_idx: int = 0,
+        slot_idx: int = 0,
     ) -> "Tuple[int, torch.Tensor]":
         """
         (V2) Gathers all subblocks for all heads into a pure 1D flattened array
@@ -938,8 +944,8 @@ class OffloadEngine:
             total_tokens: int (total valid tokens scattered across all heads)
             kv_indptr_tensor: torch.Tensor [H_KV + 1] on CPU representing head boundaries
         """
-        k_staging = self.jagged_staging_k
-        v_staging = self.jagged_staging_v
+        k_staging = self.jagged_staging_k[slot_idx]
+        v_staging = self.jagged_staging_v[slot_idx]
         
         kv_indptr = [0]
         token_offset = 0
@@ -987,15 +993,16 @@ class OffloadEngine:
         total_tokens: int,
         stream: torch.cuda.Stream,
         is_prefill: bool = True,
+        slot_idx: int = 0,
     ):
         """
         (V2) Loads the 1D flattened packed array from the globally sizing CPU staging 
         to the globally sized GPU staging buffer.
         """
-        gpu_k = self.jagged_k_gpu
-        gpu_v = self.jagged_v_gpu
-        staging_k = self.jagged_staging_k
-        staging_v = self.jagged_staging_v
+        gpu_k = self.jagged_k_gpu[slot_idx]
+        gpu_v = self.jagged_v_gpu[slot_idx]
+        staging_k = self.jagged_staging_k[slot_idx]
+        staging_v = self.jagged_staging_v[slot_idx]
 
         with torch.cuda.stream(stream):
             # 1D exact flat copy
