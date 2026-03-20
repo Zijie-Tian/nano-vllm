@@ -179,6 +179,17 @@ class OffloadEngine:
             f"= {self.num_staging_buffers * per_buf_mb:.1f} MB total (Pinned CPU)"
         )
 
+        # ========== V2 Jagged Buffers ==========
+        # For V2 jagged attention, gather dynamically sized subblocks across ALL heads.
+        # This can easily exceed the capacity of a single ring slot (which is block_size per head).
+        max_jagged_tokens = max_capacity_tokens * num_kv_heads
+        self.jagged_staging_k = torch.zeros((max_jagged_tokens, head_dim), dtype=dtype, device="cpu", pin_memory=True)
+        self.jagged_staging_v = torch.zeros((max_jagged_tokens, head_dim), dtype=dtype, device="cpu", pin_memory=True)
+        self.jagged_k_gpu = torch.zeros((max_jagged_tokens, head_dim), dtype=dtype, device="cuda")
+        self.jagged_v_gpu = torch.zeros((max_jagged_tokens, head_dim), dtype=dtype, device="cuda")
+        
+        logger.info(f"  V2 Jagged buffers allocated (Capacity {max_jagged_tokens} tokens)")
+
         # ========== Compute stream for async operations ==========
         # IMPORTANT: Create a dedicated compute stream (not default stream!)
         # Default stream has implicit synchronization with other streams,
@@ -216,10 +227,19 @@ class OffloadEngine:
             torch.cuda.Event() for _ in range(self.num_ring_slots)
         ]
 
+        # ========== Per-staging-buffer read_done events for async pipeline ==========
+        # staging_read_done[staging_idx] = CUDA Event for when GPU finishes reading from staging buffer
+        # This prevents CPU head-of-line blocking when reusing staging buffers
+        self.staging_read_done = [
+            torch.cuda.Event() for _ in range(self.num_staging_buffers)
+        ]
+
         # Initialize all compute_done events (record them once)
         # This prevents undefined behavior on first load_to_slot_layer call
         for slot_idx in range(self.num_ring_slots):
             self.ring_slot_compute_done[slot_idx].record()
+        for staging_idx in range(self.num_staging_buffers):
+            self.staging_read_done[staging_idx].record()
         # torch.cuda.synchronize()  # Ensure all events are recorded
 
         # ========== Event tracking for async transfers ==========
@@ -813,6 +833,10 @@ class OffloadEngine:
                 self.v_cache_gpu[slot_idx, :num_tokens].copy_(
                     staging_v[:num_tokens], non_blocking=True
                 )
+                
+            # Record that the staging buffer has been read by the GPU
+            self.staging_read_done[staging_idx].record(stream)
+            
             self.ring_slot_ready[slot_idx].record(stream)
         nvtx.pop_range()
 
@@ -900,4 +924,85 @@ class OffloadEngine:
         max_tokens = max(per_head_tokens) if per_head_tokens else 0
         return max_tokens, per_head_tokens
 
+    def gather_packed_subblocks_all_heads(
+        self,
+        layer_id: int,
+        per_head_selections: "List[List]",  # [H_KV][(bid, [si...])]
+        sub_block_size: int = 128,
+        staging_idx: int = 0,
+    ) -> "Tuple[int, torch.Tensor]":
+        """
+        (V2) Gathers all subblocks for all heads into a pure 1D flattened array
+        directly onto the globally allocated jagged_staging_cpu.
+        Returns:
+            total_tokens: int (total valid tokens scattered across all heads)
+            kv_indptr_tensor: torch.Tensor [H_KV + 1] on CPU representing head boundaries
+        """
+        k_staging = self.jagged_staging_k
+        v_staging = self.jagged_staging_v
+        
+        kv_indptr = [0]
+        token_offset = 0
+
+        for h_actual, head_sels in enumerate(per_head_selections):
+            for cpu_block_id, sub_indices in head_sels:
+                i = 0
+                while i < len(sub_indices):
+                    run_start = sub_indices[i]
+                    run_len = 1
+                    while (i + run_len < len(sub_indices)
+                           and sub_indices[i + run_len] == run_start + run_len):
+                        run_len += 1
+
+                    n_tok = run_len * sub_block_size
+                    src_start = run_start * sub_block_size
+                    src_end = src_start + n_tok
+                    dst_start = token_offset
+                    dst_end = token_offset + n_tok
+                    
+                    if self.is_head_first:
+                        k_staging[dst_start:dst_end, :].copy_(
+                            self.k_cache_cpu[layer_id, cpu_block_id, h_actual, src_start:src_end, :]
+                        )
+                        v_staging[dst_start:dst_end, :].copy_(
+                            self.v_cache_cpu[layer_id, cpu_block_id, h_actual, src_start:src_end, :]
+                        )
+                    else:
+                        k_staging[dst_start:dst_end, :].copy_(
+                            self.k_cache_cpu[layer_id, cpu_block_id, src_start:src_end, h_actual, :]
+                        )
+                        v_staging[dst_start:dst_end, :].copy_(
+                            self.v_cache_cpu[layer_id, cpu_block_id, src_start:src_end, h_actual, :]
+                        )
+                    
+                    token_offset += n_tok
+                    i += run_len
+            kv_indptr.append(token_offset)
+            
+        kv_indptr_tensor = torch.tensor(kv_indptr, dtype=torch.int32, device="cpu")
+        return token_offset, kv_indptr_tensor
+
+    def load_packed_staging_to_jagged_gpu(
+        self,
+        total_tokens: int,
+        stream: torch.cuda.Stream,
+        is_prefill: bool = True,
+    ):
+        """
+        (V2) Loads the 1D flattened packed array from the globally sizing CPU staging 
+        to the globally sized GPU staging buffer.
+        """
+        gpu_k = self.jagged_k_gpu
+        gpu_v = self.jagged_v_gpu
+        staging_k = self.jagged_staging_k
+        staging_v = self.jagged_staging_v
+
+        with torch.cuda.stream(stream):
+            # 1D exact flat copy
+            gpu_k[:total_tokens, :].copy_(staging_k[:total_tokens, :], non_blocking=True)
+            gpu_v[:total_tokens, :].copy_(staging_v[:total_tokens, :], non_blocking=True)
+
+        from nanovllm.utils.memory_observer import MemoryObserver
+        transfer_bytes = 2 * total_tokens * self.head_dim * gpu_k.element_size()
+        MemoryObserver.record_h2d(transfer_bytes, is_prefill=is_prefill)
 

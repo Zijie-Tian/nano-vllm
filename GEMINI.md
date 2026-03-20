@@ -62,6 +62,11 @@ The architecture consists of 4 core modules:
     *   **Pre-execution Check**: Always check if `build/nano-vllm-envs.sh` exists.
     *   **TVM Configuration**: If the script does *not* exist, you must configure TVM first by running: `python3 scripts/setup_tvm.py`. Wait for the build to complete, then source the script: `source build/nano-vllm-envs.sh`.
 *   **test_ruler.py**: Read `docs/test_ruler_usage_guide.md` before running. Do not use `--help`. Match `data-dir` with appropriate `max-model-len`. **MANDATORY**: When tuning COMPASS hyperparameters (`top-p` and `lambda_threshold`), you MUST use the explicitly added CLI arguments (`--compass-top-p` and `--compass-lambda`) rather than modifying defaults in `config.py`.
+    *   **Standard Testing Commands**: To quickly verify single-sample correctness, use these verified templates (tested on GPU 2/3):
+        *   **Full Context**: `source build/nano-vllm-envs.sh && CUDA_VISIBLE_DEVICES=2 python3 tests/test_ruler.py --model ~/models/Llama-3.1-8B-Instruct --data-dir tests/data/ruler_32k --datasets niah_single_1 --num-samples 1 --max-model-len 40960 --enable-offload`
+        *   **BLASST**: `source build/nano-vllm-envs.sh && CUDA_VISIBLE_DEVICES=2 python3 tests/test_ruler.py --model ~/models/Llama-3.1-8B-Instruct --data-dir tests/data/ruler_32k --datasets niah_single_1 --num-samples 1 --max-model-len 40960 --enable-offload --sparse-policy BLASST`
+        *   **COMPASS**: `source build/nano-vllm-envs.sh && CUDA_VISIBLE_DEVICES=2 python3 tests/test_ruler.py --model ~/models/Llama-3.1-8B-Instruct --data-dir tests/data/ruler_32k --datasets niah_single_1 --num-samples 1 --max-model-len 40960 --enable-offload --sparse-policy COMPASS`
+    *   **Data & Model Paths**: The model directory MUST be `~/models`, and RULER data MUST be in `tests/data`.
 *   **Documentation Indexing**: Whenever a new document is added to the `docs/` directory, its path and purpose **MUST** be immediately indexed in both `GEMINI.md` and `CLAUDE.md`.
 *   **Planning Files**: Use `findings.md`, `task_plan.md`, and `progress.md` for complex tasks. These are excluded from git. **At the beginning of every new task, you MUST automatically delete any existing `task_plan.md`, `findings.md`, and `progress.md` files to ensure a fresh state.**
 
@@ -106,6 +111,7 @@ The architecture consists of 4 core modules:
 | [`docs/compass_perhead_scheduling_guide.md`](docs/compass_perhead_scheduling_guide.md) | COMPASS per-head KV cache 调度设计：独立 head 选择/传输/计算、staging buffer 内存布局、同步模型、m_global 跨 chunk bug 修复、IO 节省实测数据。 |
 | [`docs/compass_async_pipeline_guide.md`](docs/compass_async_pipeline_guide.md) | COMPASS async double-buffered pipeline：双 slot 交替、coalesced gather、同步模型、NVTX 标记、性能对比（prefill −47%）。 |
 | [`docs/compass_head_first_layout_and_async_staging.md`](docs/compass_head_first_layout_and_async_staging.md) | COMPASS Head-First KV Cache layout eliminating H2D IO amplification, and fully asynchronous multi-staging buffers avoiding CPU blocking overhead. |
+| [`docs/compass_v2_jagged_architecture.md`](docs/compass_v2_jagged_architecture.md) | COMPASS V2 Jagged Memory Architecture: 1D packed buffer mapping, top-p slice gathering, bulk DMA, and custom Triton kernel integration. |
 
 ---
 
