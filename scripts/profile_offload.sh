@@ -36,6 +36,8 @@ ENABLE_OFFLOAD="--enable-offload"
 MAX_NEW_TOKENS="1"
 MODEL=""
 DATA_DIR_OVERRIDE=""
+COMPASS_TOP_P=""
+COMPASS_LAMBDA=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -86,6 +88,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --max-new-tokens)
             MAX_NEW_TOKENS="$2"
+            shift 2
+            ;;
+        --compass-top-p)
+            COMPASS_TOP_P="$2"
+            shift 2
+            ;;
+        --compass-lambda)
+            COMPASS_LAMBDA="$2"
             shift 2
             ;;
         -h|--help)
@@ -212,6 +222,15 @@ if [ -n "$MODEL" ]; then
     MODEL_ARG="--model $MODEL"
 fi
 
+# Build compass arguments
+COMPASS_ARGS=""
+if [ -n "$COMPASS_TOP_P" ]; then
+    COMPASS_ARGS="$COMPASS_ARGS --compass-top-p $COMPASS_TOP_P"
+fi
+if [ -n "$COMPASS_LAMBDA" ]; then
+    COMPASS_ARGS="$COMPASS_ARGS --compass-lambda $COMPASS_LAMBDA"
+fi
+
 # Run nsys profile and capture exit code
 CUDA_VISIBLE_DEVICES=$GPU_ID PYTHONPATH="$PROJECT_ROOT:$PYTHONPATH" \
 nsys profile \
@@ -230,6 +249,7 @@ nsys profile \
         $ENABLE_OFFLOAD \
         $SPARSE_POLICY_ARG \
         $MODEL_ARG \
+        $COMPASS_ARGS \
         --quiet
 EXIT_CODE=$?
 

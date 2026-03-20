@@ -365,6 +365,7 @@ def run_ruler_benchmark(
     sparse_block_size: int = 128,
     sparse_stride: int = 8,
     blasst_lambda: float = None,
+    compass_lambda: float = None,
     compass_top_p: float = None,
     dtype: str = None,
 ) -> Dict:
@@ -451,7 +452,10 @@ def run_ruler_benchmark(
             llm_kwargs["sparse_samples_per_chunk"] = sparse_samples
             llm_kwargs["sparse_stride"] = sparse_stride
         elif sparse_policy_type == SparsePolicyType.COMPASS:
-            if blasst_lambda is not None:
+            if compass_lambda is not None:
+                llm_kwargs["lambda_threshold"] = compass_lambda
+            elif blasst_lambda is not None:
+                # Fallback for older scripts using blasst-lambda for threshold
                 llm_kwargs["lambda_threshold"] = blasst_lambda
             if compass_top_p is not None:
                 llm_kwargs["compass_top_p"] = compass_top_p
@@ -756,6 +760,12 @@ if __name__ == "__main__":
         help="COMPASS: top-p threshold for CPU sub-block selection (default: 0.9)",
     )
     parser.add_argument(
+        "--compass-lambda",
+        type=float,
+        default=None,
+        help="COMPASS: L1 block selection threshold (default: 0.001)",
+    )
+    parser.add_argument(
         "--dtype",
         type=str,
         default=None,
@@ -799,6 +809,7 @@ if __name__ == "__main__":
         sparse_block_size=args.sparse_block_size,
         sparse_stride=args.sparse_stride,
         blasst_lambda=args.blasst_lambda,
+        compass_lambda=args.compass_lambda,
         compass_top_p=args.compass_top_p,
         dtype=args.dtype,
     )
