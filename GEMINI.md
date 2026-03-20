@@ -46,6 +46,9 @@ The architecture consists of 4 core modules:
 *   **Test Style**: Minimal prints, use structured data (e.g., all ones) for easy manual verification, use `assert` for validation, and only print `test_xxx: PASSED` at the end.
 *   **Profiling (nsys)**: **MUST** use `scripts/profile_offload.sh`. Do NOT run `nsys` directly. **MUST** profile on a single GPU only — do NOT run other GPU workloads in parallel during profiling, as PCIe bus contention skews H2D/D2H transfer measurements.
 *   **Benchmarking**: Before running `bench*.py`, ensure exclusive GPU access by checking for other compute-intensive PIDs.
+*   **Single-GPU Testing (CRITICAL)**: When running `test_ruler.py` or `profile_offload.sh`, **NEVER** run two instances simultaneously on different GPUs. CPU-side operations (AVX cosine similarity in `cos matmul`, memory bandwidth for H2D staging) are shared resources — parallel GPU runs cause severe CPU contention (e.g., `cos matmul` ballooning from 0.08s to 1.8s, a 20x slowdown). Always run benchmarks **sequentially** on one GPU at a time.
+*   **COMPASS Hyperparameters**: When testing COMPASS, always pass `--compass-top-p` and `--compass-lambda` via CLI. For correctness validation (100% density), use `--compass-top-p 1.0 --compass-lambda 1e-10`. For performance benchmarking, use `--compass-top-p 0.9 --compass-lambda 0.0001`.
+*   **`lambda=0.0` Bug**: Never use `--compass-lambda 0.0` — it triggers a `ValueError: math domain error` due to `log(0)`. Use `1e-10` as the minimum value.
 
 ---
 
@@ -62,11 +65,63 @@ The architecture consists of 4 core modules:
     *   **Pre-execution Check**: Always check if `build/nano-vllm-envs.sh` exists.
     *   **TVM Configuration**: If the script does *not* exist, you must configure TVM first by running: `python3 scripts/setup_tvm.py`. Wait for the build to complete, then source the script: `source build/nano-vllm-envs.sh`.
 *   **test_ruler.py**: Read `docs/test_ruler_usage_guide.md` before running. Do not use `--help`. Match `data-dir` with appropriate `max-model-len`. **MANDATORY**: When tuning COMPASS hyperparameters (`top-p` and `lambda_threshold`), you MUST use the explicitly added CLI arguments (`--compass-top-p` and `--compass-lambda`) rather than modifying defaults in `config.py`.
-    *   **Standard Testing Commands**: To quickly verify single-sample correctness, use these verified templates (tested on GPU 2/3):
-        *   **Full Context**: `source build/nano-vllm-envs.sh && CUDA_VISIBLE_DEVICES=2 python3 tests/test_ruler.py --model ~/models/Llama-3.1-8B-Instruct --data-dir tests/data/ruler_32k --datasets niah_single_1 --num-samples 1 --max-model-len 40960 --enable-offload`
-        *   **BLASST**: `source build/nano-vllm-envs.sh && CUDA_VISIBLE_DEVICES=2 python3 tests/test_ruler.py --model ~/models/Llama-3.1-8B-Instruct --data-dir tests/data/ruler_32k --datasets niah_single_1 --num-samples 1 --max-model-len 40960 --enable-offload --sparse-policy BLASST`
-        *   **COMPASS**: `source build/nano-vllm-envs.sh && CUDA_VISIBLE_DEVICES=2 python3 tests/test_ruler.py --model ~/models/Llama-3.1-8B-Instruct --data-dir tests/data/ruler_32k --datasets niah_single_1 --num-samples 1 --max-model-len 40960 --enable-offload --sparse-policy COMPASS`
+    *   **Standard Testing Commands**: To quickly verify single-sample correctness, use these verified templates:
+        *   **Full Context (no sparse)**: `source build/nano-vllm-envs.sh && CUDA_VISIBLE_DEVICES=<GPU> python3 tests/test_ruler.py --model ~/models/Llama-3.1-8B-Instruct --data-dir tests/data/ruler_32k --datasets niah_single_1 --num-samples 1 --max-model-len 40960 --enable-offload`
+        *   **BLASST**: `source build/nano-vllm-envs.sh && CUDA_VISIBLE_DEVICES=<GPU> python3 tests/test_ruler.py --model ~/models/Llama-3.1-8B-Instruct --data-dir tests/data/ruler_32k --datasets niah_single_1 --num-samples 1 --max-model-len 40960 --enable-offload --sparse-policy BLASST`
+        *   **COMPASS (correctness, 100% density)**: `source build/nano-vllm-envs.sh && CUDA_VISIBLE_DEVICES=<GPU> python3 tests/test_ruler.py --model ~/models/Llama-3.1-8B-Instruct --data-dir tests/data/ruler_32k --datasets niah_single_1 --num-samples 1 --max-model-len 40960 --enable-offload --sparse-policy COMPASS --compass-top-p 1.0 --compass-lambda 1e-10`
+        *   **COMPASS (performance, top-p=0.9)**: `source build/nano-vllm-envs.sh && CUDA_VISIBLE_DEVICES=<GPU> python3 tests/test_ruler.py --model ~/models/Llama-3.1-8B-Instruct --data-dir tests/data/ruler_32k --datasets niah_single_1 --num-samples 1 --max-model-len 40960 --enable-offload --sparse-policy COMPASS --compass-top-p 0.9 --compass-lambda 0.0001`
     *   **Data & Model Paths**: The model directory MUST be `~/models`, and RULER data MUST be in `tests/data`.
+    *   **Interpreting COMPASS Logs**: The `select_blocks` output shows `IO_density` (union of blocks across heads needed for H2D transfer) and `Compute_density` (actual per-head sub-blocks computed vs full attention). The `compute_chunked_prefill` output shows how many intra-layer pipeline pieces are used for overlap.
+    *   **Expected Performance (32k, Llama-3.1-8B, single 3090)**:
+        *   Full context (no sparse): ~12s prefill
+        *   COMPASS top-p=0.9: ~7-10s prefill (depends on sample sparsity)
+        *   COMPASS top-p=1.0: ~10-11s prefill (all blocks selected, pipeline overhead only)
+*   **Nsys Profiling with COMPASS**: Use `scripts/profile_offload.sh` with COMPASS-specific arguments:
+    ```
+    source build/nano-vllm-envs.sh && bash scripts/profile_offload.sh \
+        --policy COMPASS --gpu <GPU> --ctx-len 32k \
+        --dataset niah_single_1 \
+        --model ~/models/Llama-3.1-8B-Instruct \
+        --data-dir tests/data/ruler_32k/ \
+        --compass-top-p 0.9 --compass-lambda 0.0001
+    ```
+    *   Output `.nsys-rep` files are saved to `results/nsys/`.
+    *   In the Nsight Systems timeline, look for: orange="V2 Packed Gather" (CPU packing), green="V2 H2D Packed" (PCIe transfer), blue="V2 Jagged Kernel" (GPU compute). Overlap between green and blue across different slots confirms the intra-layer pipeline is working.
+
+### 2.3 COMPASS Parameter Reference & Tuning Guide
+
+**CLI Arguments** (passed to `test_ruler.py` or `profile_offload.sh`):
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--compass-top-p` | `0.9` (in config.py) | Top-p threshold for CPU L1 sub-block selection. Higher → more blocks selected → higher accuracy but slower. |
+| `--compass-lambda` | `0.001` (in config.py) | Lambda threshold for block importance scoring. Controls minimum relevance cutoff via `log(lambda)`. |
+
+**Internal Config** (in `nanovllm/config.py`, `SparsePolicyConfig`):
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `compass_top_p` | `0.9` | Same as `--compass-top-p` CLI. |
+| `lambda_threshold` | `0.001` | Same as `--compass-lambda` CLI. |
+
+**Tuning Recipes**:
+*   **Correctness Validation** (verify pipeline logic without sparsity): `--compass-top-p 1.0 --compass-lambda 1e-10` → selects ALL blocks, 100% density, must achieve 100% accuracy. If this fails, it indicates a bug in the pipeline, not in the sparsity logic.
+*   **Performance Benchmarking** (typical sparse regime): `--compass-top-p 0.9 --compass-lambda 0.0001` → ~89% compute density on 32k NIAH tasks, good accuracy/speed tradeoff.
+*   **Aggressive Sparsity** (higher speedup, risk accuracy drop): `--compass-top-p 0.7 --compass-lambda 0.001` → significant pruning, may fail on multi-needle tasks.
+*   **Sweep top-p**: Fix `--compass-lambda 0.0001`, sweep `--compass-top-p` from `0.5` to `1.0` in steps of `0.1` to find the accuracy/performance sweet spot.
+*   ⚠️ **NEVER** use `--compass-lambda 0.0` → crashes with `ValueError: math domain error` due to `log(0)`. Use `1e-10` as minimum.
+
+**Understanding Log Output**:
+```
+# select_blocks log (one per layer per seq_chunk):
+[COMPASS] layer=5, seq_chunk=3: IO_density=92.0% (206/224), Compute_density=89.1% (1596/1792), per-head: [H0:200, H1:199, ...]
+
+# compute_chunked_prefill log (one per layer per seq_chunk):
+[COMPASS] layer=5, seq_chunk=3: total 1596 sub-blocks -> pipelined into 4 pieces (max 2 blks/piece) for overlap
+```
+*   **`IO_density`**: Percentage of KV blocks that need H2D transfer (union across all heads). Lower = less PCIe bandwidth used.
+*   **`Compute_density`**: Percentage of sub-blocks actually computed by the GPU kernel (sum across all heads). Lower = faster Triton kernel.
+*   **`pipelined into N pieces`**: Number of intra-layer pipeline chunks. More pieces = better overlap potential between H2D and GPU compute, but more kernel launch overhead.
 *   **Documentation Indexing**: Whenever a new document is added to the `docs/` directory, its path and purpose **MUST** be immediately indexed in both `GEMINI.md` and `CLAUDE.md`.
 *   **Planning Files**: Use `findings.md`, `task_plan.md`, and `progress.md` for complex tasks. These are excluded from git. **At the beginning of every new task, you MUST automatically delete any existing `task_plan.md`, `findings.md`, and `progress.md` files to ensure a fresh state.**
 
