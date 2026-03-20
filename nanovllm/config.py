@@ -63,6 +63,7 @@ class Config:
     # COMPASS specific parameters
     lambda_threshold: float = 0.001  # Threshold for COMPASS block selection
     compass_top_p: float = 0.9  # Top-p threshold for CPU sub-block selection
+    compass_theta: float = 0.6  # Self-cosine threshold (SpargeAttention): force-select blocks with diverse tokens
 
     # BLASST specific parameters
     blasst_a: int = 16384  # Inverse formula numerator (λ = a / L). Default 16384 gives λ=0.5 at 32K.

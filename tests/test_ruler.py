@@ -367,6 +367,7 @@ def run_ruler_benchmark(
     blasst_lambda: float = None,
     compass_lambda: float = None,
     compass_top_p: float = None,
+    compass_theta: float = None,
     dtype: str = None,
 ) -> Dict:
     """
@@ -459,6 +460,8 @@ def run_ruler_benchmark(
                 llm_kwargs["lambda_threshold"] = blasst_lambda
             if compass_top_p is not None:
                 llm_kwargs["compass_top_p"] = compass_top_p
+            if compass_theta is not None:
+                llm_kwargs["compass_theta"] = compass_theta
         elif sparse_policy_type == SparsePolicyType.BLASST:
             if blasst_lambda is not None:
                 llm_kwargs["blasst_fixed_lambda"] = blasst_lambda
@@ -537,6 +540,16 @@ def run_ruler_benchmark(
                     print(f"    cos matmul:  {stats['prof_matmul']:.3f}s  ({stats['prof_matmul']/max(total_cpu,1e-9)*100:5.1f}%)")
                     print(f"    top-p sel:   {stats['prof_topp']:.3f}s  ({stats['prof_topp']/max(total_cpu,1e-9)*100:5.1f}%)")
                     print(f"    mask build:  {stats['prof_mask_build']:.3f}s  ({stats['prof_mask_build']/max(total_cpu,1e-9)*100:5.1f}%)")
+                    if stats.get('prof_self_cos', 0) > 0:
+                        print(f"    self-cos:    {stats['prof_self_cos']:.3f}s  ({stats['prof_self_cos']/max(total_cpu,1e-9)*100:5.1f}%)")
+                if stats.get('force_selected_k', 0) > 0 or stats.get('force_selected_q_heads', 0) > 0:
+                    print(f"\n  Self-Cosine Force-Selection:")
+                    print(f"    K sub-blocks force-selected:  {stats.get('force_selected_k', 0)}")
+                    print(f"    Q heads triggered full-select: {stats.get('force_selected_q_heads', 0)}")
+                    pk_blocks = stats.get('persistent_k_blocks', 0)
+                    pk_total = stats.get('persistent_k_total', 0)
+                    pk_ratio = pk_blocks / max(pk_total, 1) * 100
+                    print(f"    Persistent K (IO-level):  {pk_blocks}/{pk_total} ({pk_ratio:.1f}%)")
 
     # Cleanup (only if not fresh_llm mode, since fresh mode cleans up itself)
     if llm is not None:
@@ -766,6 +779,12 @@ if __name__ == "__main__":
         help="COMPASS: L1 block selection threshold (default: 0.001)",
     )
     parser.add_argument(
+        "--compass-theta",
+        type=float,
+        default=None,
+        help="COMPASS: self-cosine threshold (SpargeAttention). Force-select diverse blocks below this (default: 0.6)",
+    )
+    parser.add_argument(
         "--dtype",
         type=str,
         default=None,
@@ -811,6 +830,7 @@ if __name__ == "__main__":
         blasst_lambda=args.blasst_lambda,
         compass_lambda=args.compass_lambda,
         compass_top_p=args.compass_top_p,
+        compass_theta=args.compass_theta,
         dtype=args.dtype,
     )
 

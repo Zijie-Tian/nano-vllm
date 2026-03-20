@@ -71,6 +71,7 @@ def create_kvcache_manager(config: "Config") -> KVCacheManager:
                 policy_kwargs = {
                     "lambda_threshold": getattr(config, "lambda_threshold", 0.001),
                     "top_p": getattr(config, "compass_top_p", 0.9),
+                    "theta": getattr(config, "compass_theta", 0.6),
                 }
             elif sparse_policy_type == SparsePolicyType.BLASST:
                 policy_kwargs = {
@@ -124,6 +125,7 @@ def create_kvcache_manager(config: "Config") -> KVCacheManager:
         policy_kwargs = {
             "lambda_threshold": getattr(config, "lambda_threshold", 0.001),
             "top_p": getattr(config, "compass_top_p", 0.9),
+            "theta": getattr(config, "compass_theta", 0.6),
         }
     elif sparse_policy_type == SparsePolicyType.BLASST:
         policy_kwargs = {

@@ -3,14 +3,17 @@ COMPASS sparse attention policy for chunked prefill.
 
 Two-tier sparse attention pipeline:
 - Tier 1 (CPU, coarse): Pooled cosine similarity + softmax + top-p selection
-  produces a block-sparse mask at 128-token sub-block granularity
+  produces a block-sparse mask at 128-token sub-block granularity.
+  Self-cosine similarity (SpargeAttention) detects blocks with high internal
+  token variance and force-selects them, preventing over-pruning.
 - Tier 2 (GPU, fine): BLASST dynamically prunes within the CPU-selected sub-blocks
 
 Key design:
 - IO granularity: 4096-token chunks (offload_engine block_size)
 - Selection granularity: 128-token sub-blocks (FINE_GRAIN)
-- CPU produces a sub-block mask → converted to BLASST mask_buffer
-- BLASST further prunes sub-blocks dynamically via softmax thresholding
+- CPU produces a sub-block mask, BLASST further prunes dynamically
+- Self-cosine (SpargeAttention arXiv:2502.18137): CosSim(X) = sum(gram(L2norm(X))) / BS^2
+  If CosSim < theta, block tokens are diverse, mean pool is unreliable, force-select.
 """
 
 import logging
@@ -53,15 +56,21 @@ class COMPASSPolicy(SparsePolicy):
         self,
         lambda_threshold: float = 0.001,
         top_p: float = 0.9,
+        theta: float = 0.6,
         **kwargs,
     ):
         self._stats_num_chunks = 0
         self._stats_selected_subblocks = 0
         self._stats_total_subblocks = 0
+        self._stats_force_selected_k = 0
+        self._stats_force_selected_q_heads = 0
+        self._stats_persistent_k_blocks = 0
+        self._stats_persistent_k_total = 0
         self.lambda_threshold = lambda_threshold
         self.top_p = top_p
+        self.theta = theta
         
-        logger.info(f"[COMPASS] Initialized policy with top_p={self.top_p}, lambda={self.lambda_threshold}")
+        logger.info(f"[COMPASS] Initialized policy with top_p={self.top_p}, lambda={self.lambda_threshold}, theta={self.theta}")
 
         # Model dimensions (set during alloc_policy_metadata)
         self._num_heads: int = 0
@@ -86,6 +95,7 @@ class COMPASSPolicy(SparsePolicy):
         self._prof_matmul = 0.0
         self._prof_topp = 0.0
         self._prof_mask_build = 0.0
+        self._prof_self_cos = 0.0
         self._prof_calls = 0
 
         # BLASST second-stage pruning stats
@@ -174,6 +184,53 @@ class COMPASSPolicy(SparsePolicy):
         pooled = F.normalize(pooled, p=2, dim=-1)
         return pooled
 
+    @staticmethod
+    def _compute_self_cosine(
+        x: torch.Tensor,
+        pool_size: int = 128,
+    ) -> torch.Tensor:
+        """Compute self-cosine similarity per sub-block (SpargeAttention).
+
+        Measures how similar tokens within a sub-block are to each other.
+        High value = tokens are similar, mean pooling is accurate.
+        Low value = tokens are diverse, mean pooling is unreliable.
+
+        Algorithm (from SpargeAttn Triton kernel triton_bmm_pool_sim_simmean):
+            x_norm = L2_normalize(x, dim=-1)   # normalize each token row
+            gram = x_norm @ x_norm^T            # [pool_size, pool_size]
+            self_cos = sum(gram) / (pool_size^2)
+
+        Args:
+            x: [seq_len, heads, dim] tensor.
+            pool_size: Number of tokens per pool group.
+
+        Returns:
+            [num_groups, heads] self-cosine values in FP32.
+        """
+        seq_len, heads, dim = x.shape
+        num_groups = seq_len // pool_size
+        if num_groups == 0:
+            # Single group: always treat as homogeneous (high self-cosine)
+            return torch.ones(1, heads, dtype=torch.float32, device=x.device)
+
+        aligned = num_groups * pool_size
+        x_aligned = x[:aligned].float()  # [aligned, heads, dim]
+        x_grouped = x_aligned.reshape(num_groups, pool_size, heads, dim)
+        # Permute to [num_groups, heads, pool_size, dim]
+        x_grouped = x_grouped.permute(0, 2, 1, 3)
+        # Reshape to [num_groups * heads, pool_size, dim] for batched matmul
+        GH = num_groups * heads
+        x_flat = x_grouped.reshape(GH, pool_size, dim)
+        # L2 normalize each token row
+        x_norm = F.normalize(x_flat, p=2, dim=-1)  # [GH, pool_size, dim]
+        # Gram matrix: [GH, pool_size, pool_size]
+        gram = torch.bmm(x_norm, x_norm.transpose(1, 2))
+        # Self-cosine: mean of all gram elements per (group, head)
+        self_cos = gram.sum(dim=(1, 2)) / (pool_size * pool_size)  # [GH]
+        # Reshape back to [num_groups, heads]
+        self_cos = self_cos.reshape(num_groups, heads)
+        return self_cos
+
     def _precompute_pooled_k_gpu(
         self,
         k_cache_gpu: torch.Tensor,
@@ -181,11 +238,10 @@ class COMPASSPolicy(SparsePolicy):
         cpu_block_id: int,
         num_tokens: int,
     ) -> None:
-        """Compute pooled & normalized K on GPU, then store tiny result on CPU.
+        """Compute pooled K and self-cosine on GPU, store both on CPU.
 
         Called from on_prefill_offload BEFORE D2H copy, using GPU-resident k_cache.
-        The pooled result is ~32KB per block (vs ~2MB for full K), so the
-        GPU→CPU transfer of the pooled tensor is negligible.
+        Pooled K is ~32KB per block, self-cosine is ~256 bytes per block.
         """
         # k_cache_gpu: [kv_heads, max_tokens, head_dim] on GPU if Head-First
         if k_cache_gpu.shape[0] == self._num_kv_heads:
@@ -194,8 +250,13 @@ class COMPASSPolicy(SparsePolicy):
             k_block = k_cache_gpu[:num_tokens]  # [num_tokens, kv_heads, head_dim]
         # Compute on GPU: mean pool + L2 normalize
         pooled_k_gpu = self._pool_and_normalize(k_block, self.FINE_GRAIN)
-        # Transfer only the tiny pooled result to CPU (~32 × H × D × 4 = ~32KB)
-        self._k_pooled_cache[layer_id][cpu_block_id] = pooled_k_gpu.cpu()
+        # Compute self-cosine similarity per K sub-block on GPU
+        self_cos_k_gpu = self._compute_self_cosine(k_block, self.FINE_GRAIN)  # [G_k, kv_heads]
+        # Transfer both to CPU (pooled ~32KB, self_cos ~256 bytes)
+        self._k_pooled_cache[layer_id][cpu_block_id] = (
+            pooled_k_gpu.cpu(),
+            self_cos_k_gpu.cpu(),
+        )
 
     # ========================================================================
     # CPU Pooled Estimation (128-token sub-block granularity)
@@ -207,8 +268,13 @@ class COMPASSPolicy(SparsePolicy):
         q_pooled: torch.Tensor,
         available_blocks: list,
         block_size: int,
+        q_self_cos: torch.Tensor = None,
     ):
         """Estimate which 128-token sub-blocks to keep via pooled cosine sim + top-p.
+
+        SpargeAttention self-cosine override:
+        - K blocks with self-cosine < theta are force-selected (diverse tokens)
+        - Q groups with self-cosine < theta force-select all K blocks for that head
 
         Returns:
             (selected_mask, subblock_to_block): ([H, G_k] bool, [(bid, si)])
@@ -223,11 +289,12 @@ class COMPASSPolicy(SparsePolicy):
             return {bid: torch.ones(num_fine_per_block, dtype=torch.bool)
                     for bid in available_blocks}
 
-        # 2. Collect pooled K
+        # 2. Collect pooled K and K self-cosine
         nvtx.push_range("compass_k_collect", color="green")
         t_start = time.perf_counter()
         pooled_k_list = []
-        subblock_to_block = []  # Maps global sub-block idx → (block_id, local_sub_idx)
+        self_cos_k_list = []
+        subblock_to_block = []  # Maps global sub-block idx -> (block_id, local_sub_idx)
 
         for bid in available_blocks:
             if bid not in self._k_pooled_cache.get(layer_id, {}):
@@ -236,8 +303,16 @@ class COMPASSPolicy(SparsePolicy):
                 return {bid: torch.ones(num_fine_per_block, dtype=torch.bool)
                         for bid in available_blocks}
 
-            pk = self._k_pooled_cache[layer_id][bid]
+            cache_entry = self._k_pooled_cache[layer_id][bid]
+            # Support tuple format (pooled_k, self_cos_k)
+            if isinstance(cache_entry, tuple):
+                pk, sc_k = cache_entry
+            else:
+                pk = cache_entry
+                sc_k = None
             pooled_k_list.append(pk)
+            if sc_k is not None:
+                self_cos_k_list.append(sc_k)
             for si in range(pk.shape[0]):
                 subblock_to_block.append((bid, si))
 
@@ -246,6 +321,7 @@ class COMPASSPolicy(SparsePolicy):
             return {}
 
         k_pooled = torch.cat(pooled_k_list, dim=0)  # [G_k, kv_heads, D]
+        k_self_cos = torch.cat(self_cos_k_list, dim=0) if self_cos_k_list else None  # [G_k, kv_heads]
         G_k = k_pooled.shape[0]
         H = self._num_kv_heads
         t_k_collect = time.perf_counter()
@@ -254,31 +330,59 @@ class COMPASSPolicy(SparsePolicy):
 
         # 3. Compute cosine similarity: [H, G_q, G_k]
         #    Then AGGREGATE across Q sub-blocks (mean) to get [H, G_k]
-        #    This avoids the problem where union of per-Q top-p sets covers everything.
         nvtx.push_range("compass_matmul", color="blue")
         q_t = q_pooled.permute(1, 0, 2)  # [H, G_q, D]
         k_t = k_pooled.permute(1, 2, 0)  # [H, D, G_k]
         scores = torch.bmm(q_t, k_t)     # [H, G_q, G_k]
+
+        # Decoupled selection: Top_Cdf and self-cosine operate INDEPENDENTLY.
+        # Top_Cdf selects blocks by QK relevance on the FULL undistorted distribution.
+        # Self-cosine force-selects diverse blocks separately (Step 2 below).
+        # Final mask = union of both. No -inf masking before softmax.
         avg_scores = scores.mean(dim=1)   # [H, G_k]  — average over Q groups
         probs = torch.softmax(avg_scores, dim=-1)  # [H, G_k]
         t_matmul = time.perf_counter()
         self._prof_matmul += t_matmul - t_k_collect
         nvtx.pop_range()
 
-        # 4. Vectorized top-p selection on averaged probabilities
+        # Top_Cdf with standard nucleus sampling convention:
+        # Always include the top-1 element, then include subsequent elements
+        # while the cumsum BEFORE them is still <= tau.
+        # This prevents the pathological case where the top element's prob > tau
+        # would cause ZERO blocks to be selected (paper's strict cumsum <= tau).
         nvtx.push_range("compass_topp", color="red")
         sorted_probs, sorted_indices = torch.sort(probs, dim=-1, descending=True)
         cumsum = torch.cumsum(sorted_probs, dim=-1)  # [H, G_k]
-
-        # Mask: include elements until cumsum exceeds top_p (+1 boundary element)
         mask_in_sorted = torch.cat([
-            torch.ones(H, 1, dtype=torch.bool),
+            torch.ones(H, 1, dtype=torch.bool, device=probs.device),
             cumsum[:, :-1] <= self.top_p,
         ], dim=-1)  # [H, G_k]
 
         # Scatter back to original index space
         selected_mask = torch.zeros_like(probs, dtype=torch.bool)  # [H, G_k]
         selected_mask.scatter_(1, sorted_indices, mask_in_sorted)
+
+        # SpargeAttention Step 2: force-select diverse K sub-blocks
+        persistent_k_io = 0
+        if k_self_cos is not None and self.theta is not None:
+            diverse_k = (k_self_cos.t() < self.theta)  # [H, G_k]
+            force_k_count = int(diverse_k.sum().item())
+            selected_mask |= diverse_k
+            self._stats_force_selected_k += force_k_count
+            # IO-level persistent: union across heads
+            persistent_k_io = int(diverse_k.any(dim=0).sum().item())
+            self._stats_persistent_k_blocks += persistent_k_io
+            self._stats_persistent_k_total += G_k
+
+        # SpargeAttention Step 3: force-select all K for heads with diverse Q
+        if q_self_cos is not None and self.theta is not None:
+            # q_self_cos: [G_q, H]
+            # If ANY Q sub-block has low self-cosine for a head -> force all K for that head
+            diverse_q_per_head = (q_self_cos < self.theta).any(dim=0)  # [H]
+            for h in range(H):
+                if diverse_q_per_head[h]:
+                    selected_mask[h, :] = True
+                    self._stats_force_selected_q_heads += 1
 
         # Per-head selection: keep per-head mask, do NOT union
         t_topp = time.perf_counter()
@@ -289,7 +393,7 @@ class COMPASSPolicy(SparsePolicy):
         nvtx.push_range("compass_mask_build", color="yellow")
         per_head_counts = selected_mask.sum(dim=1)  # [H]
         overall_selected = selected_mask.any(dim=0)  # [G_k] for IO/stats
-        total_sub = G_k * H  # total = G_k per head × H heads
+        total_sub = G_k * H  # total = G_k per head x H heads
         selected_sub = int(per_head_counts.sum().item())
         self._stats_total_subblocks += total_sub
         self._stats_selected_subblocks += selected_sub
@@ -298,7 +402,7 @@ class COMPASSPolicy(SparsePolicy):
         self._prof_mask_build += t_mask - t_topp
         nvtx.pop_range()
 
-        return selected_mask, subblock_to_block  # [H, G_k], [(bid, si)]
+        return selected_mask, subblock_to_block, persistent_k_io  # [H, G_k], [(bid, si)], int
 
     # ========================================================================
     # Block selection
@@ -350,11 +454,21 @@ class COMPASSPolicy(SparsePolicy):
         nvtx.push_range("compass_q_pool_gpu", color="magenta")
         q_pooled_gpu = self._pool_and_normalize(q, self.FINE_GRAIN)
         G_q = q_pooled_gpu.shape[0]
-        # GQA fold on GPU: [G_q, H, D] → [G_q, H_kv, hpg, D] → mean → [G_q, H_kv, D]
+        # GQA fold on GPU: [G_q, H, D] -> [G_q, H_kv, hpg, D] -> mean -> [G_q, H_kv, D]
         q_pooled_gpu = q_pooled_gpu.reshape(G_q, self._num_kv_heads, heads_per_group, self._head_dim)
         q_pooled_gpu = q_pooled_gpu.mean(dim=2)  # [G_q, H_kv, D]
         t2 = time.perf_counter()
         self._prof_q_pool += t2 - t1
+        nvtx.pop_range()
+
+        # 2b. GPU-side Q self-cosine similarity (SpargeAttention)
+        nvtx.push_range("compass_q_self_cos", color="olive")
+        q_self_cos_gpu = self._compute_self_cosine(q, self.FINE_GRAIN)  # [G_q, H]
+        # GQA fold self-cosine: [G_q, H] -> [G_q, H_kv] via mean over head groups
+        q_self_cos_gpu = q_self_cos_gpu.reshape(G_q, self._num_kv_heads, heads_per_group).mean(dim=2)
+        q_self_cos_cpu = q_self_cos_gpu.cpu()  # tiny tensor, sync is negligible
+        t2b = time.perf_counter()
+        self._prof_self_cos += t2b - t2
         nvtx.pop_range()
 
         # 3. Async transfer pooled Q to pinned CPU buffer (~128KB vs 32MB)
@@ -364,17 +478,18 @@ class COMPASSPolicy(SparsePolicy):
         self._metadata_stream.synchronize()
         q_pooled_cpu = self._q_pooled_cpu_buf[:G_q].clone()  # snapshot
         t3 = time.perf_counter()
-        self._prof_q_cpu += t3 - t2
+        self._prof_q_cpu += t3 - t2b
         nvtx.pop_range()
 
-        # 4. CPU-side estimation using pre-pooled Q
+        # 4. CPU-side estimation using pre-pooled Q + self-cosine
         result = self._estimate_subblock_mask(
             layer_id=ctx.layer_id,
             q_pooled=q_pooled_cpu,
             available_blocks=available_blocks,
             block_size=ctx.block_size,
+            q_self_cos=q_self_cos_cpu,
         )
-        selected_mask, subblock_to_block = result  # [H, G_k], [(bid, si)]
+        selected_mask, subblock_to_block, persistent_k_io = result  # [H, G_k], [(bid, si)], int
         H = self._num_kv_heads
         G_k = selected_mask.shape[1]
         t4 = time.perf_counter()
@@ -407,13 +522,15 @@ class COMPASSPolicy(SparsePolicy):
         overall_selected = selected_mask.any(dim=0)
         union_count = int(overall_selected.sum().item())
 
-        head_strs = ", ".join(f"H{h}:{per_head_counts[h]}" for h in range(H))
+        head_strs = ", ".join(f"H{h}:{per_head_counts[h]/G_k*100:.1f}%" for h in range(H))
         io_density = (union_count / G_k * 100) if G_k > 0 else 0
-        compute_density = (total_ph / (G_k * H) * 100) if G_k > 0 else 0
+        l1_density = (total_ph / (G_k * H) * 100) if G_k > 0 else 0  # L1 CPU selection density
+        persistent_ratio = (persistent_k_io / G_k * 100) if G_k > 0 else 0
         logger.info(
             f"[COMPASS] layer={ctx.layer_id}, seq_chunk={ctx.query_chunk_idx}: "
             f"IO_density={io_density:.1f}% ({union_count}/{G_k}), "
-            f"Compute_density={compute_density:.1f}% ({total_ph}/{G_k*H}), "
+            f"L1_density={l1_density:.1f}% ({total_ph}/{G_k*H}), "
+            f"Persistent_K={persistent_ratio:.1f}% ({persistent_k_io}/{G_k}), "
             f"per-head: [{head_strs}]"
         )
 
@@ -435,6 +552,10 @@ class COMPASSPolicy(SparsePolicy):
         self._stats_num_chunks = 0
         self._stats_selected_subblocks = 0
         self._stats_total_subblocks = 0
+        self._stats_force_selected_k = 0
+        self._stats_force_selected_q_heads = 0
+        self._stats_persistent_k_blocks = 0
+        self._stats_persistent_k_total = 0
         self._blasst_total_blocks = 0
         self._blasst_computed_blocks = 0
 
@@ -464,6 +585,11 @@ class COMPASSPolicy(SparsePolicy):
             "prof_matmul": self._prof_matmul,
             "prof_topp": self._prof_topp,
             "prof_mask_build": self._prof_mask_build,
+            "prof_self_cos": self._prof_self_cos,
+            "force_selected_k": self._stats_force_selected_k,
+            "force_selected_q_heads": self._stats_force_selected_q_heads,
+            "persistent_k_blocks": self._stats_persistent_k_blocks,
+            "persistent_k_total": self._stats_persistent_k_total,
         }
 
     # ========================================================================
@@ -720,4 +846,4 @@ class COMPASSPolicy(SparsePolicy):
 
 
     def __repr__(self) -> str:
-        return f"COMPASSPolicy(top_p={self.top_p}, lambda={self.lambda_threshold})"
+        return f"COMPASSPolicy(top_p={self.top_p}, lambda={self.lambda_threshold}, theta={self.theta})"

@@ -72,6 +72,7 @@ def create_sparse_policy(policy_type: SparsePolicyType, **kwargs) -> SparsePolic
         return COMPASSPolicy(
             lambda_threshold=kwargs.get("lambda_threshold", 0.001),
             top_p=kwargs.get("top_p", 0.9),
+            theta=kwargs.get("theta", 0.6),
         )
 
     elif policy_type == SparsePolicyType.BLASST:
