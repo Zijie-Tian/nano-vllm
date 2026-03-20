@@ -408,10 +408,13 @@ class COMPASSPolicy(SparsePolicy):
         union_count = int(overall_selected.sum().item())
 
         head_strs = ", ".join(f"H{h}:{per_head_counts[h]}" for h in range(H))
+        io_density = (union_count / G_k * 100) if G_k > 0 else 0
+        compute_density = (total_ph / (G_k * H) * 100) if G_k > 0 else 0
         logger.info(
-            f"[COMPASS] layer={ctx.layer_id}, chunk={ctx.query_chunk_idx}, "
-            f"per-head: [{head_strs}], union={union_count}/{G_k}, "
-            f"total={total_ph} (vs union-all={union_count*H}), top_p={self.top_p}"
+            f"[COMPASS] layer={ctx.layer_id}, seq_chunk={ctx.query_chunk_idx}: "
+            f"IO_density={io_density:.1f}% ({union_count}/{G_k}), "
+            f"Compute_density={compute_density:.1f}% ({total_ph}/{G_k*H}), "
+            f"per-head: [{head_strs}]"
         )
 
         # IO blocks: any block with at least one head selecting a sub-block
@@ -526,15 +529,6 @@ class COMPASSPolicy(SparsePolicy):
             block_size = kvcache_manager.block_size
             max_subs_per_batch = block_size // fine_grain
 
-            nvtx.push_range("compass_prefill_log", color="brown")
-            logger.info(
-                f"[COMPASS] layer={layer_id}, chunk={current_chunk_idx}: "
-                f"per-head gather {selection.total_subblocks} sub-blocks "
-                f"({selection.total_tokens} tokens, "
-                f"per-head: {selection.per_head_tokens})"
-            )
-            nvtx.pop_range()
-
             nvtx.push_range("compass_v2_regroup", color="purple")
             # 1. Collect all unique selected block IDs across all heads
             unique_bids = set()
@@ -546,6 +540,15 @@ class COMPASSPolicy(SparsePolicy):
             # 2. Divide blocks into chunks (e.g., 2 blocks = 8192 tokens max per chunk)
             blocks_per_chunk = 2
             bid_chunks = [unique_bids[i:i + blocks_per_chunk] for i in range(0, len(unique_bids), blocks_per_chunk)]
+            nvtx.pop_range()
+
+            nvtx.push_range("compass_prefill_log", color="brown")
+            logger.info(
+                f"[COMPASS] layer={layer_id}, seq_chunk={current_chunk_idx}: "
+                f"total {selection.total_subblocks} sub-blocks "
+                f"-> pipelined into {len(bid_chunks)} pieces (max {blocks_per_chunk} blks/piece) "
+                f"for overlap"
+            )
             nvtx.pop_range()
 
             # 3. Intra-layer Pipelining: Loop through chunks
