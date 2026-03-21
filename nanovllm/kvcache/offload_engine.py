@@ -988,6 +988,79 @@ class OffloadEngine:
         kv_indptr_tensor = torch.tensor(kv_indptr, dtype=torch.int32, device="cpu")
         return token_offset, kv_indptr_tensor
 
+    def gather_packed_from_mask(
+        self,
+        layer_id: int,
+        mask: torch.Tensor,       # [H_kv, num_active_blocks, subs_per_block] bool
+        block_ids: torch.Tensor,  # [num_active_blocks] int32 — actual cpu_block_ids
+        sub_block_size: int = 128,
+        slot_idx: int = 0,
+    ) -> "Tuple[int, torch.Tensor]":
+        """Gather sub-blocks using tensor mask (no Python list overhead).
+
+        Replaces gather_packed_subblocks_all_heads for TensorSelection usage.
+        The actual memcpy (copy_()) calls remain — they do real work.
+        The optimization is eliminating Python dict/list overhead for the copy schedule.
+
+        Returns:
+            total_tokens: int (total valid tokens across all heads)
+            kv_indptr_tensor: torch.Tensor [H_KV + 1] on CPU, head boundaries
+        """
+        k_staging = self.jagged_staging_k[slot_idx]
+        v_staging = self.jagged_staging_v[slot_idx]
+        H_kv = mask.shape[0]
+        num_active = mask.shape[1]
+
+        kv_indptr = [0]
+        token_offset = 0
+
+        for h in range(H_kv):
+            for b_idx in range(num_active):
+                sub_mask = mask[h, b_idx]  # [subs_per_block] bool
+                if not sub_mask.any():
+                    continue
+                cpu_block_id = int(block_ids[b_idx].item())
+                # Get selected sub-block indices as a small tensor
+                selected = sub_mask.nonzero(as_tuple=True)[0]  # [num_selected]
+
+                # Coalesce contiguous runs for efficient copy
+                sel_list = selected.tolist()  # small list (~32 max)
+                i = 0
+                while i < len(sel_list):
+                    run_start = sel_list[i]
+                    run_len = 1
+                    while (i + run_len < len(sel_list)
+                           and sel_list[i + run_len] == run_start + run_len):
+                        run_len += 1
+
+                    n_tok = run_len * sub_block_size
+                    src_start = run_start * sub_block_size
+                    src_end = src_start + n_tok
+                    dst_start = token_offset
+                    dst_end = token_offset + n_tok
+
+                    if self.is_head_first:
+                        k_staging[dst_start:dst_end, :].copy_(
+                            self.k_cache_cpu[layer_id, cpu_block_id, h, src_start:src_end, :]
+                        )
+                        v_staging[dst_start:dst_end, :].copy_(
+                            self.v_cache_cpu[layer_id, cpu_block_id, h, src_start:src_end, :]
+                        )
+                    else:
+                        k_staging[dst_start:dst_end, :].copy_(
+                            self.k_cache_cpu[layer_id, cpu_block_id, src_start:src_end, h, :]
+                        )
+                        v_staging[dst_start:dst_end, :].copy_(
+                            self.v_cache_cpu[layer_id, cpu_block_id, src_start:src_end, h, :]
+                        )
+
+                    token_offset += n_tok
+                    i += run_len
+            kv_indptr.append(token_offset)
+
+        kv_indptr_tensor = torch.tensor(kv_indptr, dtype=torch.int32, device="cpu")
+        return token_offset, kv_indptr_tensor
+
     def load_packed_staging_to_jagged_gpu(
         self,
         total_tokens: int,

@@ -119,6 +119,41 @@ class PerHeadSubBlockSelection:
         return self.total_subblocks * self.sub_block_size
 
 
+@dataclass
+class TensorSelection:
+    """Tensor-based sub-block selection (zero Python overhead).
+
+    Stores a 3D boolean mask [H_kv, max_blocks, subs_per_block]
+    where mask[h, b, s] = True means head h selected sub-block s of block b.
+    Pre-allocated at init time; rewritten each select_blocks call.
+
+    This replaces PerHeadSubBlockSelection to avoid O(G_k × H) Python loops
+    when building per-head selection lists from the selected_mask tensor.
+    """
+
+    mask: torch.Tensor          # [H_kv, max_blocks, subs_per_block] bool, CPU
+    block_ids: torch.Tensor     # [max_blocks] int32, CPU — actual cpu_block_ids
+    num_valid_blocks: int       # number of valid blocks in this selection
+    sub_block_size: int = 128
+    num_kv_heads: int = 1
+    subs_per_block: int = 32    # block_size // sub_block_size
+
+    @property
+    def total_subblocks(self) -> int:
+        return int(self.mask[:, :self.num_valid_blocks].sum().item())
+
+    @property
+    def per_head_num_subblocks(self) -> List[int]:
+        """Per-head selected sub-block counts as a Python list."""
+        counts = self.mask[:, :self.num_valid_blocks].sum(dim=(1, 2))
+        return counts.tolist()
+
+    @property
+    def per_head_tokens(self) -> List[int]:
+        """Per-head selected token counts as a Python list."""
+        return [n * self.sub_block_size for n in self.per_head_num_subblocks]
+
+
 class SparsePolicy(ABC):
     """
     Abstract base class for sparse attention policies.

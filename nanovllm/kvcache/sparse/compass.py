@@ -24,7 +24,7 @@ import torch.nn.functional as F
 import nvtx
 from typing import List, Optional, Dict, TYPE_CHECKING
 
-from .policy import SparsePolicy, PolicyContext, SubBlockSelection, PerHeadSubBlockSelection
+from .policy import SparsePolicy, PolicyContext, SubBlockSelection, PerHeadSubBlockSelection, TensorSelection
 
 if TYPE_CHECKING:
     from nanovllm.kvcache.offload_engine import OffloadEngine
@@ -84,7 +84,7 @@ class COMPASSPolicy(SparsePolicy):
         # Pooled K cache: layer_id -> {cpu_block_id -> pooled_k tensor [G_k, H_kv, D]}
         self._k_pooled_cache: Dict[int, Dict[int, torch.Tensor]] = {}
 
-        # Per-head sub-block selections: layer_id -> PerHeadSubBlockSelection
+        # Per-head sub-block selections: layer_id -> TensorSelection
         self._compacted_selections: Dict[int, SubBlockSelection] = {}
 
         # Profiling accumulators
@@ -162,6 +162,17 @@ class COMPASSPolicy(SparsePolicy):
         )
         mask_kb = self._mask_buffer.numel() / 1024
         logger.info(f"[COMPASS] Pre-allocated mask_buffer: {mask_kb:.1f} KB (GPU)")
+
+        # Pre-allocate TensorSelection buffers (tiny: ~2KB)
+        block_size_tokens = 4096  # offload_engine block_size
+        max_blocks = max_seq_len // block_size_tokens + 1
+        subs_per_block = block_size_tokens // self.FINE_GRAIN  # 32
+        self._sel_mask = torch.zeros(
+            (num_kv_heads, max_blocks, subs_per_block), dtype=torch.bool, device='cpu'
+        )
+        self._sel_block_ids = torch.zeros(max_blocks, dtype=torch.int32, device='cpu')
+        sel_bytes = self._sel_mask.numel() + self._sel_block_ids.numel() * 4
+        logger.info(f"[COMPASS] Pre-allocated TensorSelection buffers: {sel_bytes} bytes (CPU)")
 
         self._k_pooled_cache = {lid: {} for lid in range(num_layers)}
         self._q_chunk_sizes = []
@@ -508,36 +519,36 @@ class COMPASSPolicy(SparsePolicy):
         t4 = time.perf_counter()
 
         nvtx.push_range("compass_build_entries", color="purple")
-        # Build per-head selections
-        per_head_entries = [[] for _ in range(H)]  # [H] -> [(bid, [si...])]
-        per_head_grouped = [{} for _ in range(H)]  # [H] -> {bid: [si...]}
-        for gk in range(G_k):
-            bid, si = subblock_to_block[gk]
-            for h in range(H):
-                if selected_mask[h, gk]:
-                    per_head_grouped[h].setdefault(bid, []).append(si)
-        for h in range(H):
-            per_head_entries[h] = list(per_head_grouped[h].items())
+        # Vectorized build: O(1) tensor reshape replaces O(G_k × H) Python loop
+        num_blocks = len(available_blocks)
+        subs_per_block = ctx.block_size // self.FINE_GRAIN
+        mask_3d = selected_mask.view(H, num_blocks, subs_per_block)
+        self._sel_mask[:H, :num_blocks, :subs_per_block] = mask_3d
+        for i, bid in enumerate(available_blocks):  # tiny loop: ~7 iters
+            self._sel_block_ids[i] = bid
 
-        selection = PerHeadSubBlockSelection(
-            per_head_entries=per_head_entries,
+        selection = TensorSelection(
+            mask=self._sel_mask,
+            block_ids=self._sel_block_ids,
+            num_valid_blocks=num_blocks,
             sub_block_size=self.FINE_GRAIN,
             num_kv_heads=H,
+            subs_per_block=subs_per_block,
         )
         self._compacted_selections[ctx.layer_id] = selection
         nvtx.pop_range()
 
         nvtx.push_range("compass_log_io", color="brown")
-        # Log per-head statistics
-        per_head_counts = selection.per_head_num_subblocks
+        # Vectorized stats: tensor ops instead of Python iteration
+        per_head_counts = selection.per_head_num_subblocks  # List[int]
         total_ph = sum(per_head_counts)
-        # Union for IO block list
-        overall_selected = selected_mask.any(dim=0)
-        union_count = int(overall_selected.sum().item())
+        # Union for IO: any head selected any sub-block in each block
+        any_selected_per_block = mask_3d.any(dim=(0, 2))  # [num_blocks] bool
+        union_count = int(any_selected_per_block.sum().item())
 
         head_strs = ", ".join(f"H{h}:{per_head_counts[h]/G_k*100:.1f}%" for h in range(H))
         io_density = (union_count / G_k * 100) if G_k > 0 else 0
-        l1_density = (total_ph / (G_k * H) * 100) if G_k > 0 else 0  # L1 CPU selection density
+        l1_density = (total_ph / (G_k * H) * 100) if G_k > 0 else 0
         persistent_ratio = (persistent_k_io / G_k * 100) if G_k > 0 else 0
         logger.info(
             f"[COMPASS] layer={ctx.layer_id}, seq_chunk={ctx.query_chunk_idx}: "
@@ -547,12 +558,9 @@ class COMPASSPolicy(SparsePolicy):
             f"per-head: [{head_strs}]"
         )
 
-        # IO blocks: any block with at least one head selecting a sub-block
-        io_blocks = set()
-        for h_entries in per_head_entries:
-            for bid, _ in h_entries:
-                io_blocks.add(bid)
-        io_blocks = sorted(io_blocks)
+        # IO blocks: vectorized — blocks where any head has any selection
+        io_block_indices = any_selected_per_block.nonzero(as_tuple=True)[0]
+        io_blocks = self._sel_block_ids[io_block_indices].tolist()
         nvtx.pop_range()
 
         return io_blocks
@@ -660,36 +668,36 @@ class COMPASSPolicy(SparsePolicy):
         selection = self._compacted_selections.get(layer_id)
 
         if (selection is not None
-                and isinstance(selection, PerHeadSubBlockSelection)
+                and isinstance(selection, TensorSelection)
                 and selection.total_subblocks > 0):
             fine_grain = selection.sub_block_size
             kv_heads = selection.num_kv_heads
             gqa_ratio = num_heads // kv_heads
             block_size = kvcache_manager.block_size
             max_subs_per_batch = block_size // fine_grain
+            nv = selection.num_valid_blocks
 
             nvtx.push_range("compass_v2_regroup", color="purple")
-            # 1. Collect all unique selected block IDs across all heads
-            unique_bids = set()
-            for h in range(selection.num_kv_heads):
-                for bid, _ in selection.per_head_entries[h]:
-                    unique_bids.add(bid)
-            unique_bids = sorted(list(unique_bids))
+            # 1. Vectorized unique block detection
+            any_selected = selection.mask[:, :nv, :].any(dim=(0, 2))  # [nv] bool
+            unique_bid_local = any_selected.nonzero(as_tuple=True)[0]  # indices into block_ids
+            unique_bids_tensor = selection.block_ids[unique_bid_local]  # actual cpu_block_ids
 
             # 2. Divide blocks into chunks (e.g., 2 blocks = 8192 tokens max per chunk)
             blocks_per_chunk = 2
-            bid_chunks = [unique_bids[i:i + blocks_per_chunk] for i in range(0, len(unique_bids), blocks_per_chunk)]
+            num_unique = unique_bid_local.shape[0]
+            bid_chunks_indices = [unique_bid_local[i:i + blocks_per_chunk]
+                                  for i in range(0, num_unique, blocks_per_chunk)]
             nvtx.pop_range()
 
             # Compute density tracking
             TRITON_BLOCK_N = 64
             TRITON_BLOCK_M = 64
             grid_0 = (q_len + TRITON_BLOCK_M - 1) // TRITON_BLOCK_M
-            # Full context denominator: total historical KV tokens / BLOCK_N, summed across all nheads
-            # Each kv_head has per_head_tokens[h] tokens in full context, expanded by gqa_ratio
-            total_full_compute_pairs = 0  # grid_0 * sum_h(kv_blocks_h) across all heads
+            total_full_compute_pairs = 0
+            ph_tokens = selection.per_head_tokens
             for h in range(kv_heads):
-                h_tokens = selection.per_head_tokens[h] if h < len(selection.per_head_tokens) else 0
+                h_tokens = ph_tokens[h] if h < len(ph_tokens) else 0
                 h_kv_blocks = (h_tokens + TRITON_BLOCK_N - 1) // TRITON_BLOCK_N
                 total_full_compute_pairs += grid_0 * h_kv_blocks * gqa_ratio
             total_l2_computed_pairs = 0
@@ -698,7 +706,7 @@ class COMPASSPolicy(SparsePolicy):
             logger.info(
                 f"[COMPASS] layer={layer_id}, seq_chunk={current_chunk_idx}: "
                 f"total {selection.total_subblocks} sub-blocks "
-                f"-> pipelined into {len(bid_chunks)} pieces (max {blocks_per_chunk} blks/piece) "
+                f"-> pipelined into {len(bid_chunks_indices)} pieces (max {blocks_per_chunk} blks/piece) "
                 f"for overlap"
             )
             nvtx.pop_range()
@@ -707,21 +715,10 @@ class COMPASSPolicy(SparsePolicy):
             deferred_density_data = []  # [(mask_buffer, kv_indptr_cpu), ...]
 
             # 3. Intra-layer Pipelining: Loop through chunks
-            for chunk_iter_idx, active_bids in enumerate(bid_chunks):
-                active_bids_set = set(active_bids)
-
-                grouped_per_head = []
-                for h in range(selection.num_kv_heads):
-                    flat_subs = [
-                        (bid, si)
-                        for bid, sub_indices in selection.per_head_entries[h]
-                        if bid in active_bids_set
-                        for si in sub_indices
-                    ]
-                    grouped: Dict[int, list] = {}
-                    for bid, si in flat_subs:
-                        grouped.setdefault(bid, []).append(si)
-                    grouped_per_head.append(list(grouped.items()))
+            for chunk_iter_idx, active_local_indices in enumerate(bid_chunks_indices):
+                # Slice mask for active blocks: [H_kv, num_active, subs_per_block]
+                active_mask = selection.mask[:, active_local_indices, :]
+                active_block_ids = selection.block_ids[active_local_indices]
 
                 # Multi-buffer slot assignment for intra-layer ping-pong overlap
                 slot_idx = chunk_iter_idx % offload_engine.num_jagged_slots
@@ -732,8 +729,8 @@ class COMPASSPolicy(SparsePolicy):
                 nvtx.pop_range()
 
                 nvtx.push_range(f"COMPASS L{layer_id}: V2 Packed Gather", color="orange")
-                max_tok, kv_indptr_cpu = offload_engine.gather_packed_subblocks_all_heads(
-                    layer_id, grouped_per_head, fine_grain, slot_idx=slot_idx
+                max_tok, kv_indptr_cpu = offload_engine.gather_packed_from_mask(
+                    layer_id, active_mask, active_block_ids, fine_grain, slot_idx=slot_idx
                 )
                 if max_tok == 0:
                     nvtx.pop_range()
@@ -840,7 +837,7 @@ class COMPASSPolicy(SparsePolicy):
             v_curr_input = v_curr.transpose(1, 2).contiguous()
 
             # kv_offset for causal masking
-            if selection is not None and isinstance(selection, PerHeadSubBlockSelection):
+            if selection is not None and isinstance(selection, TensorSelection):
                 kv_offset = max(selection.per_head_tokens) if selection.per_head_tokens else 0
                 # historical_m_global is established as None from the jagged logic skip
             else:
