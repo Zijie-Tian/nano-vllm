@@ -150,6 +150,19 @@ class COMPASSPolicy(SparsePolicy):
         logger.info(f"[COMPASS] Selection granularity: {self.FINE_GRAIN} tokens, "
                      f"top_p={self.top_p}, lambda={self.lambda_threshold}")
 
+        # Pre-allocate mask_buffer for L2 density tracking (avoids per-piece torch.ones)
+        # grid_0 = max Q blocks, max_kv_blocks = blocks_per_chunk * subs_per_block
+        BLOCK_M = 64
+        max_grid_0 = (max_seq_len + BLOCK_M - 1) // BLOCK_M
+        blocks_per_chunk = 2  # must match compute_chunked_prefill
+        max_kv_blocks_per_piece = blocks_per_chunk * (4096 // self.FINE_GRAIN)
+        self._mask_buffer = torch.empty(
+            (max_grid_0, num_heads, max_kv_blocks_per_piece),
+            device=device, dtype=torch.int8
+        )
+        mask_kb = self._mask_buffer.numel() / 1024
+        logger.info(f"[COMPASS] Pre-allocated mask_buffer: {mask_kb:.1f} KB (GPU)")
+
         self._k_pooled_cache = {lid: {} for lid in range(num_layers)}
         self._q_chunk_sizes = []
 
@@ -668,6 +681,19 @@ class COMPASSPolicy(SparsePolicy):
             bid_chunks = [unique_bids[i:i + blocks_per_chunk] for i in range(0, len(unique_bids), blocks_per_chunk)]
             nvtx.pop_range()
 
+            # Compute density tracking
+            TRITON_BLOCK_N = 64
+            TRITON_BLOCK_M = 64
+            grid_0 = (q_len + TRITON_BLOCK_M - 1) // TRITON_BLOCK_M
+            # Full context denominator: total historical KV tokens / BLOCK_N, summed across all nheads
+            # Each kv_head has per_head_tokens[h] tokens in full context, expanded by gqa_ratio
+            total_full_compute_pairs = 0  # grid_0 * sum_h(kv_blocks_h) across all heads
+            for h in range(kv_heads):
+                h_tokens = selection.per_head_tokens[h] if h < len(selection.per_head_tokens) else 0
+                h_kv_blocks = (h_tokens + TRITON_BLOCK_N - 1) // TRITON_BLOCK_N
+                total_full_compute_pairs += grid_0 * h_kv_blocks * gqa_ratio
+            total_l2_computed_pairs = 0
+
             nvtx.push_range("compass_prefill_log", color="brown")
             logger.info(
                 f"[COMPASS] layer={layer_id}, seq_chunk={current_chunk_idx}: "
@@ -676,6 +702,9 @@ class COMPASSPolicy(SparsePolicy):
                 f"for overlap"
             )
             nvtx.pop_range()
+
+            # Deferred density tracking: collect per-piece data, process AFTER pipeline loop
+            deferred_density_data = []  # [(mask_buffer, kv_indptr_cpu), ...]
 
             # 3. Intra-layer Pipelining: Loop through chunks
             for chunk_iter_idx, active_bids in enumerate(bid_chunks):
@@ -725,7 +754,20 @@ class COMPASSPolicy(SparsePolicy):
                     offload_engine.ring_slot_ready[slot_idx].record(transfer_stream)
                     nvtx.pop_range()
 
-                from nanovllm.ops.compass import compass_jagged_chunked_prefill
+                # Reuse pre-allocated mask_buffer (avoid torch.ones per piece)
+                max_kv_blocks = 0
+                for h in range(kv_heads):
+                    h_start = kv_indptr_cpu[h].item()
+                    h_end = kv_indptr_cpu[h + 1].item()
+                    h_blocks = (h_end - h_start + TRITON_BLOCK_N - 1) // TRITON_BLOCK_N
+                    max_kv_blocks = max(max_kv_blocks, h_blocks)
+                if max_kv_blocks > 0:
+                    mask_buffer = self._mask_buffer[:grid_0, :num_heads, :max_kv_blocks]
+                    mask_buffer.fill_(1)
+                else:
+                    mask_buffer = None
+
+                from nanovllm.ops.compass import compass_jagged_chunked_prefill, merge_attention_inplace
                 with torch.cuda.stream(compute_stream):
                     compute_stream.wait_event(offload_engine.ring_slot_ready[slot_idx])
                     
@@ -736,26 +778,57 @@ class COMPASSPolicy(SparsePolicy):
                     v_packed = offload_engine.jagged_v_gpu[slot_idx]
                     
                     sm_scale = 1.0 / math.sqrt(self._head_dim)
-                    o, lse = compass_jagged_chunked_prefill(
+
+                    o, lse, m_global_out = compass_jagged_chunked_prefill(
                         q.unsqueeze(0), k_packed, v_packed, kv_indptr_gpu, 
-                        sm_scale=sm_scale, causal=False
+                        sm_scale=sm_scale, causal=False,
+                        threshold_ln_lambda=ln_lambda,
+                        m_global_in=historical_m_global,
+                        mask_buffer=mask_buffer,
                     )
+
+                    # Update running m_global across pipeline pieces (GPU async op, no CPU sync)
+                    if historical_m_global is None:
+                        historical_m_global = m_global_out
+                    else:
+                        historical_m_global = torch.maximum(historical_m_global, m_global_out)
+
+                    # Defer density calculation — NO .item() here to avoid breaking pipeline overlap
+                    if mask_buffer is not None:
+                        deferred_density_data.append((mask_buffer, kv_indptr_cpu))
                     
                     if historical_o is None:
                         historical_o = o
                         historical_lse = lse
                     else:
-                        historical_o, historical_lse = merge_attention_outputs(
-                            historical_o, historical_lse, o, lse
-                        )
+                        merge_attention_inplace(historical_o, historical_lse, o, lse)
                     
                     # Record completion of the GPU kernel so CPU knows when it's safe to overwrite the slot
                     offload_engine.jagged_compute_done[slot_idx].record(compute_stream)
                     
                     nvtx.pop_range()
-                    
-            # m_global was used in V1 batching across seqlen loop. V2 processes all tokens simultaneously without slicing seqs.
-            historical_m_global = None
+
+            # Compute density AFTER pipeline loop (single sync point)
+            if deferred_density_data and total_full_compute_pairs > 0:
+                compute_stream.synchronize()  # single sync to ensure all mask_buffers are ready
+                total_l2_computed_pairs = 0
+                for mask_buf, indptr_cpu in deferred_density_data:
+                    for h_kv in range(kv_heads):
+                        h_start = indptr_cpu[h_kv].item()
+                        h_end = indptr_cpu[h_kv + 1].item()
+                        h_actual_blocks = (h_end - h_start + TRITON_BLOCK_N - 1) // TRITON_BLOCK_N
+                        if h_actual_blocks > 0:
+                            for g in range(gqa_ratio):
+                                q_head = h_kv * gqa_ratio + g
+                                total_l2_computed_pairs += int(
+                                    mask_buf[:, q_head, :h_actual_blocks].sum().item()
+                                )
+                compute_density = total_l2_computed_pairs / total_full_compute_pairs * 100
+                logger.info(
+                    f"[COMPASS] layer={layer_id}, seq_chunk={current_chunk_idx}: "
+                    f"Compute_density={compute_density:.1f}% "
+                    f"({total_l2_computed_pairs}/{total_full_compute_pairs} compute-pairs after L1+L2)"
+                )
             
         # ---- Current prefill chunk (causal) ----
         nvtx.push_range(f"COMPASS L{layer_id}: current_chunk_causal {num_tokens}tok", color="cyan")

@@ -167,6 +167,7 @@ The architecture consists of 4 core modules:
 | [`docs/compass_async_pipeline_guide.md`](docs/compass_async_pipeline_guide.md) | COMPASS async double-buffered pipeline：双 slot 交替、coalesced gather、同步模型、NVTX 标记、性能对比（prefill −47%）。 |
 | [`docs/compass_head_first_layout_and_async_staging.md`](docs/compass_head_first_layout_and_async_staging.md) | COMPASS Head-First KV Cache layout eliminating H2D IO amplification, and fully asynchronous multi-staging buffers avoiding CPU blocking overhead. |
 | [`docs/compass_v2_jagged_architecture.md`](docs/compass_v2_jagged_architecture.md) | COMPASS V2 Jagged Memory Architecture: 1D packed buffer mapping, top-p slice gathering, bulk DMA, and custom Triton kernel integration. |
+| [`docs/compass_l2_pruning_and_kernel_optimization.md`](docs/compass_l2_pruning_and_kernel_optimization.md) | COMPASS L2 dynamic pruning (BLASST-style GPU skip) and pipeline kernel overhead reduction: in-place merge kernel, mask_buffer pre-allocation, density tracking. |
 
 ---
 
