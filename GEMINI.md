@@ -68,10 +68,10 @@ The architecture consists of 4 core modules:
     *   **Standard Testing Commands**: To quickly verify single-sample correctness, use these verified templates:
         *   **Full Context (no sparse)**: `source build/nano-vllm-envs.sh && CUDA_VISIBLE_DEVICES=<GPU> python3 tests/test_ruler.py --model ~/models/Llama-3.1-8B-Instruct --data-dir tests/data/ruler_32k --datasets niah_single_1 --num-samples 1 --max-model-len 40960 --enable-offload`
         *   **BLASST**: `source build/nano-vllm-envs.sh && CUDA_VISIBLE_DEVICES=<GPU> python3 tests/test_ruler.py --model ~/models/Llama-3.1-8B-Instruct --data-dir tests/data/ruler_32k --datasets niah_single_1 --num-samples 1 --max-model-len 40960 --enable-offload --sparse-policy BLASST`
-        *   **COMPASS (correctness, 100% density)**: `source build/nano-vllm-envs.sh && CUDA_VISIBLE_DEVICES=<GPU> python3 tests/test_ruler.py --model ~/models/Llama-3.1-8B-Instruct --data-dir tests/data/ruler_32k --datasets niah_single_1 --num-samples 1 --max-model-len 40960 --enable-offload --sparse-policy COMPASS --compass-top-p 1.0 --compass-lambda 1e-10`
-        *   **COMPASS (performance, top-p=0.9)**: `source build/nano-vllm-envs.sh && CUDA_VISIBLE_DEVICES=<GPU> python3 tests/test_ruler.py --model ~/models/Llama-3.1-8B-Instruct --data-dir tests/data/ruler_32k --datasets niah_single_1 --num-samples 1 --max-model-len 40960 --enable-offload --sparse-policy COMPASS --compass-top-p 0.9 --compass-lambda 0.0001`
+        *   **COMPASS (correctness, 100% density)**: `source build/nano-vllm-envs.sh && CUDA_VISIBLE_DEVICES=<GPU> python3 tests/test_ruler.py --model ~/models/Llama-3.1-8B-Instruct --data-dir tests/data/ruler_32k --datasets niah_single_1 --num-samples 1 --max-model-len 40960 --enable-offload --sparse-policy COMPASS --compass-top-p 1.0 --compass-lambda 1e-10 --compass-theta 0.6`
+        *   **COMPASS (performance, top-p=0.9)**: `source build/nano-vllm-envs.sh && CUDA_VISIBLE_DEVICES=<GPU> python3 tests/test_ruler.py --model ~/models/Llama-3.1-8B-Instruct --data-dir tests/data/ruler_32k --datasets niah_single_1 --num-samples 1 --max-model-len 40960 --enable-offload --sparse-policy COMPASS --compass-top-p 0.9 --compass-lambda 0.0001 --compass-theta 0.6`
     *   **Data & Model Paths**: The model directory MUST be `~/models`, and RULER data MUST be in `tests/data`.
-    *   **Interpreting COMPASS Logs**: The `select_blocks` output shows `IO_density` (union of blocks across heads needed for H2D transfer) and `Compute_density` (actual per-head sub-blocks computed vs full attention). The `compute_chunked_prefill` output shows how many intra-layer pipeline pieces are used for overlap.
+    *   **Interpreting COMPASS Logs**: The `select_blocks` output shows `IO_density` (union of blocks across heads needed for H2D transfer) and `L1_density` (per-head sub-blocks selected by CPU top-p). The `compute_chunked_prefill` output shows `Compute_density` (actual compute-pairs after L1+L2 combined pruning vs full context) and how many intra-layer pipeline pieces are used for overlap.
     *   **Expected Performance (32k, Llama-3.1-8B, single 3090)**:
         *   Full context (no sparse): ~12s prefill
         *   COMPASS top-p=0.9: ~7-10s prefill (depends on sample sparsity)
@@ -83,7 +83,7 @@ The architecture consists of 4 core modules:
         --dataset niah_single_1 \
         --model ~/models/Llama-3.1-8B-Instruct \
         --data-dir tests/data/ruler_32k/ \
-        --compass-top-p 0.9 --compass-lambda 0.0001
+        --compass-top-p 0.9 --compass-lambda 0.0001 --compass-theta 0.6
     ```
     *   Output `.nsys-rep` files are saved to `results/nsys/`.
     *   In the Nsight Systems timeline, look for: orange="V2 Packed Gather" (CPU packing), green="V2 H2D Packed" (PCIe transfer), blue="V2 Jagged Kernel" (GPU compute). Overlap between green and blue across different slots confirms the intra-layer pipeline is working.
@@ -94,8 +94,9 @@ The architecture consists of 4 core modules:
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--compass-top-p` | `0.9` (in config.py) | Top-p threshold for CPU L1 sub-block selection. Higher → more blocks selected → higher accuracy but slower. |
-| `--compass-lambda` | `0.001` (in config.py) | Lambda threshold for block importance scoring. Controls minimum relevance cutoff via `log(lambda)`. |
+| `--compass-top-p` | `0.9` | Top-p threshold for CPU L1 sub-block selection. Higher → more blocks selected → higher accuracy but slower. |
+| `--compass-lambda` | `0.001` | Lambda threshold for L2 GPU dynamic pruning. Controls BLASST-style skip via `log(lambda)`. Higher → more aggressive skip. |
+| `--compass-theta` | `0.6` | Self-cosine similarity threshold (SpargeAttention). Force-selects blocks with diverse tokens (low self-similarity). Lower → more force-selected. |
 
 **Internal Config** (in `nanovllm/config.py`, `SparsePolicyConfig`):
 
@@ -103,27 +104,28 @@ The architecture consists of 4 core modules:
 |-----------|---------|-------------|
 | `compass_top_p` | `0.9` | Same as `--compass-top-p` CLI. |
 | `lambda_threshold` | `0.001` | Same as `--compass-lambda` CLI. |
+| `compass_theta` | `0.6` | Same as `--compass-theta` CLI. |
 
 **Tuning Recipes**:
-*   **Correctness Validation** (verify pipeline logic without sparsity): `--compass-top-p 1.0 --compass-lambda 1e-10` → selects ALL blocks, 100% density, must achieve 100% accuracy. If this fails, it indicates a bug in the pipeline, not in the sparsity logic.
-*   **Performance Benchmarking** (typical sparse regime): `--compass-top-p 0.9 --compass-lambda 0.0001` → ~89% compute density on 32k NIAH tasks, good accuracy/speed tradeoff.
-*   **Aggressive Sparsity** (higher speedup, risk accuracy drop): `--compass-top-p 0.7 --compass-lambda 0.001` → significant pruning, may fail on multi-needle tasks.
-*   **Sweep top-p**: Fix `--compass-lambda 0.0001`, sweep `--compass-top-p` from `0.5` to `1.0` in steps of `0.1` to find the accuracy/performance sweet spot.
+*   **Correctness Validation** (verify pipeline logic without sparsity): `--compass-top-p 1.0 --compass-lambda 1e-10 --compass-theta 0.6` → L1 selects ALL blocks, L2 effectively no skip. Density reflects L1 selection only (~60%). Must achieve 100% accuracy. If this fails, it indicates a bug in the pipeline.
+*   **Performance Benchmarking** (typical sparse regime): `--compass-top-p 0.9 --compass-lambda 0.0001 --compass-theta 0.6` → good accuracy/speed tradeoff.
+*   **Aggressive Sparsity** (higher speedup, risk accuracy drop): `--compass-top-p 0.7 --compass-lambda 0.001 --compass-theta 0.6` → significant L1+L2 pruning, may fail on multi-needle tasks.
+*   **Sweep top-p**: Fix `--compass-lambda 0.0001 --compass-theta 0.6`, sweep `--compass-top-p` from `0.5` to `1.0` in steps of `0.1`.
 *   ⚠️ **NEVER** use `--compass-lambda 0.0` → crashes with `ValueError: math domain error` due to `log(0)`. Use `1e-10` as minimum.
 
 **Understanding Log Output**:
 ```
 # select_blocks log (one per layer per seq_chunk):
-[COMPASS] layer=5, seq_chunk=3: IO_density=92.0% (206/224), Compute_density=89.1% (1596/1792), per-head: [H0:200, H1:199, ...]
+[COMPASS] layer=5, seq_chunk=3: IO_density=92.0% (206/224), L1_density=95.6% (1596/1792), per-head: [H0:95.3%, ...]
 
 # compute_chunked_prefill log (one per layer per seq_chunk):
-[COMPASS] layer=5, seq_chunk=3: total 1596 sub-blocks -> pipelined into 4 pieces (max 2 blks/piece) for overlap
+[COMPASS] layer=5, seq_chunk=3: Compute_density=42.2% (344104/815040 compute-pairs after L1+L2)
 ```
 *   **`IO_density`**: Percentage of KV blocks that need H2D transfer (union across all heads). Lower = less PCIe bandwidth used.
-*   **`Compute_density`**: Percentage of sub-blocks actually computed by the GPU kernel (sum across all heads). Lower = faster Triton kernel.
-*   **`pipelined into N pieces`**: Number of intra-layer pipeline chunks. More pieces = better overlap potential between H2D and GPU compute, but more kernel launch overhead.
+*   **`L1_density`**: Percentage of sub-blocks selected after CPU L1 top-p selection (sum across all heads).
+*   **`Compute_density`**: Percentage of compute-pairs actually computed after L1+L2 combined pruning. Denominator is full context (all heads × all KV blocks × all Q blocks). With `lambda=1e-10` this reflects L1 only (~60%); with `lambda=0.001` drops to 20-50%.
+*   **`pipelined into N pieces`**: Number of intra-layer pipeline chunks. More pieces = better H2D/compute overlap.
 *   **Documentation Indexing**: Whenever a new document is added to the `docs/` directory, its path and purpose **MUST** be immediately indexed in both `GEMINI.md` and `CLAUDE.md`.
-*   **Planning Files**: Use `findings.md`, `task_plan.md`, and `progress.md` for complex tasks. These are excluded from git. **At the beginning of every new task, you MUST automatically delete any existing `task_plan.md`, `findings.md`, and `progress.md` files to ensure a fresh state.**
 
 ### 2.3 Monitoring
 *   **GPU Monitoring**: For profiling or OOM debugging, run monitoring commands in the background. Prefer `nvidia-smi` queries or specialized profiling tools (nsys) directed to background output files.
@@ -131,6 +133,7 @@ The architecture consists of 4 core modules:
 ### 2.4 Assistant Interaction Rules
 *   **Image Generation**: 在我们的对话中，当提示词涉及到具体的物体、场景概念（例如“反重力”、“科幻设备”等），或者要求“展示”某个画面时，请务必直接调用图像生成工具生成实际的图像。在这些情况下，绝对不要使用 Mermaid.js 或代码块来绘制图表，除非明确在提示词中使用了“流程图”、“架构图”或“Mermaid”等词汇。
 *   **Default Rule Scope**: 除非我明确指定，否则以后要求添加的新规则，请默认添加到当前项目的 `GEMINI.md` 中，而不是全局 `~/.gemini/GEMINI.md`。
+*   **Rule File Consolidation**: 所有项目规则 **必须** 直接写在 `GEMINI.md` 中。**禁止** 在 `.agents/rules/` 目录下创建单独的规则文件。`GEMINI.md` 是本项目所有 AI 助手规则的唯一权威来源（Single Source of Truth）。
 
 ---
 
