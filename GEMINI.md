@@ -52,9 +52,24 @@ bash run.sh llama3.1-8b-chat synthetic --metric full --task niah_single_1
 bash run.sh llama3.1-8b-chat synthetic --metric full --task niah_single_1,vt,qa_1
 ```
 
+### 环境变数及快速测试
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CONDA_ENV` | `ruler` | Conda environment name |
+| `MODEL_DIR` | `/home/zijie/models` | Model weights directory |
+| `CUDA_VISIBLE_DEVICES` | - | GPU selection |
+
+测试 imports 和下载数据集：
+```bash
+PYTHONPATH=/home/zijie/Code/COMPASS:$PYTHONPATH python -c "from compass.src.Compass import Compass; print('OK')"
+cd eval/RULER && bash setup.sh
+```
+
 ---
 
 ## 📌 General Rules
+
+**CRITICAL: 以后所有的 rule 必须直接写到此 `GEMINI.md` 中，不再使用 `.agents/rules` 目录存放规则文件。**
 
 - Do what has been asked; nothing more, nothing less.
 - NEVER create files unless they're absolutely necessary for achieving your goal.
@@ -63,3 +78,40 @@ bash run.sh llama3.1-8b-chat synthetic --metric full --task niah_single_1,vt,qa_
 - Never save working files, text/mds and tests to the root folder.
 - 添加新文档时，必须同步更新 `GEMINI.md` 和 `CLAUDE.md` 的文档引用表。
 - When updating the `nanovllm` submodule, ALWAYS ensure it is checked out to the `tzj/minference` branch.
+
+### 🛡️ 3rdparty Policy
+`3rdparty/` 目录下的代码是固定的稳定版本，仅供 COMPASS 使用，**不应在此修改**。
+- ❌ 不可修改：`nanovllm`, `flash-attention`, `flashinfer`
+- **开发版本位置**：需要修改时在独立开发目录进行（如 `/home/zijie/Code/nano-vllm`）。
+- **工作流程**：在开发仓库修改并测试 -> 更新 COMPASS 的 3rdparty submodule -> COMPASS 测试。临时测试可修改 PYTHONPATH 指向开发目录。
+
+### 📝 Documentation Management & Lazy Loading
+- **GEMINI.md 和 CLAUDE.md 中只保留：** 核心配置和指令、文档引用表、简短的项目概述。
+- **docs/ 目录存放：** 任何超过 50 行的详细说明（架构、实现、debug技巧等）、API参考文档、独立故障排除或功能指南。
+- **理论与实测**：技术文档中应包含理论分析（含公式估算）与实测数据的对比，误差应<10%。过长的文档考虑重构以节约 token。
+
+### 📊 Feasibility Report Rule
+当进行**评估方案可行性**分析时，必须按照 `docs/FEASIBILITY_REPORT_TEMPLATE.md` 中的模板格式编写。
+1. Executive Summary 中**必须包含可行性评分 (X/10)** 及其原因分类（✅/⚠️/❌）。无评分的报告视为不完整。
+2. 必填章节不可省略：详细设计 (含伪代码), 相关工作 (≥3篇引用), 理论分析 (含量化对比表), 实现复杂度 (含时间估计), 潜在风险 (含 corner cases), COMPASS 结合点 (具体到文件), 结论 (包含 next steps)。
+3. 保存在指定的 `docs/` 子目录下，命名格式为 `XX_方案简称.md`。
+
+### 🖥️ GPU Testing Rules
+**GPU Card Assignment (CRITICAL) - Before executing ANY GPU command:**
+1. 检查 user 是否指定了 GPU。
+2. 如果 user 未指定，**必须停止并询问用户**("Which GPU should I use?")。严禁假设或猜测。
+3. 任何 GPU 执行命令必须显式加前缀 `CUDA_VISIBLE_DEVICES=X`。
+测试前可用 `nvidia-smi` 检查模型并估计 VRAM 使用（如 LLaMA 3.1 8B 128k 约需 82GB）。
+
+### 💾 KVCache-RoPE Data On-Demand Download
+`results/kvcache-rope/` 存放从阿里云盘下载的数据，用于理论验证分析。
+- **强制规则**：在执行任何需要此数据的代码前，必须先执行 `ls results/kvcache-rope/{model}/{length}/layer_{xx}.pt` 检查本地文件是否存在。
+- 如果不存在，提醒用户从阿里云盘 (`/data/COMPASS/kvcache-rope/`) 下载，并确认文件就绪(单层约 603MB)后再执行后续操作。下载时记得 unset 代理。
+
+### ⚙️ RULER Task Configuration Rules
+RULER benchmark 的 task 配置分布在 `eval/RULER/scripts/config_tasks.sh` 和 `eval/RULER/scripts/eval.sh`，修改时**必须同步更新两处文件**以确保 `synthetic` 数组一致。
+- **使用 `#` 注释来禁用 task，绝对禁止删除 task 对应的代码行。**
+
+### 🧪 Testing Guidelines
+- **文件命名与结构**：所有测试文件名为 `test_*.py`。采用 "educational scripts" 风格，重在演示代码流转和调用细节，而不是单纯地断言。辅助步骤提取在头部，主流程写成顶级执行脚本。
+- **结果输出**：尽量使用 `assert`，尽可能少地使用 print，最后输出 "PASSED"。

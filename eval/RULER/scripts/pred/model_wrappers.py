@@ -155,6 +155,10 @@ class NanoVLLMModel:
         # BLASST specific parameters
         blasst_fixed_lambda = generation_kwargs.pop('blasst_fixed_lambda', None)
 
+        # COMPASS specific parameters
+        compass_top_p = generation_kwargs.pop('compass_top_p', None)
+        compass_lambda = generation_kwargs.pop('compass_lambda', None)
+
         # Extract nano-vllm specific configuration
         max_model_len = generation_kwargs.pop('max_model_len', 128 * 1024)
         enable_cpu_offload = generation_kwargs.pop('enable_cpu_offload', True)
@@ -183,6 +187,12 @@ class NanoVLLMModel:
         # Add BLASST parameters if specified
         if blasst_fixed_lambda is not None:
             llm_kwargs["blasst_fixed_lambda"] = blasst_fixed_lambda
+
+        # Add COMPASS parameters if specified
+        if compass_top_p is not None:
+            llm_kwargs["compass_top_p"] = compass_top_p
+        if compass_lambda is not None:
+            llm_kwargs["lambda_threshold"] = compass_lambda
 
         # Add dtype if specified (required for some models like Qwen2.5)
         if dtype:

@@ -99,6 +99,8 @@ parser.add_argument("--stride", type=int, default=16, help="Small block size")
 parser.add_argument("--metric", type=str, default="xattn", help="")
 parser.add_argument("--avgpool_topk", type=int, default=64, help="Top-k blocks per row for avgpool metric")
 parser.add_argument("--avgpool_topp", type=float, default=None, help="Top-p threshold for avgpool nucleus sampling (0.0-1.0)")
+parser.add_argument("--compass_topp", type=float, default=None, help="Top-p threshold for compass")
+parser.add_argument("--compass_lambda", type=float, default=None, help="Lambda for compass")
 
 
 
@@ -247,6 +249,9 @@ def get_llm(tokens_to_generate):
             sparse_chunk_size=int(os.environ.get('NANOVLLM_SPARSE_CHUNK_SIZE', 16384)),
             # BLASST specific parameters (only lambda is configurable externally)
             blasst_fixed_lambda=float(os.environ.get('BLASST_LAMBDA', 0.5)) if os.environ.get('BLASST_LAMBDA') else None,
+            # COMPASS specific parameters
+            compass_top_p=args.compass_topp if hasattr(args, 'compass_topp') else None,
+            compass_lambda=args.compass_lambda if hasattr(args, 'compass_lambda') else None,
             # NanoVLLM specific settings (can be overridden via env vars)
             max_model_len=int(os.environ.get('NANOVLLM_MAX_MODEL_LEN', 128 * 1024)),
             enable_cpu_offload=os.environ.get('NANOVLLM_CPU_OFFLOAD', 'true').lower() == 'true',

@@ -64,7 +64,10 @@ STRIDE=${STRIDE:-""}
 THRESHOLD=${THRESHOLD:-""}
 AVGPOOL_TOPK=${AVGPOOL_TOPK:-""}
 AVGPOOL_TOPP=${AVGPOOL_TOPP:-""}
+COMPASS_TOPP=${COMPASS_TOPP:-""}
+COMPASS_LAMBDA=${COMPASS_LAMBDA:-""}
 TASK_OVERRIDE=""
+NUM_SAMPLES_OVERRIDE=""
 
 shift 2 # Remove MODEL_NAME and BENCHMARK
 while [[ $# -gt 0 ]]; do
@@ -93,6 +96,18 @@ while [[ $# -gt 0 ]]; do
             AVGPOOL_TOPP="--avgpool_topp $2"
             shift 2
             ;;
+        --compass_topp)
+            COMPASS_TOPP="--compass_topp $2"
+            shift 2
+            ;;
+        --compass_lambda)
+            COMPASS_LAMBDA="--compass_lambda $2"
+            shift 2
+            ;;
+        --num_samples)
+            NUM_SAMPLES_OVERRIDE="$2"
+            shift 2
+            ;;
         --task)
             TASK_OVERRIDE="$2"
             shift 2
@@ -108,6 +123,12 @@ done
 if [ -n "${TASK_OVERRIDE}" ]; then
     IFS=',' read -ra TASKS <<< "${TASK_OVERRIDE}"
     echo "Task override: ${TASKS[*]}"
+fi
+
+# Override NUM_SAMPLES if --num_samples is specified
+if [ -n "${NUM_SAMPLES_OVERRIDE}" ]; then
+    NUM_SAMPLES="${NUM_SAMPLES_OVERRIDE}"
+    echo "Num samples override: ${NUM_SAMPLES}"
 fi
 
 # Start server (you may want to run in other container.)
@@ -164,6 +185,13 @@ for MAX_SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
         # For BLASST, include lambda in folder name
         BLASST_LAMBDA_VAL="${BLASST_LAMBDA:-0.5}"
         SETTINGS_INFO+="lambda${BLASST_LAMBDA_VAL}_"
+    elif [[ "${METRIC_NAME}" == "compass" ]]; then
+        if [[ -n ${COMPASS_TOPP} ]]; then
+            SETTINGS_INFO+="topp${COMPASS_TOPP##* }_"
+        fi
+        if [[ -n ${COMPASS_LAMBDA} ]]; then
+            SETTINGS_INFO+="lambda${COMPASS_LAMBDA##* }_"
+        fi
     else
         # For xattn (nanovllm or other backends), include stride in folder name
         if [[ -n ${STRIDE} ]]; then
@@ -297,6 +325,8 @@ for MAX_SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
                     ${STRIDE} \
                     ${AVGPOOL_TOPK} \
                     ${AVGPOOL_TOPP} \
+                    ${COMPASS_TOPP} \
+                    ${COMPASS_LAMBDA} \
                     ${PRINT_DETAIL} &
 
                 GPU_PIDS[$FREE_GPU]=$!
@@ -338,6 +368,8 @@ for MAX_SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
                 ${STRIDE} \
                 ${AVGPOOL_TOPK} \
                 ${AVGPOOL_TOPP} \
+                ${COMPASS_TOPP} \
+                ${COMPASS_LAMBDA} \
                 ${PRINT_DETAIL}
             end_time=$(date +%s)
             time_diff=$((end_time - start_time))

@@ -11,6 +11,8 @@
 #   --stride N     Set XAttention stride (for nanovllm xattn)
 #   --task TASK    Run specific task(s) only
 #   --threshold N  Set XAttention threshold
+#   --compass_topp N    Set COMPASS top-p threshold
+#   --compass_lambda N  Set COMPASS lambda threshold
 #
 # Environment Variables for BLASST:
 #   BLASST_LAMBDA                  BLASST threshold lambda (default: 0.5)
