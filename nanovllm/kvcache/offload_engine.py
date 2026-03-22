@@ -996,11 +996,10 @@ class OffloadEngine:
         sub_block_size: int = 128,
         slot_idx: int = 0,
     ) -> "Tuple[int, torch.Tensor]":
-        """Gather sub-blocks using tensor mask (no Python list overhead).
+        """Gather sub-blocks using vectorized fancy + boolean indexing.
 
-        Replaces gather_packed_subblocks_all_heads for TensorSelection usage.
-        The actual memcpy (copy_()) calls remain — they do real work.
-        The optimization is eliminating Python dict/list overhead for the copy schedule.
+        For each head, gathers ALL active blocks via fancy indexing, then
+        extracts selected tokens via 2D boolean indexing — no inner block loop.
 
         Returns:
             total_tokens: int (total valid tokens across all heads)
@@ -1009,57 +1008,52 @@ class OffloadEngine:
         k_staging = self.jagged_staging_k[slot_idx]
         v_staging = self.jagged_staging_v[slot_idx]
         H_kv = mask.shape[0]
-        num_active = mask.shape[1]
 
-        kv_indptr = [0]
-        token_offset = 0
+        # Step 1: Expand sub-block mask to token-level mask (one tensor op)
+        # [H_kv, num_active, subs_per_block] -> [H_kv, num_active, block_size]
+        token_mask = mask.repeat_interleave(sub_block_size, dim=2)
 
+        # Step 2: Pre-compute per-head token counts and kv_indptr (tensor ops)
+        per_head_tokens = token_mask.sum(dim=(1, 2))  # [H_kv]
+        kv_indptr = torch.zeros(H_kv + 1, dtype=torch.int32, device="cpu")
+        kv_indptr[1:] = per_head_tokens.cumsum(0).to(torch.int32)
+        total_tokens = int(kv_indptr[-1].item())
+
+        if total_tokens == 0:
+            return 0, kv_indptr
+
+        # Step 3: Convert block_ids once for fancy indexing
+        bid_list = block_ids.tolist()
+
+        # Step 4: Single loop over H_kv only (inner b_idx loop eliminated)
+        offset = 0
         for h in range(H_kv):
-            for b_idx in range(num_active):
-                sub_mask = mask[h, b_idx]  # [subs_per_block] bool
-                if not sub_mask.any():
-                    continue
-                cpu_block_id = int(block_ids[b_idx].item())
-                # Get selected sub-block indices as a small tensor
-                selected = sub_mask.nonzero(as_tuple=True)[0]  # [num_selected]
+            n_tok = int(per_head_tokens[h].item())
+            if n_tok == 0:
+                continue
 
-                # Coalesce contiguous runs for efficient copy
-                sel_list = selected.tolist()  # small list (~32 max)
-                i = 0
-                while i < len(sel_list):
-                    run_start = sel_list[i]
-                    run_len = 1
-                    while (i + run_len < len(sel_list)
-                           and sel_list[i + run_len] == run_start + run_len):
-                        run_len += 1
+            head_mask = token_mask[h]  # [num_active, block_size] — view
 
-                    n_tok = run_len * sub_block_size
-                    src_start = run_start * sub_block_size
-                    src_end = src_start + n_tok
-                    dst_start = token_offset
-                    dst_end = token_offset + n_tok
+            if self.is_head_first:
+                # Fancy index: gather all blocks for this head in ONE op
+                # k_cache_cpu: [layers, blocks, H_kv, block_size, dim]
+                k_blocks = self.k_cache_cpu[layer_id, bid_list, h]  # [num_active, block_size, dim]
+                v_blocks = self.v_cache_cpu[layer_id, bid_list, h]
 
-                    if self.is_head_first:
-                        k_staging[dst_start:dst_end, :].copy_(
-                            self.k_cache_cpu[layer_id, cpu_block_id, h, src_start:src_end, :]
-                        )
-                        v_staging[dst_start:dst_end, :].copy_(
-                            self.v_cache_cpu[layer_id, cpu_block_id, h, src_start:src_end, :]
-                        )
-                    else:
-                        k_staging[dst_start:dst_end, :].copy_(
-                            self.k_cache_cpu[layer_id, cpu_block_id, src_start:src_end, h, :]
-                        )
-                        v_staging[dst_start:dst_end, :].copy_(
-                            self.v_cache_cpu[layer_id, cpu_block_id, src_start:src_end, h, :]
-                        )
+                # 2D boolean index: select tokens across all blocks at once
+                k_staging[offset:offset + n_tok, :] = k_blocks[head_mask]
+                v_staging[offset:offset + n_tok, :] = v_blocks[head_mask]
+            else:
+                # non-head-first: [layers, blocks, block_size, H_kv, dim]
+                k_blocks = self.k_cache_cpu[layer_id, bid_list, :, h, :]  # [num_active, block_size, dim]
+                v_blocks = self.v_cache_cpu[layer_id, bid_list, :, h, :]
 
-                    token_offset += n_tok
-                    i += run_len
-            kv_indptr.append(token_offset)
+                k_staging[offset:offset + n_tok, :] = k_blocks[head_mask]
+                v_staging[offset:offset + n_tok, :] = v_blocks[head_mask]
 
-        kv_indptr_tensor = torch.tensor(kv_indptr, dtype=torch.int32, device="cpu")
-        return token_offset, kv_indptr_tensor
+            offset += n_tok
+
+        return total_tokens, kv_indptr
 
     def load_packed_staging_to_jagged_gpu(
         self,

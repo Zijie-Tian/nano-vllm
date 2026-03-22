@@ -174,6 +174,30 @@ class COMPASSPolicy(SparsePolicy):
         sel_bytes = self._sel_mask.numel() + self._sel_block_ids.numel() * 4
         logger.info(f"[COMPASS] Pre-allocated TensorSelection buffers: {sel_bytes} bytes (CPU)")
 
+        # Pre-allocated pinned CPU buffers for async K pooled DtoH
+        max_k_groups = block_size_tokens // self.FINE_GRAIN  # 32 sub-blocks per block
+        self._k_pooled_buf = torch.zeros(
+            (num_layers, max_blocks, max_k_groups, num_kv_heads, head_dim),
+            dtype=torch.float32, device='cpu',
+        ).pin_memory()
+        self._k_self_cos_buf = torch.zeros(
+            (num_layers, max_blocks, max_k_groups, num_kv_heads),
+            dtype=torch.float32, device='cpu',
+        ).pin_memory()
+        k_pool_mb = self._k_pooled_buf.numel() * 4 / (1024 * 1024)
+        k_cos_kb = self._k_self_cos_buf.numel() * 4 / 1024
+        logger.info(f"[COMPASS] Allocated K pooled buffer: {k_pool_mb:.1f} MB (Pinned CPU)")
+        logger.info(f"[COMPASS] Allocated K self-cos buffer: {k_cos_kb:.1f} KB (Pinned CPU)")
+
+        # Pre-allocated pinned CPU buffer for Q self-cosine DtoH
+        self._q_self_cos_buf = torch.zeros(
+            (max_q_groups, num_kv_heads),
+            dtype=torch.float32, device='cpu',
+        ).pin_memory()
+
+        # Event for tracking async K pooled DtoH completion
+        self._k_dtoh_event = None
+
         self._k_pooled_cache = {lid: {} for lid in range(num_layers)}
         self._q_chunk_sizes = []
 
@@ -182,18 +206,21 @@ class COMPASSPolicy(SparsePolicy):
     # ========================================================================
 
     @staticmethod
-    def _pool_and_normalize(
+    def _mean_pool(
         x: torch.Tensor,
         pool_size: int = 128,
     ) -> torch.Tensor:
-        """Mean pool tokens into groups and L2 normalize for cosine similarity.
+        """Mean pool tokens into groups (no L2 normalization).
+
+        Following SpargeAttn: raw mean pooling preserves scale symmetry
+        between Q and K.  Scaling is applied later as * d^{-0.5}.
 
         Args:
             x: [seq_len, heads, dim] tensor.
             pool_size: Number of tokens per pool group.
 
         Returns:
-            [num_groups, heads, dim] pooled & L2-normalized tensor in FP32.
+            [num_groups, heads, dim] mean-pooled tensor in FP32.
         """
         seq_len, heads, dim = x.shape
         num_groups = seq_len // pool_size
@@ -205,7 +232,6 @@ class COMPASSPolicy(SparsePolicy):
             x_grouped = x_aligned.reshape(num_groups, pool_size, heads, dim)
             pooled = x_grouped.mean(dim=1)
 
-        pooled = F.normalize(pooled, p=2, dim=-1)
         return pooled
 
     @staticmethod
@@ -262,24 +288,39 @@ class COMPASSPolicy(SparsePolicy):
         cpu_block_id: int,
         num_tokens: int,
     ) -> None:
-        """Compute pooled K and self-cosine on GPU, store both on CPU.
+        """Compute pooled K and self-cosine on GPU, async DtoH via _metadata_stream.
 
-        Called from on_prefill_offload BEFORE D2H copy, using GPU-resident k_cache.
-        Pooled K is ~32KB per block, self-cosine is ~256 bytes per block.
+        Called from on_prefill_offload BEFORE GPU→CPU KV copy.
+        GPU compute runs on current stream, DtoH runs on _metadata_stream.
+        Consumers must wait on _k_dtoh_event before reading the data.
         """
         # k_cache_gpu: [kv_heads, max_tokens, head_dim] on GPU if Head-First
         if k_cache_gpu.shape[0] == self._num_kv_heads:
-            k_block = k_cache_gpu[:, :num_tokens, :].transpose(0, 1)  # [num_tokens, kv_heads, head_dim]
+            k_block = k_cache_gpu[:, :num_tokens, :].transpose(0, 1)
         else:
-            k_block = k_cache_gpu[:num_tokens]  # [num_tokens, kv_heads, head_dim]
-        # Compute on GPU: mean pool + L2 normalize
-        pooled_k_gpu = self._pool_and_normalize(k_block, self.FINE_GRAIN)
-        # Compute self-cosine similarity per K sub-block on GPU
-        self_cos_k_gpu = self._compute_self_cosine(k_block, self.FINE_GRAIN)  # [G_k, kv_heads]
-        # Transfer both to CPU (pooled ~32KB, self_cos ~256 bytes)
+            k_block = k_cache_gpu[:num_tokens]
+        # Compute on GPU (current stream): mean pool (no L2 normalize, following SpargeAttn)
+        pooled_k_gpu = self._mean_pool(k_block, self.FINE_GRAIN)
+        # Compute self-cosine similarity per K sub-block on GPU (current stream)
+        self_cos_k_gpu = self._compute_self_cosine(k_block, self.FINE_GRAIN)
+        G_k = pooled_k_gpu.shape[0]
+
+        # Async DtoH via _metadata_stream (non-blocking, no CPU stall)
+        with torch.cuda.stream(self._metadata_stream):
+            self._metadata_stream.wait_stream(torch.cuda.current_stream())
+            self._k_pooled_buf[layer_id, cpu_block_id, :G_k].copy_(
+                pooled_k_gpu, non_blocking=True
+            )
+            self._k_self_cos_buf[layer_id, cpu_block_id, :G_k].copy_(
+                self_cos_k_gpu, non_blocking=True
+            )
+        # Record event so select_blocks can precisely wait for this DtoH
+        self._k_dtoh_event = self._metadata_stream.record_event()
+
+        # Store pinned buffer views in cache (data valid after event sync)
         self._k_pooled_cache[layer_id][cpu_block_id] = (
-            pooled_k_gpu.cpu(),
-            self_cos_k_gpu.cpu(),
+            self._k_pooled_buf[layer_id, cpu_block_id, :G_k],
+            self._k_self_cos_buf[layer_id, cpu_block_id, :G_k],
         )
 
     # ========================================================================
@@ -352,63 +393,83 @@ class COMPASSPolicy(SparsePolicy):
         self._prof_k_collect += t_k_collect - t_start
         nvtx.pop_range()
 
-        # 3. Compute cosine similarity: [H, G_q, G_k]
-        #    Then AGGREGATE across Q sub-blocks (mean) to get [H, G_k]
+        # 3. Compute scaled dot-product: [H, G_q, G_k]
+        #    Following SpargeAttn: scores = Q_pool @ K_pool^T * d^{-0.5}
         nvtx.push_range("compass_matmul", color="blue")
         q_t = q_pooled.permute(1, 0, 2)  # [H, G_q, D]
         k_t = k_pooled.permute(1, 2, 0)  # [H, D, G_k]
-        scores = torch.bmm(q_t, k_t)     # [H, G_q, G_k]
+        scores = torch.bmm(q_t, k_t) * (self._head_dim ** -0.5)  # [H, G_q, G_k]
 
-        # Decoupled selection: Top_Cdf and self-cosine operate INDEPENDENTLY.
-        # Top_Cdf selects blocks by QK relevance on the FULL undistorted distribution.
-        # Self-cosine force-selects diverse blocks separately (Step 2 below).
-        # Final mask = union of both. No -inf masking before softmax.
-        avg_scores = scores.mean(dim=1)   # [H, G_k]  — average over Q groups
-        probs = torch.softmax(avg_scores, dim=-1)  # [H, G_k]
+        # SpargeAttn Step 1: mask diverse K blocks BEFORE softmax (L337)
+        #   sim_k = True means homogeneous (high self-cos >= theta)
+        #   ~sim_k = diverse → set to -inf so they don't consume top_p budget
+        #   They get force-selected separately later.
+        diverse_k = None
+        if k_self_cos is not None and self.theta is not None:
+            # k_self_cos: [G_k, H] → .t() → [H, G_k]
+            diverse_k = (k_self_cos.t() < self.theta)  # [H, G_k] True=diverse
+            # Expand to [H, G_q, G_k] and mask
+            scores = scores.masked_fill(diverse_k.unsqueeze(1), -float('inf'))
+
+        # SpargeAttn Step 2: per-Q-block softmax (L344)
+        probs = torch.softmax(scores, dim=-1)  # [H, G_q, G_k]
+
         t_matmul = time.perf_counter()
         self._prof_matmul += t_matmul - t_k_collect
         nvtx.pop_range()
 
-        # Top_Cdf with standard nucleus sampling convention:
-        # Always include the top-1 element, then include subsequent elements
-        # while the cumsum BEFORE them is still <= tau.
-        # This prevents the pathological case where the top element's prob > tau
-        # would cause ZERO blocks to be selected (paper's strict cumsum <= tau).
+        # SpargeAttn Step 3: per-Q-block top_p via cumsum (L345-351)
         nvtx.push_range("compass_topp", color="red")
         sorted_probs, sorted_indices = torch.sort(probs, dim=-1, descending=True)
-        cumsum = torch.cumsum(sorted_probs, dim=-1)  # [H, G_k]
-        mask_in_sorted = torch.cat([
-            torch.ones(H, 1, dtype=torch.bool, device=probs.device),
-            cumsum[:, :-1] <= self.top_p,
-        ], dim=-1)  # [H, G_k]
+        cdf = torch.cumsum(sorted_probs, dim=-1)  # [H, G_q, G_k]
 
-        # Scatter back to original index space
-        selected_mask = torch.zeros_like(probs, dtype=torch.bool)  # [H, G_k]
-        selected_mask.scatter_(1, sorted_indices, mask_in_sorted)
+        # searchsorted: find how many blocks needed per (H, G_q) to reach top_p
+        # cdf is [H, G_q, G_k], we need searchsorted along last dim
+        top_p_tensor = torch.tensor(self.top_p, device=cdf.device, dtype=cdf.dtype)
+        # Reshape for searchsorted: [H*G_q, G_k]
+        cdf_flat = cdf.reshape(-1, G_k)
+        num_to_select = torch.searchsorted(cdf_flat, top_p_tensor.expand(cdf_flat.shape[0], 1), right=True)
+        num_to_select = (num_to_select.squeeze(-1) + 1).clamp(min=1)  # at least 1, +1 for right boundary
+        num_to_select = num_to_select.reshape(H, G_q)  # [H, G_q]
 
-        # SpargeAttention Step 2: force-select diverse K sub-blocks
+        # SpargeAttn Step 4: build final_map [H, G_q, G_k] (L355-358)
+        final_map = torch.zeros(H, G_q, G_k, dtype=torch.bool, device=probs.device)
+
+        # Force-select diverse K blocks for ALL Q blocks (SpargeAttn L356)
         persistent_k_io = 0
-        if k_self_cos is not None and self.theta is not None:
-            diverse_k = (k_self_cos.t() < self.theta)  # [H, G_k]
+        if diverse_k is not None:
+            final_map |= diverse_k.unsqueeze(1)  # broadcast [H, 1, G_k] → [H, G_q, G_k]
             force_k_count = int(diverse_k.sum().item())
-            selected_mask |= diverse_k
             self._stats_force_selected_k += force_k_count
-            # IO-level persistent: union across heads
             persistent_k_io = int(diverse_k.any(dim=0).sum().item())
             self._stats_persistent_k_blocks += persistent_k_io
             self._stats_persistent_k_total += G_k
 
-        # SpargeAttention Step 3: force-select all K for heads with diverse Q
+        # Force-select all K for diverse Q blocks (SpargeAttn L357)
         if q_self_cos is not None and self.theta is not None:
-            # q_self_cos: [G_q, H]
-            # If ANY Q sub-block has low self-cosine for a head -> force all K for that head
-            diverse_q_per_head = (q_self_cos < self.theta).any(dim=0)  # [H]
-            for h in range(H):
-                if diverse_q_per_head[h]:
-                    selected_mask[h, :] = True
-                    self._stats_force_selected_q_heads += 1
+            # q_self_cos: [G_q, H] → diverse_q: [H, G_q] True=diverse
+            diverse_q = (q_self_cos < self.theta).t()  # [H, G_q]
+            # For each (h, gq) where diverse_q is True → all K selected
+            diverse_q_expanded = diverse_q.unsqueeze(-1).expand_as(final_map)  # [H, G_q, G_k]
+            final_map |= diverse_q_expanded
+            self._stats_force_selected_q_heads += int(diverse_q.sum().item())
 
-        # Per-head selection: keep per-head mask, do NOT union
+        # Scatter top_p selected blocks into final_map (SpargeAttn L358)
+        # For each (h, gq), select the top num_to_select[h, gq] blocks
+        for h in range(H):
+            for gq in range(G_q):
+                n = int(num_to_select[h, gq].item())
+                n = min(n, G_k)
+                top_indices = sorted_indices[h, gq, :n]
+                final_map[h, gq, top_indices] = True
+
+        # SpargeAttn Step 5: attention sink (L362-363)
+        # Always select block 0 (first sub-block in first available block)
+        final_map[:, :, 0] = True
+
+        # SpargeAttn Step 6: union across Q → per-K mask [H, G_k]
+        selected_mask = final_map.any(dim=1)  # [H, G_k]
+
         t_topp = time.perf_counter()
         self._prof_topp += t_topp - t_matmul
         nvtx.pop_range()
@@ -417,7 +478,7 @@ class COMPASSPolicy(SparsePolicy):
         nvtx.push_range("compass_mask_build", color="yellow")
         per_head_counts = selected_mask.sum(dim=1)  # [H]
         overall_selected = selected_mask.any(dim=0)  # [G_k] for IO/stats
-        total_sub = G_k * H  # total = G_k per head x H heads
+        total_sub = G_k * H
         selected_sub = int(per_head_counts.sum().item())
         self._stats_total_subblocks += total_sub
         self._stats_selected_subblocks += selected_sub
@@ -466,17 +527,18 @@ class COMPASSPolicy(SparsePolicy):
         self._prof_calls += 1
         heads_per_group = self._num_heads // self._num_kv_heads
 
-        # 1. Synchronize to ensure previous GPU work (including pooled K) is done
-        nvtx.push_range("compass_cuda_sync", color="gray")
+        # 1. Wait for previous K pooled DtoH on _metadata_stream (precise event wait)
+        nvtx.push_range("compass_k_dtoh_wait", color="gray")
         t0 = time.perf_counter()
-        torch.cuda.current_stream().synchronize()
+        if self._k_dtoh_event is not None:
+            self._k_dtoh_event.synchronize()  # Only wait for K DtoH, not entire stream
         t1 = time.perf_counter()
         self._prof_sync += t1 - t0
         nvtx.pop_range()
 
         # 2. GPU-side Q pooling + GQA fold (fast on GPU)
         nvtx.push_range("compass_q_pool_gpu", color="magenta")
-        q_pooled_gpu = self._pool_and_normalize(q, self.FINE_GRAIN)
+        q_pooled_gpu = self._mean_pool(q, self.FINE_GRAIN)
         G_q = q_pooled_gpu.shape[0]
         # GQA fold on GPU: [G_q, H, D] -> [G_q, H_kv, hpg, D] -> mean -> [G_q, H_kv, D]
         q_pooled_gpu = q_pooled_gpu.reshape(G_q, self._num_kv_heads, heads_per_group, self._head_dim)
@@ -490,17 +552,19 @@ class COMPASSPolicy(SparsePolicy):
         q_self_cos_gpu = self._compute_self_cosine(q, self.FINE_GRAIN)  # [G_q, H]
         # GQA fold self-cosine: [G_q, H] -> [G_q, H_kv] via mean over head groups
         q_self_cos_gpu = q_self_cos_gpu.reshape(G_q, self._num_kv_heads, heads_per_group).mean(dim=2)
-        q_self_cos_cpu = q_self_cos_gpu.cpu()  # tiny tensor, sync is negligible
         t2b = time.perf_counter()
         self._prof_self_cos += t2b - t2
         nvtx.pop_range()
 
-        # 3. Async transfer pooled Q to pinned CPU buffer (~128KB vs 32MB)
+        # 3. Async transfer pooled Q + Q self-cos to pinned CPU buffers
         nvtx.push_range("compass_q_d2h", color="cyan")
         with torch.cuda.stream(self._metadata_stream):
+            self._metadata_stream.wait_stream(torch.cuda.current_stream())
             self._q_pooled_cpu_buf[:G_q].copy_(q_pooled_gpu, non_blocking=True)
+            self._q_self_cos_buf[:G_q].copy_(q_self_cos_gpu, non_blocking=True)
         self._metadata_stream.synchronize()
         q_pooled_cpu = self._q_pooled_cpu_buf[:G_q].clone()  # snapshot
+        q_self_cos_cpu = self._q_self_cos_buf[:G_q]  # pinned buf, valid after sync
         t3 = time.perf_counter()
         self._prof_q_cpu += t3 - t2b
         nvtx.pop_range()
@@ -547,14 +611,14 @@ class COMPASSPolicy(SparsePolicy):
         union_count = int(any_selected_per_block.sum().item())
 
         head_strs = ", ".join(f"H{h}:{per_head_counts[h]/G_k*100:.1f}%" for h in range(H))
-        io_density = (union_count / G_k * 100) if G_k > 0 else 0
+        io_density = (union_count / num_blocks * 100) if num_blocks > 0 else 0
         l1_density = (total_ph / (G_k * H) * 100) if G_k > 0 else 0
-        persistent_ratio = (persistent_k_io / G_k * 100) if G_k > 0 else 0
+        persistent_ratio = (persistent_k_io / num_blocks * 100) if num_blocks > 0 else 0
         logger.info(
             f"[COMPASS] layer={ctx.layer_id}, seq_chunk={ctx.query_chunk_idx}: "
-            f"IO_density={io_density:.1f}% ({union_count}/{G_k}), "
+            f"IO_density={io_density:.1f}% ({union_count}/{num_blocks}), "
             f"L1_density={l1_density:.1f}% ({total_ph}/{G_k*H}), "
-            f"Persistent_K={persistent_ratio:.1f}% ({persistent_k_io}/{G_k}), "
+            f"Persistent_K={persistent_ratio:.1f}% ({persistent_k_io}/{num_blocks}), "
             f"per-head: [{head_strs}]"
         )
 

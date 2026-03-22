@@ -171,6 +171,8 @@ The architecture consists of 4 core modules:
 | [`docs/compass_head_first_layout_and_async_staging.md`](docs/compass_head_first_layout_and_async_staging.md) | COMPASS Head-First KV Cache layout eliminating H2D IO amplification, and fully asynchronous multi-staging buffers avoiding CPU blocking overhead. |
 | [`docs/compass_v2_jagged_architecture.md`](docs/compass_v2_jagged_architecture.md) | COMPASS V2 Jagged Memory Architecture: 1D packed buffer mapping, top-p slice gathering, bulk DMA, and custom Triton kernel integration. |
 | [`docs/compass_l2_pruning_and_kernel_optimization.md`](docs/compass_l2_pruning_and_kernel_optimization.md) | COMPASS L2 dynamic pruning (BLASST-style GPU skip) and pipeline kernel overhead reduction: in-place merge kernel, mask_buffer pre-allocation, density tracking. |
+| [`docs/compass_tensorized_selection_and_gather.md`](docs/compass_tensorized_selection_and_gather.md) | COMPASS CPU 侧两阶段优化：TensorSelection 替代 PerHeadSubBlockSelection（O(1) tensor reshape，254× 加速）、fancy+boolean indexing 向量化 gather（copy_() 从 320-640 降至 32/chunk）。 |
+| [`docs/compass_l1_spargeattn_alignment.md`](docs/compass_l1_spargeattn_alignment.md) | COMPASS L1 SpargeAttn 对齐：per-Q-block softmax、self-cos masking before softmax、attention sink、per-Q top_p + union。top_p × theta 参数扫描结果（11 组全部 100% NIAH 通过，最高 L1 pruning 20.8%）。 |
 
 ---
 

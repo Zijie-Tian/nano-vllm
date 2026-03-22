@@ -194,6 +194,11 @@ class Attention(nn.Module):
                 else -1
             )
 
+            # NVTX: cover full chunked prefill scope (D2D write → select → compute → offload)
+            torch.cuda.nvtx.range_push(
+                f"ChunkedPrefill: L{self.layer_id} Chunk{chunk_idx}"
+            )
+
             # Wait for default stream to ensure slot_mapping tensor transfer is complete
             compute_stream.wait_stream(torch.cuda.default_stream())
 
@@ -247,6 +252,8 @@ class Attention(nn.Module):
             if context.is_chunked_prefill:
                 # Chunked prefill: merge attention from previous KV (CPU offload mode)
                 o = self._chunked_prefill_attention(q, k, v, context)
+                # NVTX pop: end of full chunked prefill scope
+                torch.cuda.nvtx.range_pop()  # ChunkedPrefill
             else:
                 # GPU-only mode: use policy for attention
                 # Use paged attention if block_tables provided, else use k, v directly
@@ -314,9 +321,6 @@ class Attention(nn.Module):
         4. Merging all results
         """
         current_chunk_idx = context.current_chunk_idx
-        torch.cuda.nvtx.range_push(
-            f"ChunkedPrefill: L{self.layer_id} Chunk{current_chunk_idx}"
-        )
 
         num_tokens = k.shape[0]
 
@@ -377,7 +381,7 @@ class Attention(nn.Module):
         torch.cuda.current_stream().synchronize()
         t2 = time.time()
 
-        torch.cuda.nvtx.range_pop()  # ChunkedPrefill
+        # (NVTX pop moved to Attention.forward after offload_prefill_chunk)
 
         # ---- Phase 3: offload_prefill_chunk ----
         t_offload = 0.0
