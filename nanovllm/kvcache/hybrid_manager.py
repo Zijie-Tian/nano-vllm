@@ -235,6 +235,10 @@ class HybridKVCacheManager(KVCacheManager):
         if self.offload_engine is not None:
             self.offload_engine.reset()
 
+        # Reset sparse policy state (clears pooled K cache, compacted selections, etc.)
+        if self.sparse_policy is not None and hasattr(self.sparse_policy, 'reset_request_state'):
+            self.sparse_policy.reset_request_state()
+
     def can_append(self, seq: Sequence) -> bool:
         """Check if we can append a token."""
         need_new_block = len(seq) % self._block_size == 1

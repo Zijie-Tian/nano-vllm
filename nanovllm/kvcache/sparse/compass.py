@@ -630,6 +630,40 @@ class COMPASSPolicy(SparsePolicy):
         return io_blocks
 
     # ========================================================================
+    # Request lifecycle
+    # ========================================================================
+
+    def reset_request_state(self) -> None:
+        """Reset all per-request state to prevent inter-request contamination.
+
+        MUST be called when a sequence is deallocated (between generate() calls).
+        Without this, recycled CPU block IDs cause stale pooled K cache data
+        from the previous request to corrupt the current request's L1 scoring.
+        """
+        # Clear pooled K cache (critical: stale entries cause wrong L1 selection)
+        for layer_cache in self._k_pooled_cache.values():
+            layer_cache.clear()
+
+        # Clear compacted selections
+        self._compacted_selections.clear()
+
+        # Reset profiling counters
+        self._prof_sync = 0.0
+        self._prof_q_cpu = 0.0
+        self._prof_q_pool = 0.0
+        self._prof_k_collect = 0.0
+        self._prof_matmul = 0.0
+        self._prof_topp = 0.0
+        self._prof_mask_build = 0.0
+        self._prof_self_cos = 0.0
+        self._prof_calls = 0
+
+        # Reset statistics
+        self.reset_stats()
+
+        logger.debug("[COMPASS] Request state reset (pooled K cache cleared)")
+
+    # ========================================================================
     # Statistics
     # ========================================================================
 

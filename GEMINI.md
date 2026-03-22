@@ -36,6 +36,7 @@ The architecture consists of 4 core modules:
 *   **No `None` Policy**: `sparse_policy` must never be `None`. Default to `FullAttentionPolicy` if unspecified.
 *   **OffloadEngine Communication**: All CPU-GPU data transfers in policies **MUST** go through `OffloadEngine` (e.g., `load_to_slot_layer`, `wait_slot_layer`) to ensure stream synchronization and pipeline optimization. **Direct `.to("cuda")` or `.copy_()` is prohibited in compute methods.**
 *   **Interface Compliance**: Policies must declare `supports_prefill`/`supports_decode` and implement `select_blocks()`, `compute_chunked_prefill()`, and `compute_chunked_decode()`.
+*   **Request State Reset (CRITICAL)**: All sparse policies **MUST** implement `reset_request_state()` to clear all per-request mutable state (caches, selections, profiling counters, statistics). This method is called by `hybrid_manager.deallocate()` between requests. Failure to clear state causes **inter-request contamination** — e.g., stale pooled K cache entries from recycled block IDs corrupt L1 scoring in subsequent requests. When adding new per-request state to a policy, always add corresponding cleanup in `reset_request_state()`.
 
 ### 1.4 Low-Level Optimization (Triton/CUDA)
 *   **Design First**: Always create a design specification before implementing Triton kernels, including algorithm overview, interface, and numerical constraints.
