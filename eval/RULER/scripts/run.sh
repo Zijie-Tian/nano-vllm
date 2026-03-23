@@ -66,6 +66,7 @@ AVGPOOL_TOPK=${AVGPOOL_TOPK:-""}
 AVGPOOL_TOPP=${AVGPOOL_TOPP:-""}
 COMPASS_TOPP=${COMPASS_TOPP:-""}
 COMPASS_LAMBDA=${COMPASS_LAMBDA:-""}
+COMPASS_THETA=${COMPASS_THETA:-""}
 TASK_OVERRIDE=""
 NUM_SAMPLES_OVERRIDE=""
 
@@ -102,6 +103,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --compass_lambda)
             COMPASS_LAMBDA="--compass_lambda $2"
+            shift 2
+            ;;
+        --compass_theta)
+            COMPASS_THETA="--compass_theta $2"
             shift 2
             ;;
         --num_samples)
@@ -159,7 +164,7 @@ fi
 
 # NanoVLLM parallel execution settings
 # GPU configuration for parallel execution
-GPU_LIST=${GPU_LIST:-"2,3,4,5"}  # Comma-separated GPU IDs to use (4 GPUs for parallel testing)
+GPU_LIST=${GPU_LIST:-"0,1,2,3,4,5"}  # Comma-separated GPU IDs to use (6 GPUs for parallel testing)
 IFS=',' read -ra GPU_ARRAY <<< "$GPU_LIST"
 NUM_GPUS=${#GPU_ARRAY[@]}
 
@@ -191,6 +196,9 @@ for MAX_SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
         fi
         if [[ -n ${COMPASS_LAMBDA} ]]; then
             SETTINGS_INFO+="lambda${COMPASS_LAMBDA##* }_"
+        fi
+        if [[ -n ${COMPASS_THETA} ]]; then
+            SETTINGS_INFO+="theta${COMPASS_THETA##* }_"
         fi
     else
         # For xattn (nanovllm or other backends), include stride in folder name
@@ -327,6 +335,7 @@ for MAX_SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
                     ${AVGPOOL_TOPP} \
                     ${COMPASS_TOPP} \
                     ${COMPASS_LAMBDA} \
+                    ${COMPASS_THETA} \
                     ${PRINT_DETAIL} &
 
                 GPU_PIDS[$FREE_GPU]=$!
@@ -370,6 +379,7 @@ for MAX_SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
                 ${AVGPOOL_TOPP} \
                 ${COMPASS_TOPP} \
                 ${COMPASS_LAMBDA} \
+                ${COMPASS_THETA} \
                 ${PRINT_DETAIL}
             end_time=$(date +%s)
             time_diff=$((end_time - start_time))
