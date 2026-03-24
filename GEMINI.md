@@ -174,6 +174,7 @@ The architecture consists of 4 core modules:
 | [`docs/compass_l2_pruning_and_kernel_optimization.md`](docs/compass_l2_pruning_and_kernel_optimization.md) | COMPASS L2 dynamic pruning (BLASST-style GPU skip) and pipeline kernel overhead reduction: in-place merge kernel, mask_buffer pre-allocation, density tracking. |
 | [`docs/compass_tensorized_selection_and_gather.md`](docs/compass_tensorized_selection_and_gather.md) | COMPASS CPU 侧两阶段优化：TensorSelection 替代 PerHeadSubBlockSelection（O(1) tensor reshape，254× 加速）、fancy+boolean indexing 向量化 gather（copy_() 从 320-640 降至 32/chunk）。 |
 | [`docs/compass_l1_spargeattn_alignment.md`](docs/compass_l1_spargeattn_alignment.md) | COMPASS L1 SpargeAttn 对齐：per-Q-block softmax、self-cos masking before softmax、attention sink、per-Q top_p + union。top_p × theta 参数扫描结果（11 组全部 100% NIAH 通过，最高 L1 pruning 20.8%）。 |
+| [`docs/cpu_ops_design.md`](docs/cpu_ops_design.md) | CPU Attention Operators (cpu_ops) 设计文档：VNNI INT8 micro-kernel 架构、qk_rowmax 和 qk_blockmask API 参考、BLASST block-mask 算法映射、模板参数说明、OMP 并行策略、性能数据。 |
 
 ---
 
