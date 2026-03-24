@@ -180,6 +180,7 @@ class XAttentionBSAPolicy(SparsePolicy):
         dtype: torch.dtype,
         device: torch.device,
         enable_cpu_offload: bool = False,
+        num_layers: int = 64,
     ) -> None:
         """
         Pre-allocate GQA expansion buffers for GPU-only mode.
