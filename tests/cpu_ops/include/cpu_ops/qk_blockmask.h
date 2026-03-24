@@ -32,6 +32,17 @@ void qk_blockmask_fp32(const float* Q, const float* K,
                        size_t BQ, size_t BK, size_t D);
 
 /**
+ * FP32 BLASST block-mask generation (HPC-optimized, OpenMP parallel).
+ */
+template <int BS = 128, int STEP_KV = 128>
+void qk_blockmask_fp32_omp(const float* Q, const float* K,
+                           float* block_rowmax,
+                           float* running_max,
+                           uint8_t* block_mask,
+                           float log_lambda,
+                           size_t BQ, size_t BK, size_t D);
+
+/**
  * VNNI INT8 BLASST block-mask generation (single-threaded).
  */
 template <int MR, int NR, int GS, int BS = 128, int STEP_KV = 128>

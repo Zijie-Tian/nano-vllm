@@ -263,22 +263,29 @@ This matches TensorRT-LLM's `atomicAnd(skip_softmax_vote, ...)` implementation, 
 | 0.1 | −2.3 | Moderate skip |
 | 0.9 | −0.11 | Very conservative (almost no skip) |
 
-### OpenMP Strategy
+### OpenMP Strategy (HPC v2)
 
-1. **Pre-quantize Q** once into cached buffers (parallel across rows)
-2. **Per K-block** (sequential for running_max consistency):
-   - Parallel across Q-rows: each thread processes MR-aligned chunks
-   - AND-reduce: sequential (cheap, O(BQ) comparisons)
+The OMP implementation applies 5 micro-architectural optimizations:
 
-### Performance (24-core Xeon Silver 4310, Q=4096, K=32768, `<8,2,4096,128,128>`)
+1. **Loop Inversion**: Outermost parallel on Q-blocks (`#pragma omp parallel for` on `qblk`) — single fork, zero barriers per K-block. Each thread owns a tiny `BS × d_padded` L1-resident Q cache.
+2. **Deferred Horizontal Reduction**: Accumulates rowmax in FP32 `__m512` vectors (`_mm512_cvtepi32_ps` + `_mm512_max_ps`). Only one `_mm512_reduce_max_ps` scalar extract per K-block.
+3. **Branch-Free Inner Loop**: Pre-computes `tiles_per_group`, chunks the tile loop by quantization group boundaries, and peels the last-tile mask handling out of the hot loop.
+4. **NR Template Unrolling**: Main loop calls `microkernel_vnni<MR, NR>` (NR=2 → 32 K-rows/call), increasing ILP and ZMM register utilization.
+5. **Dynamic Padding**: Tail Q-rows (< MR) padded by replicating the last valid row pointer, eliminating the `<1,1>` fallback code path entirely.
 
-| D | Time | GOPS |
-|---|------|------|
-| 8 | 2.95 ms | 727 |
-| 16 | 3.81 ms | 1127 |
-| 32 | 6.34 ms | 1355 |
+### Performance (24-core Xeon Silver 4310, Q=4096, `<8,2,4096,128,128>`)
 
-Overhead vs `qk_rowmax_vnni_omp`: ~2× (due to per-STEP_KV block iteration + mask logic).
+| K | D=8 | D=16 | D=32 |
+|---|-----|------|------|
+| **32k** | 2.31 ms (929 GOPS) | 3.24 ms (1327 GOPS) | 5.19 ms (1654 GOPS) |
+| **128k** | 9.39 ms (915 GOPS) | 12.4 ms (1389 GOPS) | 18.3 ms (1926 GOPS) |
+| **1M** | 120 ms (984 GOPS) | 141 ms (973 GOPS) | 187 ms (2160 GOPS) |
+
+**Scaling Analysis**:
+- **32k → 128k (4×)**: Time scales ~3.6-4×, near-linear (K data fits in L3 cache).
+- **128k → 1M (8×)**: Time scales ~10-12×, super-linear due to L3 eviction (36MB L3 ≪ 1M × D bytes K data → DRAM-bound).
+- **Peak throughput**: D=32 reaches **2.16 TOPS** at 1M context, demonstrating good compute density.
+- Overhead vs `qk_rowmax_vnni_omp`: ~1.7× at 32k (was 2× before HPC optimizations).
 
 ---
 

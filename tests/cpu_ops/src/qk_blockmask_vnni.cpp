@@ -153,7 +153,12 @@ void qk_blockmask_vnni(const float* Q, const int8_t* K_vnni,
 }
 
 // ============================================================
-// OMP blockmask: parallel across Q-rows, cached Q quantization
+// OMP blockmask v2: HPC-optimized
+//   1. Loop inversion: Q-block-outer parallel (no fork/join per K-block)
+//   2. Deferred horizontal reduction (FP32 vector max, single scalar reduce)
+//   3. Branch-free inner loop (group chunking + last-tile peeling)
+//   4. NR template unrolling (use <MR, NR> microkernel for ILP)
+//   5. Dynamic padding (pad Q pointers, eliminate tail fallback)
 // ============================================================
 template <int MR, int NR, int GS, int BS, int STEP_KV>
 void qk_blockmask_vnni_omp(const float* Q, const int8_t* K_vnni,
@@ -171,123 +176,120 @@ void qk_blockmask_vnni_omp(const float* Q, const int8_t* K_vnni,
         : (__mmask16)((1U << tail_count) - 1);
     size_t tile_stride = d_groups * 64;
     size_t actual_gs = (GS == 0) ? BK : (size_t)GS;
+    // Opt3: precompute tiles-per-group (avoid division in hot loop)
+    size_t tiles_per_group = std::max<size_t>(1, actual_gs / 16);
 
     size_t n_k_blocks = (BK + STEP_KV - 1) / STEP_KV;
     size_t n_q_blocks = (BQ + BS - 1) / BS;
 
-    // Pre-quantize all Q rows once (avoid redundant per-K-block quantization)
-    std::vector<uint8_t> q_cache(BQ * d_padded);
-    std::vector<float> sq_cache(BQ);
-    #pragma omp parallel for schedule(static)
-    for (size_t i = 0; i < BQ; ++i) {
-        sq_cache[i] = quantize_q_row(Q + i * D,
-            q_cache.data() + i * d_padded, D, d_padded);
-    }
+    // Opt1: outermost parallel on Q-blocks — single fork, no barrier per K-block
+    #pragma omp parallel for schedule(dynamic)
+    for (size_t qblk = 0; qblk < n_q_blocks; ++qblk) {
+        size_t q_start = qblk * BS;
+        size_t q_end = std::min(q_start + (size_t)BS, BQ);
+        size_t cur_bs = q_end - q_start;
 
-    // Process each K-block (sequential across blocks for running_max consistency)
-    for (size_t kblk = 0; kblk < n_k_blocks; ++kblk) {
-        size_t k_start = kblk * STEP_KV;
-        size_t k_end = std::min(k_start + (size_t)STEP_KV, BK);
-        size_t t_start = k_start / 16;
-        size_t t_end = std::min((k_end + 15) / 16, n_tiles);
+        // Opt1: tiny thread-local Q cache — fits in L1
+        alignas(64) uint8_t local_q_cache[BS * 64];  // BS * d_padded (max 64)
+        float local_sq[BS];
+        for (size_t i = 0; i < cur_bs; ++i) {
+            local_sq[i] = quantize_q_row(
+                Q + (q_start + i) * D,
+                local_q_cache + i * d_padded, D, d_padded);
+        }
 
-        // Parallel across Q rows — each thread processes MR-aligned chunks
-        #pragma omp parallel
-        {
-            // Thread-local tile computation
-            #pragma omp for schedule(static)
-            for (size_t i_base = 0; i_base < BQ; i_base += MR) {
-                int actual_mr = (int)std::min((size_t)MR, BQ - i_base);
+        const __m512i neg_inf_i = _mm512_set1_epi32(0x80000000);
+        const __m512i correction_128 = _mm512_set1_epi32(128);
+        const __m512 neg_inf_f = _mm512_set1_ps(
+            -std::numeric_limits<float>::infinity());
 
-                if (actual_mr == MR) {
-                    // Full MR block
-                    float sq[MR];
-                    const uint8_t* q_ptrs[MR];
-                    for (int m = 0; m < MR; ++m) {
-                        sq[m] = sq_cache[i_base + m];
-                        q_ptrs[m] = q_cache.data() + (i_base + m) * d_padded;
+        for (size_t kblk = 0; kblk < n_k_blocks; ++kblk) {
+            size_t k_start = kblk * STEP_KV;
+            size_t k_end = std::min(k_start + (size_t)STEP_KV, BK);
+            size_t t_start = k_start / 16;
+            size_t t_end = std::min((k_end + 15) / 16, n_tiles);
+
+            for (size_t i_base = 0; i_base < cur_bs; i_base += MR) {
+                size_t actual_mr = std::min((size_t)MR, cur_bs - i_base);
+                size_t global_qi = q_start + i_base;
+
+                float sq[MR];
+                const uint8_t* q_ptrs[MR];
+                __m512i grp_rmax[MR];
+                __m512 v_fp_rmax[MR];  // Opt2: FP32 vector accumulator
+
+                // Opt5: dynamic padding — replicate last valid row
+                for (int m = 0; m < MR; ++m) {
+                    int safe_idx = std::min(m, (int)actual_mr - 1);
+                    sq[m] = local_sq[i_base + safe_idx];
+                    q_ptrs[m] = local_q_cache + (i_base + safe_idx) * d_padded;
+                    grp_rmax[m] = neg_inf_i;
+                    v_fp_rmax[m] = neg_inf_f;
+                }
+
+                // Opt3: chunk by quantization group boundaries
+                size_t t = t_start;
+                while (t < t_end) {
+                    size_t cur_group = t / tiles_per_group;
+                    size_t next_group_t = (cur_group + 1) * tiles_per_group;
+                    size_t chunk_end = std::min(t_end, next_group_t);
+                    // Separate safe region (full mask) from potential last-tile
+                    size_t chunk_safe = (chunk_end == n_tiles) ? chunk_end - 1
+                                                               : chunk_end;
+
+                    __mmask16 full_masks[NR];
+                    for (int n = 0; n < NR; ++n) full_masks[n] = 0xFFFF;
+
+                    // Opt4: NR-unrolled main loop (branch-free, full mask)
+                    for (; t + NR <= chunk_safe; t += NR) {
+                        microkernel_vnni<MR, NR>(
+                            q_ptrs, d_groups,
+                            K_vnni + t * tile_stride, tile_stride,
+                            sum_k + t * 16,
+                            grp_rmax, full_masks, neg_inf_i, correction_128);
+                    }
+                    // NR-remainder (still full mask, no branch)
+                    for (; t < chunk_safe; ++t) {
+                        microkernel_vnni<MR, 1>(
+                            q_ptrs, d_groups,
+                            K_vnni + t * tile_stride, tile_stride,
+                            sum_k + t * 16,
+                            grp_rmax, full_masks, neg_inf_i, correction_128);
                     }
 
-                    __m512i neg_inf_i = _mm512_set1_epi32(0x80000000);
-                    __m512i correction_128 = _mm512_set1_epi32(128);
-                    size_t cur_group = (t_start * 16) / actual_gs;
-                    __m512i grp_rmax[MR];
-                    for (int m = 0; m < MR; ++m) grp_rmax[m] = neg_inf_i;
-                    float fp_rmax[MR];
-                    for (int m = 0; m < MR; ++m)
-                        fp_rmax[m] = -std::numeric_limits<float>::infinity();
-
-                    for (size_t t = t_start; t < t_end; ++t) {
-                        size_t tile_group = (t * 16) / actual_gs;
-                        if (tile_group != cur_group) {
-                            for (int m = 0; m < MR; ++m) {
-                                int32_t gmax = _mm512_reduce_max_epi32(grp_rmax[m]);
-                                fp_rmax[m] = std::max(fp_rmax[m],
-                                    (float)gmax * sq[m] * scale_k[cur_group]);
-                                grp_rmax[m] = neg_inf_i;
-                            }
-                            cur_group = tile_group;
-                        }
-                        __mmask16 masks[1] = { (t == n_tiles - 1)
+                    // Opt3: peeled last tile with tail mask
+                    if (t < chunk_end) {
+                        __mmask16 tail_masks[1] = { (t == n_tiles - 1)
                             ? last_tile_mask : (__mmask16)0xFFFF };
                         microkernel_vnni<MR, 1>(
                             q_ptrs, d_groups,
                             K_vnni + t * tile_stride, tile_stride,
                             sum_k + t * 16,
-                            grp_rmax, masks, neg_inf_i, correction_128);
+                            grp_rmax, tail_masks, neg_inf_i, correction_128);
+                        ++t;
                     }
+
+                    // Opt2: vector-width FP32 accumulation (no scalar reduce)
                     for (int m = 0; m < MR; ++m) {
-                        int32_t gmax = _mm512_reduce_max_epi32(grp_rmax[m]);
-                        fp_rmax[m] = std::max(fp_rmax[m],
-                            (float)gmax * sq[m] * scale_k[cur_group]);
-                        block_rowmax[(i_base + m) * n_k_blocks + kblk] = fp_rmax[m];
-                        running_max[i_base + m] = std::max(
-                            running_max[i_base + m], fp_rmax[m]);
+                        __m512 v_gmax = _mm512_cvtepi32_ps(grp_rmax[m]);
+                        __m512 v_scale = _mm512_set1_ps(
+                            sq[m] * scale_k[cur_group]);
+                        v_fp_rmax[m] = _mm512_max_ps(v_fp_rmax[m],
+                            _mm512_mul_ps(v_gmax, v_scale));
+                        grp_rmax[m] = neg_inf_i;
                     }
-                } else {
-                    // Tail rows (< MR)
-                    for (int m = 0; m < actual_mr; ++m) {
-                        size_t i = i_base + m;
-                        float sq = sq_cache[i];
-                        const uint8_t* q_ptrs[1] = {
-                            q_cache.data() + i * d_padded };
-                        __m512i neg_inf_i = _mm512_set1_epi32(0x80000000);
-                        __m512i correction_128 = _mm512_set1_epi32(128);
-                        size_t cur_group = (t_start * 16) / actual_gs;
-                        __m512i grp_rmax[1] = { neg_inf_i };
-                        float fp_rmax = -std::numeric_limits<float>::infinity();
+                }  // end group chunking
 
-                        for (size_t t = t_start; t < t_end; ++t) {
-                            size_t tile_group = (t * 16) / actual_gs;
-                            if (tile_group != cur_group) {
-                                int32_t gmax = _mm512_reduce_max_epi32(grp_rmax[0]);
-                                fp_rmax = std::max(fp_rmax,
-                                    (float)gmax * sq * scale_k[cur_group]);
-                                grp_rmax[0] = neg_inf_i;
-                                cur_group = tile_group;
-                            }
-                            __mmask16 masks[1] = { (t == n_tiles - 1)
-                                ? last_tile_mask : (__mmask16)0xFFFF };
-                            microkernel_vnni<1, 1>(
-                                q_ptrs, d_groups,
-                                K_vnni + t * tile_stride, tile_stride,
-                                sum_k + t * 16,
-                                grp_rmax, masks, neg_inf_i, correction_128);
-                        }
-                        int32_t gmax = _mm512_reduce_max_epi32(grp_rmax[0]);
-                        fp_rmax = std::max(fp_rmax,
-                            (float)gmax * sq * scale_k[cur_group]);
-                        block_rowmax[i * n_k_blocks + kblk] = fp_rmax;
-                        running_max[i] = std::max(running_max[i], fp_rmax);
-                    }
+                // Opt2: single scalar horizontal reduce per K-block (only here)
+                for (size_t m = 0; m < actual_mr; ++m) {
+                    float fp_max = _mm512_reduce_max_ps(v_fp_rmax[m]);
+                    block_rowmax[(global_qi + m) * n_k_blocks + kblk] = fp_max;
+                    running_max[global_qi + m] = std::max(
+                        running_max[global_qi + m], fp_max);
                 }
-            }
-        }  // end omp parallel
+            }  // end MR blocks
 
-        // AND-reduce across BS Q-rows (sequential, cheap)
-        for (size_t qblk = 0; qblk < n_q_blocks; ++qblk) {
-            size_t q_start = qblk * BS;
-            size_t q_end = std::min(q_start + (size_t)BS, BQ);
+            // Opt1 bonus: mask computed in-place on hot cache, no extra barrier
             bool all_skip = true;
             for (size_t qi = q_start; qi < q_end; ++qi) {
                 if ((block_rowmax[qi * n_k_blocks + kblk] - running_max[qi])
@@ -297,8 +299,8 @@ void qk_blockmask_vnni_omp(const float* Q, const int8_t* K_vnni,
                 }
             }
             block_mask[qblk * n_k_blocks + kblk] = all_skip ? 0 : 1;
-        }
-    }
+        }  // end K-blocks
+    }  // end OMP parallel for
 }
 
 // ============================================================
