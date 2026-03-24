@@ -234,3 +234,4 @@ INSTANTIATE_FP32(8, 2)
 #undef INSTANTIATE_FP32
 
 }  // namespace cpu_ops
+
