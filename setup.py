@@ -1,5 +1,8 @@
+import os
 from setuptools import setup, find_packages
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CppExtension
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
 
 setup(
     name="nano-vllm",
@@ -19,9 +22,25 @@ setup(
                 "nvcc": ["-O3", "--use_fast_math", "-std=c++17"],
             },
             include_dirs=[
-                "csrc",
+                os.path.join(ROOT, "csrc"),
             ],
-        )
+        ),
+        CppExtension(
+            name="nanovllm.sparse._cpu_ops",
+            sources=[
+                "csrc/cpu_ops/qk_blockmask_torch.cpp",
+                "csrc/cpu_ops/qk_blockmask_fp32.cpp",
+                "csrc/cpu_ops/qk_blockmask_vnni.cpp",
+            ],
+            include_dirs=[
+                os.path.join(ROOT, "csrc/cpu_ops/include"),
+            ],
+            extra_compile_args=[
+                "-O3", "-std=c++17", "-fopenmp",
+                "-mavx512f", "-mavx512bw", "-mavx512vnni",
+            ],
+            extra_link_args=["-lgomp"],
+        ),
     ],
     cmdclass={"build_ext": BuildExtension},
     python_requires=">=3.10,<3.13",
@@ -33,3 +52,4 @@ setup(
         "xxhash",
     ],
 )
+
