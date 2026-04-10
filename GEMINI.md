@@ -126,7 +126,7 @@ The architecture consists of 4 core modules:
 *   **`L1_density`**: Percentage of sub-blocks selected after CPU L1 top-p selection (sum across all heads).
 *   **`Compute_density`**: Percentage of compute-pairs actually computed after L1+L2 combined pruning. Denominator is full context (all heads × all KV blocks × all Q blocks). With `lambda=1e-10` this reflects L1 only (~60%); with `lambda=0.001` drops to 20-50%.
 *   **`pipelined into N pieces`**: Number of intra-layer pipeline chunks. More pieces = better H2D/compute overlap.
-*   **Documentation Indexing**: Whenever a new document is added to the `docs/` directory, its path and purpose **MUST** be immediately indexed in both `GEMINI.md` and `CLAUDE.md`.
+*   **Documentation Sync Rule**: 强制要求！每当 `docs/` 下文档发生变更，必须参照 `doc-sync.md` 同步更新 `AGENTS.md`, `CLAUDE.md`, 和 `GEMINI.md` 的索引表格。
 
 ### 2.3 Monitoring
 *   **GPU Monitoring**: For profiling or OOM debugging, run monitoring commands in the background. Prefer `nvidia-smi` queries or specialized profiling tools (nsys) directed to background output files.

@@ -77,7 +77,7 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 | [`.claude/rules/planning-with-files.md`](.claude/rules/planning-with-files.md) | Planning file management for complex tasks |
 | [`.claude/rules/gpu-monitor.md`](.claude/rules/gpu-monitor.md) | **GPU memory monitoring**: 必须使用 gpu-monitor agent，禁止手动 nvidia-smi 循环 |
 | [`.claude/rules/test-ruler.md`](.claude/rules/test-ruler.md) | **test_ruler.py 规则**: 禁止 --help，必须查阅文档，含快速参考和命令模板 |
-| **Documentation Sync** | Whenever a new document is added to `docs/`, its path and purpose **MUST** be immediately indexed in both `GEMINI.md` and `CLAUDE.md`. |
+| [`.claude/rules/doc-sync.md`](.claude/rules/doc-sync.md) | **Documentation Sync Rule**: 强制规定 `docs/` 下的任何变更必须同步更新所有 `*.md` 索引 (AGENTS/CLAUDE/GEMINI) |
 
 ## GPU Mutex for Multi-Instance Debugging
 
