@@ -98,14 +98,15 @@ class TriAttentionPolicy(SparsePolicy):
         start = block_index * block_size
         return torch.arange(start, start + num_tokens, device=device, dtype=dtype)
 
-    def _materialize_seq_kv(
+    def _materialize_kv_range(
         self,
         k_cache: torch.Tensor,
         v_cache: torch.Tensor,
         block_table: torch.Tensor,
-        seqlen: int,
+        start_pos: int,
+        end_pos: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if seqlen == 0:
+        if end_pos <= start_pos:
             empty_shape = (0, k_cache.shape[2], k_cache.shape[3])
             return (
                 k_cache.new_empty(empty_shape),
@@ -113,11 +114,21 @@ class TriAttentionPolicy(SparsePolicy):
             )
 
         block_size = k_cache.shape[1]
-        num_blocks = (seqlen + block_size - 1) // block_size
-        block_ids = block_table[:num_blocks].to(dtype=torch.long)
-        seq_k = k_cache.index_select(0, block_ids).reshape(-1, k_cache.shape[2], k_cache.shape[3])[:seqlen]
-        seq_v = v_cache.index_select(0, block_ids).reshape(-1, v_cache.shape[2], v_cache.shape[3])[:seqlen]
-        return seq_k, seq_v
+        start_block = start_pos // block_size
+        end_block = (end_pos - 1) // block_size
+        block_ids = block_table[start_block : end_block + 1].to(dtype=torch.long)
+        gathered_k = k_cache.index_select(0, block_ids).reshape(
+            -1, k_cache.shape[2], k_cache.shape[3]
+        )
+        gathered_v = v_cache.index_select(0, block_ids).reshape(
+            -1, v_cache.shape[2], v_cache.shape[3]
+        )
+        start_offset = start_pos - start_block * block_size
+        length = end_pos - start_pos
+        return (
+            gathered_k[start_offset : start_offset + length],
+            gathered_v[start_offset : start_offset + length],
+        )
 
     def select_blocks(
         self,
@@ -169,8 +180,12 @@ class TriAttentionPolicy(SparsePolicy):
         block_tables: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         from flash_attn import flash_attn_varlen_func
+        from nanovllm.ops.chunked_attention import (
+            flash_attn_with_lse_flashinfer as flash_attn_with_lse,
+            merge_attention_outputs_flashinfer as merge_attention_outputs,
+        )
 
-        context, positions, rotary_emb = self._get_rope_context()
+        _, positions, rotary_emb = self._get_rope_context()
 
         if block_tables is None:
             q_rot, k_rot = self._apply_rope_qk(q, k, positions, rotary_emb)
@@ -186,39 +201,82 @@ class TriAttentionPolicy(SparsePolicy):
                 causal=True,
             )
 
-        q_lengths = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).tolist()
-        k_lengths = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).tolist()
-        packed_q = []
-        packed_k = []
-        packed_v = []
+        block_size = k.shape[1]
+        outputs = []
         q_offset = 0
 
+        q_lengths = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).tolist()
+        k_lengths = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).tolist()
+
         for seq_idx, (q_len, k_len) in enumerate(zip(q_lengths, k_lengths)):
+            q_len = int(q_len)
+            k_len = int(k_len)
             q_seq = q[q_offset : q_offset + q_len]
             q_pos = positions[q_offset : q_offset + q_len]
-            packed_q.append(self._apply_rope(q_seq, q_pos, rotary_emb))
+            q_rot_batched = self._apply_rope(q_seq, q_pos, rotary_emb).unsqueeze(0)
 
-            k_seq, v_seq = self._materialize_seq_kv(
-                k, v, block_tables[seq_idx], int(k_len)
-            )
-            k_pos = torch.arange(
-                int(k_len), device=q.device, dtype=positions.dtype
-            )
-            packed_k.append(self._apply_rope(k_seq, k_pos, rotary_emb))
-            packed_v.append(v_seq)
-            q_offset += int(q_len)
+            prefix_len = k_len - q_len
+            o_acc = None
+            lse_acc = None
 
-        return flash_attn_varlen_func(
-            torch.cat(packed_q, dim=0),
-            torch.cat(packed_k, dim=0),
-            torch.cat(packed_v, dim=0),
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_k=cu_seqlens_k,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_k,
-            softmax_scale=softmax_scale,
-            causal=True,
-        )
+            if prefix_len > 0:
+                num_prefix_blocks = (prefix_len + block_size - 1) // block_size
+                prefix_block_ids = (
+                    block_tables[seq_idx, :num_prefix_blocks].to(dtype=torch.long).tolist()
+                )
+                for block_idx, block_id in enumerate(prefix_block_ids):
+                    block_start = block_idx * block_size
+                    block_end = min(block_start + block_size, prefix_len)
+                    num_block_tokens = block_end - block_start
+                    hist_k = k[block_id, :num_block_tokens]
+                    hist_v = v[block_id, :num_block_tokens]
+                    hist_pos = torch.arange(
+                        block_start,
+                        block_end,
+                        device=q.device,
+                        dtype=q_pos.dtype,
+                    )
+                    hist_k_rot = self._apply_rope(
+                        hist_k, hist_pos, rotary_emb
+                    ).unsqueeze(0)
+                    hist_o, hist_lse = flash_attn_with_lse(
+                        q_rot_batched,
+                        hist_k_rot,
+                        hist_v.unsqueeze(0),
+                        softmax_scale=softmax_scale,
+                        causal=False,
+                    )
+                    if o_acc is None:
+                        o_acc, lse_acc = hist_o, hist_lse
+                    else:
+                        o_acc, lse_acc = merge_attention_outputs(
+                            o_acc, lse_acc, hist_o, hist_lse
+                        )
+
+            current_k, current_v = self._materialize_kv_range(
+                k, v, block_tables[seq_idx], prefix_len, k_len
+            )
+            current_k_rot = self._apply_rope(
+                current_k, q_pos, rotary_emb
+            ).unsqueeze(0)
+            current_o, current_lse = flash_attn_with_lse(
+                q_rot_batched,
+                current_k_rot,
+                current_v.unsqueeze(0),
+                softmax_scale=softmax_scale,
+                causal=True,
+            )
+            if o_acc is None:
+                final_o = current_o
+            else:
+                final_o, _ = merge_attention_outputs(
+                    o_acc, lse_acc, current_o, current_lse
+                )
+
+            outputs.append(final_o.squeeze(0))
+            q_offset += q_len
+
+        return torch.cat(outputs, dim=0)
 
     def compute_decode(
         self,
@@ -230,7 +288,10 @@ class TriAttentionPolicy(SparsePolicy):
         layer_id: int,
         block_tables: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        from flash_attn import flash_attn_varlen_func
+        from nanovllm.ops.chunked_attention import (
+            flash_attn_with_lse_flashinfer as flash_attn_with_lse,
+            merge_attention_outputs_flashinfer as merge_attention_outputs,
+        )
 
         if block_tables is None:
             raise RuntimeError(
@@ -238,42 +299,54 @@ class TriAttentionPolicy(SparsePolicy):
             )
 
         _, positions, rotary_emb = self._get_rope_context()
-        q_rot = self._apply_rope(q, positions, rotary_emb)
-
-        packed_k = []
-        packed_v = []
-        cu_seqlens_k = [0]
-        max_seqlen_k = 0
+        block_size = k_cache.shape[1]
+        outputs = []
 
         for seq_idx, seqlen in enumerate(cache_seqlens.tolist()):
             seqlen = int(seqlen)
-            seq_k, seq_v = self._materialize_seq_kv(
-                k_cache, v_cache, block_tables[seq_idx], seqlen
-            )
-            k_pos = torch.arange(seqlen, device=q.device, dtype=positions.dtype)
-            packed_k.append(self._apply_rope(seq_k, k_pos, rotary_emb))
-            packed_v.append(seq_v)
-            cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen)
-            max_seqlen_k = max(max_seqlen_k, seqlen)
+            q_seq = q[seq_idx : seq_idx + 1]
+            q_pos = positions[seq_idx : seq_idx + 1]
+            q_rot_batched = self._apply_rope(q_seq, q_pos, rotary_emb).unsqueeze(0)
 
-        cu_seqlens_q = torch.arange(
-            q.shape[0] + 1, dtype=torch.int32, device=q.device
-        )
-        cu_seqlens_k = torch.tensor(
-            cu_seqlens_k, dtype=torch.int32, device=q.device
-        )
+            num_blocks = (seqlen + block_size - 1) // block_size
+            block_ids = block_tables[seq_idx, :num_blocks].to(dtype=torch.long).tolist()
+            o_acc = None
+            lse_acc = None
 
-        return flash_attn_varlen_func(
-            q_rot,
-            torch.cat(packed_k, dim=0),
-            torch.cat(packed_v, dim=0),
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_k=cu_seqlens_k,
-            max_seqlen_q=1,
-            max_seqlen_k=max_seqlen_k,
-            softmax_scale=softmax_scale,
-            causal=True,
-        )
+            for block_idx, block_id in enumerate(block_ids):
+                block_start = block_idx * block_size
+                block_end = min(block_start + block_size, seqlen)
+                num_block_tokens = block_end - block_start
+                block_k = k_cache[block_id, :num_block_tokens]
+                block_v = v_cache[block_id, :num_block_tokens]
+                block_pos = torch.arange(
+                    block_start,
+                    block_end,
+                    device=q.device,
+                    dtype=q_pos.dtype,
+                )
+                block_k_rot = self._apply_rope(
+                    block_k, block_pos, rotary_emb
+                ).unsqueeze(0)
+                block_o, block_lse = flash_attn_with_lse(
+                    q_rot_batched,
+                    block_k_rot,
+                    block_v.unsqueeze(0),
+                    softmax_scale=softmax_scale,
+                    causal=False,
+                )
+                if o_acc is None:
+                    o_acc, lse_acc = block_o, block_lse
+                else:
+                    o_acc, lse_acc = merge_attention_outputs(
+                        o_acc, lse_acc, block_o, block_lse
+                    )
+
+            if o_acc is None:
+                raise RuntimeError("TriAttention GPU-only decode found no KV blocks")
+            outputs.append(o_acc)
+
+        return torch.cat(outputs, dim=0)
 
     def compute_chunked_prefill(
         self,
