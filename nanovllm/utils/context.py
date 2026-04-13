@@ -6,6 +6,7 @@ import torch
 @dataclass
 class Context:
     is_prefill: bool = False
+    positions: torch.Tensor | None = None
     cu_seqlens_q: torch.Tensor | None = None
     cu_seqlens_k: torch.Tensor | None = None
     max_seqlen_q: int = 0
@@ -31,6 +32,8 @@ class Context:
     decode_start_pos_in_block: int = 0
     # Current chunk index for ring buffer pipeline (prefill only)
     current_chunk_idx: int = 0
+    # Optional rotary embedding module for policies that consume pre-RoPE Q/K.
+    rotary_emb: Any = None
 
 
 _CONTEXT = Context()
@@ -42,6 +45,7 @@ def get_context():
 
 def set_context(
     is_prefill,
+    positions=None,
     cu_seqlens_q=None,
     cu_seqlens_k=None,
     max_seqlen_q=0,
@@ -61,6 +65,7 @@ def set_context(
     global _CONTEXT
     _CONTEXT = Context(
         is_prefill=is_prefill,
+        positions=positions,
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_k=cu_seqlens_k,
         max_seqlen_q=max_seqlen_q,

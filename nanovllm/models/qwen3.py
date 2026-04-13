@@ -93,8 +93,18 @@ class Qwen3Attention(nn.Module):
             k = self.k_norm(k.reshape(-1, self.head_dim)).view(
                 num_tokens, self.num_kv_heads, self.head_dim
             )
-        q, k = self.rotary_emb(positions, q, k)
-        o = self.attn(q, k, v)
+        if self.attn.should_apply_rope_in_attention():
+            o = self.attn(
+                q,
+                k,
+                v,
+                positions=positions,
+                rotary_emb=self.rotary_emb,
+                qk_is_pre_rope=True,
+            )
+        else:
+            q, k = self.rotary_emb(positions, q, k)
+            o = self.attn(q, k, v)
         output = self.o_proj(o.flatten(1, -1))
         return output
 

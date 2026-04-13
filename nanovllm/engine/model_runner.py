@@ -6,7 +6,7 @@ import torch.distributed as dist
 from multiprocessing.synchronize import Event
 from multiprocessing.shared_memory import SharedMemory
 
-from nanovllm.config import Config
+from nanovllm.config import Config, SparsePolicyType
 from nanovllm.engine.sequence import Sequence
 from nanovllm.models import get_model_class
 from nanovllm.layers.sampler import GreedySampler
@@ -57,7 +57,9 @@ class ModelRunner:
         self.config = config
         hf_config = config.hf_config
         self.block_size = config.kvcache_block_size
-        self.enforce_eager = config.enforce_eager
+        self.enforce_eager = config.enforce_eager or (
+            config.sparse_policy == SparsePolicyType.TRIATTENTION
+        )
         self.world_size = config.tensor_parallel_size
         self.rank = rank
         self.event = event
@@ -463,6 +465,7 @@ class ModelRunner:
         ).cuda(non_blocking=True)
         set_context(
             is_prefill=True,
+            positions=positions,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
             max_seqlen_q=max_seqlen_q,
@@ -511,6 +514,7 @@ class ModelRunner:
         block_tables = self._prepare_gpu_block_tables(gpu_block_tables)
         set_context(
             is_prefill=False,
+            positions=positions,
             slot_mapping=slot_mapping,
             context_lens=context_lens,
             block_tables=block_tables,
@@ -764,6 +768,7 @@ class ModelRunner:
 
         set_context(
             is_prefill=True,
+            positions=positions,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
             max_seqlen_q=seqlen,
@@ -819,6 +824,7 @@ class ModelRunner:
         # Set up context for chunked decode
         set_context(
             is_prefill=False,
+            positions=positions,
             slot_mapping=slot_mapping,
             context_lens=context_len,
             is_chunked_prefill=True,  # Use chunked attention path
@@ -877,6 +883,7 @@ class ModelRunner:
             graph = torch.cuda.CUDAGraph()
             set_context(
                 is_prefill=False,
+                positions=positions[:bs],
                 slot_mapping=slot_mapping[:bs],
                 context_lens=context_lens[:bs],
                 block_tables=block_tables[:bs],

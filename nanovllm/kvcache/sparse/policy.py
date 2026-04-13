@@ -181,6 +181,7 @@ class SparsePolicy(ABC):
     # Compatibility flags - override in subclasses
     supports_prefill: bool = True
     supports_decode: bool = True
+    apply_rope_in_attention: bool = False
 
     def initialize(
         self,

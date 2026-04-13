@@ -167,9 +167,36 @@ class Attention(nn.Module):
         # Layer ID set by model_runner after model creation
         self.layer_id: int = -1
 
-    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
+    def should_apply_rope_in_attention(self) -> bool:
+        """Return whether the active policy wants pre-RoPE Q/K into Attention."""
+        context = get_context()
+        if context.kvcache_manager is None:
+            return False
+        sparse_policy = getattr(context.kvcache_manager, "sparse_policy", None)
+        return bool(
+            sparse_policy is not None
+            and getattr(sparse_policy, "apply_rope_in_attention", False)
+        )
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        positions: torch.Tensor | None = None,
+        rotary_emb: nn.Module | None = None,
+        qk_is_pre_rope: bool = False,
+    ):
         context = get_context()
         k_cache, v_cache = self.k_cache, self.v_cache
+
+        if qk_is_pre_rope:
+            if positions is None or rotary_emb is None:
+                raise ValueError(
+                    "positions and rotary_emb are required when qk_is_pre_rope=True"
+                )
+            context.positions = positions
+            context.rotary_emb = rotary_emb
 
         # Determine if we're in chunked offload mode
         is_chunked_offload = (

@@ -733,7 +733,7 @@ if __name__ == "__main__":
         "--sparse-policy",
         type=str,
         default="",
-        help="Sparse attention policy (FULL, QUEST, XATTN_BSA)",
+        help="Sparse attention policy (FULL, TRIATTENTION, QUEST, XATTN_BSA, COMPASS, BLASST)",
     )
     # XAttention BSA specific parameters
     parser.add_argument(

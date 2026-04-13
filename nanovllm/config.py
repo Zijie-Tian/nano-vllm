@@ -10,6 +10,7 @@ class SparsePolicyType(Enum):
 
     # fmt: off
     FULL = auto()       # No sparse attention (load all blocks)
+    TRIATTENTION = auto()  # Full attention semantics, but apply RoPE inside Attention
     QUEST = auto()      # Query-aware Top-K block selection (decode only)
     XATTN_BSA = auto()  # XAttention Block Sparse Attention (prefill only, chunked)
     COMPASS = auto()    # COMPASS sparse attention (prefill only, chunked)

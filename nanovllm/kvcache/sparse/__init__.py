@@ -22,6 +22,7 @@ Usage:
 from nanovllm.config import SparsePolicyType
 from nanovllm.kvcache.sparse.policy import SparsePolicy, PolicyContext
 from nanovllm.kvcache.sparse.full_policy import FullAttentionPolicy
+from nanovllm.kvcache.sparse.triattention import TriAttentionPolicy
 from nanovllm.kvcache.sparse.quest import QuestPolicy, QuestConfig, BlockMetadataManager
 from nanovllm.kvcache.sparse.xattn_bsa import XAttentionBSAPolicy
 from nanovllm.kvcache.sparse.compass import COMPASSPolicy
@@ -48,6 +49,9 @@ def create_sparse_policy(policy_type: SparsePolicyType, **kwargs) -> SparsePolic
     """
     if policy_type == SparsePolicyType.FULL:
         return FullAttentionPolicy()
+
+    elif policy_type == SparsePolicyType.TRIATTENTION:
+        return TriAttentionPolicy()
 
     elif policy_type == SparsePolicyType.QUEST:
         config = QuestConfig(
@@ -91,6 +95,7 @@ __all__ = [
     "PolicyContext",
     "SparsePolicyType",
     "FullAttentionPolicy",
+    "TriAttentionPolicy",
     "QuestPolicy",
     "QuestConfig",
     "BlockMetadataManager",

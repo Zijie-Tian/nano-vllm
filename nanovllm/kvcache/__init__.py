@@ -51,7 +51,9 @@ def create_kvcache_manager(config: "Config") -> KVCacheManager:
             from nanovllm.kvcache.sparse import create_sparse_policy
 
             policy_kwargs = {}
-            if sparse_policy_type == SparsePolicyType.QUEST:
+            if sparse_policy_type == SparsePolicyType.TRIATTENTION:
+                policy_kwargs = {}
+            elif sparse_policy_type == SparsePolicyType.QUEST:
                 policy_kwargs = {
                     "topk_blocks": getattr(config, "sparse_topk_blocks", 8),
                     "threshold_blocks": getattr(config, "sparse_threshold_blocks", 4),
@@ -107,7 +109,9 @@ def create_kvcache_manager(config: "Config") -> KVCacheManager:
 
     # Build policy kwargs based on policy type
     policy_kwargs = {}
-    if sparse_policy_type == SparsePolicyType.QUEST:
+    if sparse_policy_type == SparsePolicyType.TRIATTENTION:
+        policy_kwargs = {}
+    elif sparse_policy_type == SparsePolicyType.QUEST:
         policy_kwargs = {
             "topk_blocks": getattr(config, "sparse_topk_blocks", 8),
             "threshold_blocks": getattr(config, "sparse_threshold_blocks", 4),
