@@ -687,9 +687,17 @@ class OffloadEngine:
 
         torch.cuda.nvtx.range_push(nvtx_label)
         if self.is_head_first:
+            # Clear any remaining positions first (handles partial chunks)
+            if num_tokens < self.block_size:
+                self.prefill_k_buffer[layer_id, :, num_tokens:].zero_()
+                self.prefill_v_buffer[layer_id, :, num_tokens:].zero_()
             self.prefill_k_buffer[layer_id, :, :num_tokens].copy_(k.transpose(0, 1))
             self.prefill_v_buffer[layer_id, :, :num_tokens].copy_(v.transpose(0, 1))
         else:
+            # Clear any remaining positions first (handles partial chunks)
+            if num_tokens < self.block_size:
+                self.prefill_k_buffer[layer_id, num_tokens:].zero_()
+                self.prefill_v_buffer[layer_id, num_tokens:].zero_()
             self.prefill_k_buffer[layer_id, :num_tokens].copy_(k)
             self.prefill_v_buffer[layer_id, :num_tokens].copy_(v)
         torch.cuda.nvtx.range_pop()
