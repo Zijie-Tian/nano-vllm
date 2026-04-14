@@ -62,6 +62,7 @@ class RotaryEmbedding(nn.Module):
         inv_freq = 1.0 / (
             base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim)
         )
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
         t = torch.arange(max_position_embeddings, dtype=torch.float)
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
         cos = freqs.cos()
@@ -121,6 +122,7 @@ class Llama3RotaryEmbedding(nn.Module):
             high_freq_factor,
             original_max_position_embeddings,
         )
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
 
         # Build cos/sin cache
         t = torch.arange(max_position_embeddings, dtype=torch.float)
@@ -208,6 +210,7 @@ class GLM4RotaryEmbedding(nn.Module):
         inv_freq = 1.0 / (
             base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim)
         )
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
         t = torch.arange(max_position_embeddings, dtype=torch.float)
         freqs = torch.einsum("i,j -> ij", t, inv_freq)  # [max_pos, rotary_dim // 2]
         cos = freqs.cos()

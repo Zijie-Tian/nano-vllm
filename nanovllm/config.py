@@ -73,10 +73,29 @@ class Config:
     )
     blasst_granularity: int = 128  # Token granularity for skip decisions (default 128)
 
+    # TriAttention sparse decode parameters
+    triattention_stats_path: str | None = None
+    triattention_kv_budget: int = 2048
+    triattention_window_size: int = 128
+    triattention_score_aggregation: str = "mean"
+    triattention_sparse_normalize_scores: bool = True
+    triattention_offset_max_length: int = 65536
+    triattention_score_chunk_max_tokens: int = 4096
+    triattention_protect_prefill: bool = False
+    triattention_include_prefill_in_budget: bool = True
+
     def __post_init__(self):
         assert os.path.isdir(self.model)
         assert self.kvcache_block_size % 256 == 0
         assert 1 <= self.tensor_parallel_size <= 8
+        assert self.triattention_kv_budget > 0
+        assert self.triattention_window_size >= 0
+        assert self.triattention_offset_max_length >= 1
+        assert self.triattention_score_chunk_max_tokens >= 1
+        if self.triattention_score_aggregation not in {"mean", "max"}:
+            raise ValueError(
+                "triattention_score_aggregation must be 'mean' or 'max'"
+            )
         self.hf_config = AutoConfig.from_pretrained(self.model, trust_remote_code=True)
         # Get max position embeddings (GLM-4 uses seq_length instead of max_position_embeddings)
         max_pos = getattr(

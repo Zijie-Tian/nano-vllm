@@ -52,7 +52,29 @@ def create_kvcache_manager(config: "Config") -> KVCacheManager:
 
             policy_kwargs = {}
             if sparse_policy_type == SparsePolicyType.TRIATTENTION:
-                policy_kwargs = {}
+                policy_kwargs = {
+                    "stats_path": getattr(config, "triattention_stats_path", None),
+                    "kv_budget": getattr(config, "triattention_kv_budget", 2048),
+                    "window_size": getattr(config, "triattention_window_size", 128),
+                    "score_aggregation": getattr(
+                        config, "triattention_score_aggregation", "mean"
+                    ),
+                    "sparse_normalize_scores": getattr(
+                        config, "triattention_sparse_normalize_scores", True
+                    ),
+                    "offset_max_length": getattr(
+                        config, "triattention_offset_max_length", 65536
+                    ),
+                    "score_chunk_max_tokens": getattr(
+                        config, "triattention_score_chunk_max_tokens", 4096
+                    ),
+                    "protect_prefill": getattr(
+                        config, "triattention_protect_prefill", False
+                    ),
+                    "include_prefill_in_budget": getattr(
+                        config, "triattention_include_prefill_in_budget", True
+                    ),
+                }
             elif sparse_policy_type == SparsePolicyType.QUEST:
                 policy_kwargs = {
                     "topk_blocks": getattr(config, "sparse_topk_blocks", 8),
@@ -110,7 +132,29 @@ def create_kvcache_manager(config: "Config") -> KVCacheManager:
     # Build policy kwargs based on policy type
     policy_kwargs = {}
     if sparse_policy_type == SparsePolicyType.TRIATTENTION:
-        policy_kwargs = {}
+        policy_kwargs = {
+            "stats_path": getattr(config, "triattention_stats_path", None),
+            "kv_budget": getattr(config, "triattention_kv_budget", 2048),
+            "window_size": getattr(config, "triattention_window_size", 128),
+            "score_aggregation": getattr(
+                config, "triattention_score_aggregation", "mean"
+            ),
+            "sparse_normalize_scores": getattr(
+                config, "triattention_sparse_normalize_scores", True
+            ),
+            "offset_max_length": getattr(
+                config, "triattention_offset_max_length", 65536
+            ),
+            "score_chunk_max_tokens": getattr(
+                config, "triattention_score_chunk_max_tokens", 4096
+            ),
+            "protect_prefill": getattr(
+                config, "triattention_protect_prefill", False
+            ),
+            "include_prefill_in_budget": getattr(
+                config, "triattention_include_prefill_in_budget", True
+            ),
+        }
     elif sparse_policy_type == SparsePolicyType.QUEST:
         policy_kwargs = {
             "topk_blocks": getattr(config, "sparse_topk_blocks", 8),
