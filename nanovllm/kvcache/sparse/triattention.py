@@ -7,6 +7,7 @@ inside this policy immediately before attention kernels are launched.
 """
 
 import logging
+from pathlib import Path
 from typing import List, Optional, TYPE_CHECKING
 
 import torch
@@ -18,6 +19,10 @@ from nanovllm.layers.rotary_embedding import (
 from nanovllm.utils.context import get_context
 
 from .policy import SparsePolicy, PolicyContext
+from .triattention_decode_selector import (
+    TriAttentionDecodeConfig,
+    TriAttentionDecodeSelector,
+)
 
 if TYPE_CHECKING:
     from nanovllm.kvcache.offload_engine import OffloadEngine
@@ -41,9 +46,64 @@ class TriAttentionPolicy(SparsePolicy):
     supports_decode = True
     apply_rope_in_attention = True
 
-    def __init__(self):
+    def __init__(
+        self,
+        stats_path: str | None = None,
+        kv_budget: int = 2048,
+        window_size: int = 128,
+        score_aggregation: str = "mean",
+        sparse_normalize_scores: bool = False,
+        offset_max_length: int = 65536,
+        score_chunk_max_tokens: int = 4096,
+        protect_prefill: bool = False,
+        include_prefill_in_budget: bool = True,
+    ):
         self._stats_total_blocks = 0
         self._stats_num_chunks = 0
+        env_config = TriAttentionDecodeConfig.from_env()
+        self._decode_selector = TriAttentionDecodeSelector(
+            TriAttentionDecodeConfig(
+                stats_path=(
+                    Path(stats_path).expanduser()
+                    if stats_path
+                    else env_config.stats_path
+                ),
+                kv_budget=kv_budget if stats_path is not None else env_config.kv_budget,
+                window_size=window_size if stats_path is not None else env_config.window_size,
+                score_aggregation=(
+                    score_aggregation
+                    if stats_path is not None
+                    else env_config.score_aggregation
+                ),
+                normalize_scores=(
+                    sparse_normalize_scores
+                    if stats_path is not None
+                    else env_config.normalize_scores
+                ),
+                protect_prefill=(
+                    protect_prefill
+                    if stats_path is not None
+                    else env_config.protect_prefill
+                ),
+                include_prefill_in_budget=(
+                    include_prefill_in_budget
+                    if stats_path is not None
+                    else env_config.include_prefill_in_budget
+                ),
+                offset_max_length=(
+                    offset_max_length
+                    if stats_path is not None
+                    else env_config.offset_max_length
+                ),
+                score_chunk_max_tokens=(
+                    score_chunk_max_tokens
+                    if stats_path is not None
+                    else env_config.score_chunk_max_tokens
+                ),
+                disable_mlr=env_config.disable_mlr,
+                disable_trig=env_config.disable_trig,
+            )
+        )
 
     def _get_rope_context(self):
         context = get_context()
@@ -129,6 +189,88 @@ class TriAttentionPolicy(SparsePolicy):
             gathered_k[start_offset : start_offset + length],
             gathered_v[start_offset : start_offset + length],
         )
+
+    def _rope_style(self, rotary_emb) -> str:
+        return "interleaved" if hasattr(rotary_emb, "rotary_dim") else "half"
+
+    def _rope_omega(self, rotary_emb, device: torch.device) -> torch.Tensor:
+        if hasattr(rotary_emb, "inv_freq") and rotary_emb.inv_freq is not None:
+            return rotary_emb.inv_freq.to(device=device, dtype=torch.float32)
+        if hasattr(rotary_emb, "rotary_dim"):
+            cache = rotary_emb.cos_sin_cache[1]
+            cos = cache[..., 0].squeeze(0)
+            sin = cache[..., 1].squeeze(0)
+        else:
+            cos_sin = rotary_emb.cos_sin_cache[1].squeeze(0)
+            cos, sin = cos_sin.chunk(2, dim=-1)
+        return torch.atan2(sin.float(), cos.float()).to(device=device, dtype=torch.float32)
+
+    def _current_round_start(self, positions: torch.Tensor) -> int:
+        if positions.numel() == 0:
+            return 0
+        return int(positions.reshape(-1)[-1].item())
+
+    def _select_decode_keep_indices(
+        self,
+        *,
+        key_states: torch.Tensor,
+        layer_id: int,
+        positions: torch.Tensor,
+        rotary_emb,
+        num_attention_heads: int,
+        prefix_length: int = 0,
+    ) -> torch.Tensor:
+        selector = self._decode_selector
+        if not selector.enabled:
+            return torch.arange(key_states.shape[0], device=key_states.device, dtype=torch.long)
+        return selector.select_indices(
+            key_states=key_states,
+            layer_id=layer_id,
+            round_start=self._current_round_start(positions),
+            num_attention_heads=num_attention_heads,
+            key_positions=positions,
+            omega=self._rope_omega(rotary_emb, key_states.device),
+            rope_style=self._rope_style(rotary_emb),
+            prefix_length=prefix_length,
+        )
+
+    def _materialize_prefilled_cpu_history(
+        self,
+        *,
+        cpu_block_table: List[int],
+        offload_engine: "OffloadEngine",
+        layer_id: int,
+        block_size: int,
+        last_block_valid_tokens: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not cpu_block_table:
+            empty = offload_engine.k_cache_gpu.new_empty(
+                (0, offload_engine.k_cache_gpu.shape[-2], offload_engine.k_cache_gpu.shape[-1])
+            )
+            return empty, empty.clone()
+
+        slot = offload_engine.decode_load_slots[0]
+        hist_k_parts = []
+        hist_v_parts = []
+        for block_idx, cpu_block_id in enumerate(cpu_block_table):
+            offload_engine.load_to_slot_layer(
+                slot,
+                layer_id,
+                cpu_block_id,
+                chunk_idx=cpu_block_id,
+                is_prefill=False,
+            )
+            offload_engine.wait_slot_layer(slot)
+            block_k, block_v = offload_engine.get_kv_for_slot(slot)
+            valid_tokens = (
+                last_block_valid_tokens
+                if block_idx == len(cpu_block_table) - 1 and last_block_valid_tokens < block_size
+                else block_k.shape[1]
+            )
+            hist_k_parts.append(block_k.squeeze(0)[:valid_tokens].clone())
+            hist_v_parts.append(block_v.squeeze(0)[:valid_tokens].clone())
+            offload_engine.record_slot_compute_done(slot)
+        return torch.cat(hist_k_parts, dim=0), torch.cat(hist_v_parts, dim=0)
 
     def select_blocks(
         self,
@@ -299,7 +441,6 @@ class TriAttentionPolicy(SparsePolicy):
             )
 
         _, positions, rotary_emb = self._get_rope_context()
-        block_size = k_cache.shape[1]
         outputs = []
 
         for seq_idx, seqlen in enumerate(cache_seqlens.tolist()):
@@ -307,44 +448,41 @@ class TriAttentionPolicy(SparsePolicy):
             q_seq = q[seq_idx : seq_idx + 1]
             q_pos = positions[seq_idx : seq_idx + 1]
             q_rot_batched = self._apply_rope(q_seq, q_pos, rotary_emb).unsqueeze(0)
-
-            num_blocks = (seqlen + block_size - 1) // block_size
-            block_ids = block_tables[seq_idx, :num_blocks].to(dtype=torch.long).tolist()
-            o_acc = None
-            lse_acc = None
-
-            for block_idx, block_id in enumerate(block_ids):
-                block_start = block_idx * block_size
-                block_end = min(block_start + block_size, seqlen)
-                num_block_tokens = block_end - block_start
-                block_k = k_cache[block_id, :num_block_tokens]
-                block_v = v_cache[block_id, :num_block_tokens]
-                block_pos = torch.arange(
-                    block_start,
-                    block_end,
-                    device=q.device,
-                    dtype=q_pos.dtype,
-                )
-                block_k_rot = self._apply_rope(
-                    block_k, block_pos, rotary_emb
-                ).unsqueeze(0)
-                block_o, block_lse = flash_attn_with_lse(
-                    q_rot_batched,
-                    block_k_rot,
-                    block_v.unsqueeze(0),
-                    softmax_scale=softmax_scale,
-                    causal=False,
-                )
-                if o_acc is None:
-                    o_acc, lse_acc = block_o, block_lse
-                else:
-                    o_acc, lse_acc = merge_attention_outputs(
-                        o_acc, lse_acc, block_o, block_lse
-                    )
-
-            if o_acc is None:
-                raise RuntimeError("TriAttention GPU-only decode found no KV blocks")
-            outputs.append(o_acc)
+            hist_k, hist_v = self._materialize_kv_range(
+                k_cache,
+                v_cache,
+                block_tables[seq_idx],
+                0,
+                seqlen,
+            )
+            hist_positions = torch.arange(
+                seqlen,
+                device=q.device,
+                dtype=q_pos.dtype,
+            )
+            keep_indices = self._select_decode_keep_indices(
+                key_states=hist_k,
+                layer_id=layer_id,
+                positions=hist_positions,
+                rotary_emb=rotary_emb,
+                num_attention_heads=q.shape[1],
+            )
+            selected_k = hist_k.index_select(0, keep_indices)
+            selected_v = hist_v.index_select(0, keep_indices)
+            selected_pos = hist_positions.index_select(0, keep_indices)
+            selected_k_rot = self._apply_rope(
+                selected_k,
+                selected_pos,
+                rotary_emb,
+            ).unsqueeze(0)
+            decode_o, _ = flash_attn_with_lse(
+                q_rot_batched,
+                selected_k_rot,
+                selected_v.unsqueeze(0),
+                softmax_scale=softmax_scale,
+                causal=False,
+            )
+            outputs.append(decode_o)
 
         return torch.cat(outputs, dim=0)
 
@@ -518,6 +656,7 @@ class TriAttentionPolicy(SparsePolicy):
         compute_stream.wait_stream(torch.cuda.default_stream())
         with torch.cuda.stream(compute_stream):
             q_rot_batched = self._apply_rope(q, positions, rotary_emb).unsqueeze(1)
+        torch.cuda.default_stream().wait_stream(compute_stream)
 
         cpu_block_table = selected_blocks
         if layer_id == 0:
@@ -546,19 +685,12 @@ class TriAttentionPolicy(SparsePolicy):
         effective_last_block_tokens = (
             last_block_valid_tokens if selected_contains_last else block_size
         )
-
-        load_slots = offload_engine.decode_load_slots
-        o_acc, lse_acc = self._decode_ring_buffer_pipeline(
-            q_rot_batched,
-            cpu_block_table,
-            load_slots,
-            offload_engine,
-            block_size,
-            effective_last_block_tokens,
-            layer_id,
-            softmax_scale,
-            rotary_emb,
-            positions.dtype,
+        hist_k, hist_v = self._materialize_prefilled_cpu_history(
+            cpu_block_table=cpu_block_table,
+            offload_engine=offload_engine,
+            layer_id=layer_id,
+            block_size=block_size,
+            last_block_valid_tokens=effective_last_block_tokens,
         )
 
         seq_len = len(seq)
@@ -567,54 +699,57 @@ class TriAttentionPolicy(SparsePolicy):
         decode_start_pos_in_block = decode_start_pos % block_size
         num_accumulated = decode_pos_in_block - decode_start_pos_in_block + 1
 
-        compute_stream.wait_stream(torch.cuda.default_stream())
-        with torch.cuda.stream(compute_stream):
-            if num_accumulated > 0:
-                if getattr(offload_engine, "is_head_first", False):
-                    decode_k = offload_engine.decode_k_buffer[
-                        layer_id, :, decode_start_pos_in_block : decode_pos_in_block + 1
-                    ].transpose(0, 1)
-                    decode_v = offload_engine.decode_v_buffer[
-                        layer_id, :, decode_start_pos_in_block : decode_pos_in_block + 1
-                    ].transpose(0, 1)
-                else:
-                    decode_k = offload_engine.decode_k_buffer[
-                        layer_id, decode_start_pos_in_block : decode_pos_in_block + 1
-                    ]
-                    decode_v = offload_engine.decode_v_buffer[
-                        layer_id, decode_start_pos_in_block : decode_pos_in_block + 1
-                    ]
-                decode_k = decode_k.unsqueeze(0)
-                decode_v = decode_v.unsqueeze(0)
+        decode_k_dense = hist_k.new_empty((0, hist_k.shape[1], hist_k.shape[2]))
+        decode_v_dense = hist_v.new_empty((0, hist_v.shape[1], hist_v.shape[2]))
+        if num_accumulated > 0:
+            if getattr(offload_engine, "is_head_first", False):
+                decode_k_dense = offload_engine.decode_k_buffer[
+                    layer_id, :, decode_start_pos_in_block : decode_pos_in_block + 1
+                ].transpose(0, 1).contiguous()
+                decode_v_dense = offload_engine.decode_v_buffer[
+                    layer_id, :, decode_start_pos_in_block : decode_pos_in_block + 1
+                ].transpose(0, 1).contiguous()
+            else:
+                decode_k_dense = offload_engine.decode_k_buffer[
+                    layer_id, decode_start_pos_in_block : decode_pos_in_block + 1
+                ].contiguous()
+                decode_v_dense = offload_engine.decode_v_buffer[
+                    layer_id, decode_start_pos_in_block : decode_pos_in_block + 1
+                ].contiguous()
 
-                block_base = seq_len - 1 - decode_pos_in_block
-                decode_positions = torch.arange(
-                    block_base + decode_start_pos_in_block,
-                    block_base + decode_pos_in_block + 1,
-                    device=q.device,
-                    dtype=positions.dtype,
-                )
-                decode_k_rot = self._apply_rope(
-                    decode_k.squeeze(0), decode_positions, rotary_emb
-                ).unsqueeze(0)
-
-                decode_o, decode_lse = flash_attn_with_lse(
-                    q_rot_batched,
-                    decode_k_rot,
-                    decode_v,
-                    softmax_scale=softmax_scale,
-                    causal=False,
-                )
-
-                if o_acc is None:
-                    o_acc = decode_o
-                else:
-                    o_acc, _ = merge_attention_outputs(
-                        o_acc, lse_acc, decode_o, decode_lse
-                    )
-
-        if o_acc is None:
+        full_k = torch.cat([hist_k, decode_k_dense], dim=0)
+        full_v = torch.cat([hist_v, decode_v_dense], dim=0)
+        if full_k.numel() == 0:
             raise RuntimeError("Chunked decode attention failed: no KV available")
+
+        full_positions = torch.arange(
+            full_k.shape[0],
+            device=q.device,
+            dtype=positions.dtype,
+        )
+        keep_indices = self._select_decode_keep_indices(
+            key_states=full_k,
+            layer_id=layer_id,
+            positions=full_positions,
+            rotary_emb=rotary_emb,
+            num_attention_heads=q.shape[1],
+            prefix_length=total_prefill_tokens,
+        )
+        selected_k = full_k.index_select(0, keep_indices)
+        selected_v = full_v.index_select(0, keep_indices)
+        selected_pos = full_positions.index_select(0, keep_indices)
+        selected_k_rot = self._apply_rope(
+            selected_k,
+            selected_pos,
+            rotary_emb,
+        ).unsqueeze(0)
+        o_acc, _ = flash_attn_with_lse(
+            q_rot_batched,
+            selected_k_rot,
+            selected_v.unsqueeze(0),
+            softmax_scale=softmax_scale,
+            causal=False,
+        )
 
         torch.cuda.default_stream().wait_stream(compute_stream)
         return o_acc

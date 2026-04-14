@@ -51,7 +51,7 @@ def create_sparse_policy(policy_type: SparsePolicyType, **kwargs) -> SparsePolic
         return FullAttentionPolicy()
 
     elif policy_type == SparsePolicyType.TRIATTENTION:
-        return TriAttentionPolicy()
+        return TriAttentionPolicy(**kwargs)
 
     elif policy_type == SparsePolicyType.QUEST:
         config = QuestConfig(
