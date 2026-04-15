@@ -1,0 +1,58 @@
+project_doc_fallback_filenames = ["CLAUDE.md", "GEMINI.md"]
+project_doc_max_bytes = 65536
+
+[[skills.config]]
+path = "skills/aliyunpan"
+enabled = true
+
+[[skills.config]]
+path = "skills/compass-3rdparty-policy"
+enabled = true
+
+[[skills.config]]
+path = "skills/compass-code-analysis"
+enabled = true
+
+[[skills.config]]
+path = "skills/compass-commands"
+enabled = true
+
+[[skills.config]]
+path = "skills/compass-doc-management"
+enabled = true
+
+[[skills.config]]
+path = "skills/compass-documentation-lazy-loading"
+enabled = true
+
+[[skills.config]]
+path = "skills/compass-feasibility-report"
+enabled = true
+
+[[skills.config]]
+path = "skills/compass-gpu-testing"
+enabled = true
+
+[[skills.config]]
+path = "skills/compass-kvcache-rope-data"
+enabled = true
+
+[[skills.config]]
+path = "skills/compass-no-extra-docs"
+enabled = true
+
+[[skills.config]]
+path = "skills/compass-pre-plan-git-check"
+enabled = true
+
+[[skills.config]]
+path = "skills/compass-ruler-results-summarizer"
+enabled = true
+
+[[skills.config]]
+path = "skills/compass-ruler-task-config"
+enabled = true
+
+[[skills.config]]
+path = "skills/compass-testing"
+enabled = true
