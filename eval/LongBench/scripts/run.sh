@@ -6,7 +6,9 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/3rdparty/nanovllm:${PYTHONPATH:-}"
 
 MODEL_DIR="${MODEL_DIR:-/home/zijie/models}"
-OUTPUT_ROOT="${SCRIPT_DIR}/../benchmark_root"
+BASE_OUTPUT_ROOT="${SCRIPT_DIR}/../benchmark_root"
+OUTPUT_ROOT="${BASE_OUTPUT_ROOT}"
+OUTPUT_ROOT_EXPLICIT=0
 DATA_ROOT="${LONG_BENCH_DATA_ROOT:-$HOME/data/LongBench}"
 MODEL_REF=""
 TASK_SET="all"
@@ -20,7 +22,111 @@ MAX_MODEL_LEN=""
 E_FLAG=()
 TASK_OVERRIDE=""
 NUM_SAMPLES_OVERRIDE=""
+NANOVLLM_CPU_OFFLOAD=0
+NANOVLLM_NUM_GPU_BLOCKS=""
+NANOVLLM_GPU_MEMORY_UTILIZATION=""
+NANOVLLM_BLOCK_SIZE=""
+NANOVLLM_ENFORCE_EAGER=0
+NANOVLLM_SPARSE_POLICY=""
+NANOVLLM_SPARSE_STRIDE=""
+NANOVLLM_SPARSE_THRESHOLD=""
+NANOVLLM_SPARSE_CHUNK_SIZE=""
+NANOVLLM_COMPASS_TOP_P=""
+NANOVLLM_COMPASS_LAMBDA=""
+NANOVLLM_COMPASS_THETA=""
+BLASST_LAMBDA=""
 EXTRA_ARGS=()
+
+sanitize_path_component() {
+  local value="${1:-}"
+  value="${value,,}"
+  value="${value//,/+}"
+  value="$(printf '%s' "${value}" | sed -E 's#[^a-z0-9._+-]+#-#g; s#-+#-#g; s#(^[-._+]+|[-._+]+$)##g')"
+  printf '%s' "${value:-default}"
+}
+
+append_settings_component() {
+  local prefix="$1"
+  local value="$2"
+  if [[ -n "${value}" ]]; then
+    SETTINGS_INFO+="${prefix}$(sanitize_path_component "${value}")_"
+  fi
+}
+
+resolve_task_label() {
+  local raw_task_label=""
+  if [[ -n "${TASK_OVERRIDE}" ]]; then
+    raw_task_label="tasks_${TASK_OVERRIDE}"
+  else
+    raw_task_label="${TASK_SET}"
+  fi
+
+  if [[ ${#E_FLAG[@]} -gt 0 ]]; then
+    raw_task_label="longbench-e_${raw_task_label}"
+  fi
+
+  sanitize_path_component "${raw_task_label}"
+}
+
+resolve_results_root() {
+  local strategy_label=""
+  local policy_upper=""
+  SETTINGS_INFO=""
+
+  append_settings_component "" "${BACKEND}"
+
+  if [[ "${BACKEND}" == "torch" ]]; then
+    strategy_label="full"
+  else
+    strategy_label="${NANOVLLM_SPARSE_POLICY:-FULL}"
+  fi
+  append_settings_component "" "${strategy_label}"
+
+  policy_upper="${strategy_label^^}"
+  if [[ "${BACKEND}" == "nanovllm" ]]; then
+    case "${policy_upper}" in
+      FULL)
+        ;;
+      COMPASS)
+        append_settings_component "topp" "${NANOVLLM_COMPASS_TOP_P}"
+        append_settings_component "lambda" "${NANOVLLM_COMPASS_LAMBDA}"
+        append_settings_component "theta" "${NANOVLLM_COMPASS_THETA}"
+        ;;
+      BLASST)
+        append_settings_component "lambda" "${BLASST_LAMBDA}"
+        ;;
+      *)
+        append_settings_component "stride" "${NANOVLLM_SPARSE_STRIDE:-8}"
+        append_settings_component "thresh" "${NANOVLLM_SPARSE_THRESHOLD:-0.9}"
+        append_settings_component "chunk" "${NANOVLLM_SPARSE_CHUNK_SIZE:-16384}"
+        ;;
+    esac
+
+    if [[ "${NANOVLLM_CPU_OFFLOAD}" == "1" ]]; then
+      append_settings_component "" "cpuoffload"
+      append_settings_component "gpublocks" "${NANOVLLM_NUM_GPU_BLOCKS:-2}"
+    fi
+    if [[ "${NANOVLLM_ENFORCE_EAGER}" == "1" ]]; then
+      append_settings_component "" "eager"
+    fi
+    if [[ -n "${NANOVLLM_GPU_MEMORY_UTILIZATION}" ]]; then
+      append_settings_component "gpumem" "${NANOVLLM_GPU_MEMORY_UTILIZATION}"
+    fi
+    if [[ -n "${NANOVLLM_BLOCK_SIZE}" ]]; then
+      append_settings_component "block" "${NANOVLLM_BLOCK_SIZE}"
+    fi
+  fi
+
+  append_settings_component "" "${TASK_LABEL}"
+  if [[ -n "${MAX_MODEL_LEN}" ]]; then
+    append_settings_component "maxlen" "${MAX_MODEL_LEN}"
+  fi
+  if [[ -n "${DTYPE_OVERRIDE}" && "${DTYPE_OVERRIDE}" != "bfloat16" ]]; then
+    append_settings_component "dtype" "${DTYPE_OVERRIDE}"
+  fi
+
+  printf '%s/%s%s' "${BASE_OUTPUT_ROOT}" "${SETTINGS_INFO}" "${MODEL_NAME}"
+}
 
 source "${SCRIPT_DIR}/config_models.sh"
 source "${SCRIPT_DIR}/config_tasks.sh"
@@ -51,6 +157,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --output-root)
       OUTPUT_ROOT="$2"
+      OUTPUT_ROOT_EXPLICIT=1
       shift 2
       ;;
     --data-root)
@@ -79,6 +186,58 @@ while [[ $# -gt 0 ]]; do
       ;;
     --num-samples)
       NUM_SAMPLES_OVERRIDE="$2"
+      shift 2
+      ;;
+    --nanovllm-cpu-offload)
+      NANOVLLM_CPU_OFFLOAD=1
+      shift
+      ;;
+    --nanovllm-num-gpu-blocks)
+      NANOVLLM_NUM_GPU_BLOCKS="$2"
+      shift 2
+      ;;
+    --nanovllm-gpu-memory-utilization)
+      NANOVLLM_GPU_MEMORY_UTILIZATION="$2"
+      shift 2
+      ;;
+    --nanovllm-block-size)
+      NANOVLLM_BLOCK_SIZE="$2"
+      shift 2
+      ;;
+    --nanovllm-enforce-eager)
+      NANOVLLM_ENFORCE_EAGER=1
+      shift
+      ;;
+    --nanovllm-sparse-policy)
+      NANOVLLM_SPARSE_POLICY="$2"
+      shift 2
+      ;;
+    --nanovllm-sparse-stride)
+      NANOVLLM_SPARSE_STRIDE="$2"
+      shift 2
+      ;;
+    --nanovllm-sparse-threshold)
+      NANOVLLM_SPARSE_THRESHOLD="$2"
+      shift 2
+      ;;
+    --nanovllm-sparse-chunk-size)
+      NANOVLLM_SPARSE_CHUNK_SIZE="$2"
+      shift 2
+      ;;
+    --nanovllm-compass-top-p)
+      NANOVLLM_COMPASS_TOP_P="$2"
+      shift 2
+      ;;
+    --nanovllm-compass-lambda)
+      NANOVLLM_COMPASS_LAMBDA="$2"
+      shift 2
+      ;;
+    --nanovllm-compass-theta)
+      NANOVLLM_COMPASS_THETA="$2"
+      shift 2
+      ;;
+    --blasst-lambda)
+      BLASST_LAMBDA="$2"
       shift 2
       ;;
     --e)
@@ -144,6 +303,11 @@ if [[ -n "${NUM_SAMPLES_OVERRIDE}" ]]; then
   NUM_SAMPLES="${NUM_SAMPLES_OVERRIDE}"
 fi
 
+TASK_LABEL="$(resolve_task_label)"
+if [[ "${OUTPUT_ROOT_EXPLICIT}" == "0" ]]; then
+  OUTPUT_ROOT="$(resolve_results_root)"
+fi
+
 PRED_CMD=(
   python "${SCRIPT_DIR}/pred.py"
   --backend "${BACKEND}"
@@ -163,6 +327,58 @@ fi
 
 if [[ -n "${MAX_MODEL_LEN}" ]]; then
   PRED_CMD+=(--max-model-len "${MAX_MODEL_LEN}")
+fi
+
+if [[ "${NANOVLLM_CPU_OFFLOAD}" == "1" ]]; then
+  PRED_CMD+=(--nanovllm-cpu-offload)
+fi
+
+if [[ -n "${NANOVLLM_NUM_GPU_BLOCKS}" ]]; then
+  PRED_CMD+=(--nanovllm-num-gpu-blocks "${NANOVLLM_NUM_GPU_BLOCKS}")
+fi
+
+if [[ -n "${NANOVLLM_GPU_MEMORY_UTILIZATION}" ]]; then
+  PRED_CMD+=(--nanovllm-gpu-memory-utilization "${NANOVLLM_GPU_MEMORY_UTILIZATION}")
+fi
+
+if [[ -n "${NANOVLLM_BLOCK_SIZE}" ]]; then
+  PRED_CMD+=(--nanovllm-block-size "${NANOVLLM_BLOCK_SIZE}")
+fi
+
+if [[ "${NANOVLLM_ENFORCE_EAGER}" == "1" ]]; then
+  PRED_CMD+=(--nanovllm-enforce-eager)
+fi
+
+if [[ -n "${NANOVLLM_SPARSE_POLICY}" ]]; then
+  PRED_CMD+=(--nanovllm-sparse-policy "${NANOVLLM_SPARSE_POLICY}")
+fi
+
+if [[ -n "${NANOVLLM_SPARSE_STRIDE}" ]]; then
+  PRED_CMD+=(--nanovllm-sparse-stride "${NANOVLLM_SPARSE_STRIDE}")
+fi
+
+if [[ -n "${NANOVLLM_SPARSE_THRESHOLD}" ]]; then
+  PRED_CMD+=(--nanovllm-sparse-threshold "${NANOVLLM_SPARSE_THRESHOLD}")
+fi
+
+if [[ -n "${NANOVLLM_SPARSE_CHUNK_SIZE}" ]]; then
+  PRED_CMD+=(--nanovllm-sparse-chunk-size "${NANOVLLM_SPARSE_CHUNK_SIZE}")
+fi
+
+if [[ -n "${NANOVLLM_COMPASS_TOP_P}" ]]; then
+  PRED_CMD+=(--nanovllm-compass-top-p "${NANOVLLM_COMPASS_TOP_P}")
+fi
+
+if [[ -n "${NANOVLLM_COMPASS_LAMBDA}" ]]; then
+  PRED_CMD+=(--nanovllm-compass-lambda "${NANOVLLM_COMPASS_LAMBDA}")
+fi
+
+if [[ -n "${NANOVLLM_COMPASS_THETA}" ]]; then
+  PRED_CMD+=(--nanovllm-compass-theta "${NANOVLLM_COMPASS_THETA}")
+fi
+
+if [[ -n "${BLASST_LAMBDA}" ]]; then
+  PRED_CMD+=(--blasst-lambda "${BLASST_LAMBDA}")
 fi
 
 if [[ ${#E_FLAG[@]} -gt 0 ]]; then
@@ -195,6 +411,7 @@ echo "Datasets:      ${DATASETS_ARG}"
 echo "Backend:       ${BACKEND}"
 echo "Template Type: ${TEMPLATE_TYPE}"
 echo "Data Root:     ${DATA_ROOT}"
+echo "Task Label:    ${TASK_LABEL}"
 echo "Output Root:   ${OUTPUT_ROOT}"
 echo "Num Samples:   ${NUM_SAMPLES}"
 if [[ -n "${MAX_MODEL_LEN}" ]]; then
