@@ -171,8 +171,9 @@ NUM_GPUS=${#GPU_ARRAY[@]}
 # Start client (prepare data / call model API / obtain final metrics)
 total_time=0
 for MAX_SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
-    # Set max_model_len for nanovllm to 1M (covers all test lengths)
-    export NANOVLLM_MAX_MODEL_LEN=1048576
+    # Set max_model_len for nanovllm dynamically based on the target sequence length
+    # Include an 8K buffer for new tokens and alignment (matches user's standalone script 32K + 8K = 40K behavior)
+    export NANOVLLM_MAX_MODEL_LEN=$((MAX_SEQ_LENGTH + 8192))
 
     SETTINGS_INFO=""
     if [[ -n ${METRIC} ]]; then SETTINGS_INFO+="${METRIC#--metric }_"; fi

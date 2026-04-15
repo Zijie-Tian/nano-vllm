@@ -326,6 +326,9 @@ def main():
                     break
             except Exception as e:
                 traceback.print_exc()
+                if args.server_type in ('nanovllm', 'hf', 'trtllm'):
+                    print(f"[FATAL] Local engine {args.server_type} encountered an error. Stopping retry to prevent sequence leaking.")
+                    raise e
 
         zipped_iter = zip(pred_list, idx_list, index_list, input_list,
                           outputs_list, others_list, truncation_list, length_list)

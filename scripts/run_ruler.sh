@@ -46,7 +46,7 @@ PROJECT_DIR="$(dirname "${SCRIPT_DIR}")"
 MODEL_DIR="${MODEL_DIR:-/home/zijie/models}"
 
 # GPU configuration (support both GPULIST and GPU_LIST)
-export GPU_LIST="${GPULIST:-${GPU_LIST:-4,5}}"
+export GPU_LIST="${GPULIST:-${GPU_LIST:-0,1,2,3,4,5}}"
 
 # Set PYTHONPATH (nanovllm from 3rdparty takes priority over system version)
 export PYTHONPATH="${PROJECT_DIR}/3rdparty/nanovllm:${PROJECT_DIR}:${PYTHONPATH}"
