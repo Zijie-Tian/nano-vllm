@@ -1,6 +1,6 @@
 ---
 name: compass-code-analysis
-description: COMPASS code-navigation and call-chain analysis conventions. Use when tracing behavior, locating symbols, or preparing refactors. Source of truth: `.codex/rules/code-analysis.md`.
+description: "COMPASS code-navigation and call-chain analysis conventions. Use when tracing behavior, locating symbols, or preparing refactors. Source of truth: `.codex/rules/code-analysis.md`."
 ---
 
 # COMPASS Code Analysis
@@ -19,4 +19,3 @@ Read `.codex/rules/code-analysis.md`.
 - Prefer symbol-level navigation over broad grep/glob scans.
 - Trace real call chains and cite concrete files/symbols.
 - Before editing, make sure the collected evidence is sufficient for the requested change.
-

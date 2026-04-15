@@ -1,6 +1,6 @@
 ---
 name: compass-commands
-description: COMPASS runtime commands, environment setup, and benchmark invocation rules. Use when activating conda, setting PYTHONPATH, running scripts, or checking imports. Source of truth: `.codex/rules/commands.md`.
+description: "COMPASS runtime commands, environment setup, and benchmark invocation rules. Use when activating conda, setting PYTHONPATH, running scripts, or checking imports. Source of truth: `.codex/rules/commands.md`."
 ---
 
 # COMPASS Commands
@@ -15,4 +15,3 @@ Read `.codex/rules/commands.md`.
 - Activate `conda activate ruler` for benchmark workflows that need the repo environment.
 - Prefer the documented entrypoints such as `./scripts/run_ruler.sh ...` or `eval/RULER/scripts/run.sh`.
 - Use the documented import check before claiming environment setup success.
-

@@ -1,6 +1,6 @@
 ---
 name: compass-ruler-task-config
-description: COMPASS RULER task configuration sync rules. Use when editing task lists or enabling/disabling RULER tasks. Source of truth: `.codex/rules/ruler-task-config.md`.
+description: "COMPASS RULER task configuration sync rules. Use when editing task lists or enabling/disabling RULER tasks. Source of truth: `.codex/rules/ruler-task-config.md`."
 ---
 
 # COMPASS RULER Task Configuration
@@ -15,4 +15,3 @@ Read `.codex/rules/ruler-task-config.md`.
 - Keep the `synthetic` arrays aligned between the two files.
 - Disable tasks with comments instead of deleting task lines.
 - Preserve the complete task list for future re-enabling.
-

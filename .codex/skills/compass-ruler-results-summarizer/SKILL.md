@@ -1,6 +1,6 @@
 ---
 name: compass-ruler-results-summarizer
-description: Structured Codex wrapper for the existing repo-local RULER results summarizer. Use when aggregating multiple `summary.csv` files. Canonical implementation: `.agents/skills/ruler_results_summarizer/SKILL.md`.
+description: "Structured Codex wrapper for the existing repo-local RULER results summarizer. Use when aggregating multiple `summary.csv` files. Canonical implementation: `.agents/skills/ruler_results_summarizer/SKILL.md`."
 ---
 
 # COMPASS RULER Results Summarizer
@@ -14,4 +14,3 @@ Read `.agents/skills/ruler_results_summarizer/SKILL.md`.
 - Prefer the canonical implementation and scripts that already live under `.agents/skills/ruler_results_summarizer/`.
 - Reuse `scripts/aggregate_ruler.py` instead of rewriting the aggregation logic by hand.
 - Treat `.agents/skills/ruler_results_summarizer/` as the implementation source of truth.
-

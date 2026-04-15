@@ -1,6 +1,6 @@
 ---
 name: compass-feasibility-report
-description: COMPASS feasibility-report workflow. Use for architecture trade-offs, proposal evaluation, or solution feasibility analysis. Source of truth: `.codex/rules/feasibility-report.md`; preferred agent: `.codex/agents/codex-deep-thinker.toml`.
+description: "COMPASS feasibility-report workflow. Use for architecture trade-offs, proposal evaluation, or solution feasibility analysis. Source of truth: `.codex/rules/feasibility-report.md`; preferred agent: `.codex/agents/codex-deep-thinker.toml`."
 ---
 
 # COMPASS Feasibility Report
@@ -20,4 +20,3 @@ Read both of these files before producing output:
 - Follow the required section structure from the template/rule.
 - Include concrete integration points, quantified trade-offs, and explicit risks.
 - Save the report under the requested `docs/` location only when the task actually calls for a written report artifact.
-
