@@ -9,3 +9,7 @@
 	path = 3rdparty/nanovllm
 	url = git@github.com:Zijie-Tian/nano-vllm.git
 	branch = tzj/minference
+[submodule "eval/LongBench/upstream"]
+	path = eval/LongBench/upstream
+	url = git@github.com:Zijie-Tian/LongBench.git
+	branch = main
