@@ -1,14 +1,15 @@
 #!/bin/bash
 # LongBench Benchmark Runner
-# Usage: ./scripts/run_longbench.sh [MODEL_PATH] [BACKEND] [OPTIONS]
+# Usage: ./scripts/run_longbench.sh [MODEL_NAME_OR_PATH] [TASK_SET] [BACKEND] [OPTIONS]
 #
 # Examples:
-#   ./scripts/run_longbench.sh /path/to/model torch --template-type auto
-#   ./scripts/run_longbench.sh /path/to/model nanovllm --datasets passage_count --num-samples 1
-#   ./scripts/run_longbench.sh /path/to/model torch --data-root ~/data/LongBench --e
+#   ./scripts/run_longbench.sh llama3.1-8b-instruct all torch
+#   ./scripts/run_longbench.sh llama3.1-8b-instruct triattention torch --num-samples 1
+#   ./scripts/run_longbench.sh /path/to/model triattention torch --data-root ~/data/LongBench
 #
 # Notes:
 #   - Defaults to backend=torch
+#   - Defaults to task set=all
 #   - Defaults to CUDA_VISIBLE_DEVICES=0 unless explicitly overridden
 #   - Additional options are passed through to eval/LongBench/scripts/run.sh
 #   - --data-root lets you choose the LongBench dataset location explicitly
@@ -19,37 +20,54 @@ set -e
 # Configuration
 #############################################
 
-MODEL_PATH="${1:-${MODEL_PATH:-}}"
-BACKEND="${2:-torch}"  # Options: torch, nanovllm
+MODEL_REF="${1:-${MODEL_PATH:-}}"
+TASK_SET="all"
+BACKEND="torch"  # Options: torch, nanovllm
 DATA_ROOT="${LONG_BENCH_DATA_ROOT:-$HOME/data/LongBench}"
 
-if [ -z "${MODEL_PATH}" ]; then
-    echo "Usage: ./scripts/run_longbench.sh [MODEL_PATH] [BACKEND] [OPTIONS]"
+if [ -z "${MODEL_REF}" ]; then
+    echo "Usage: ./scripts/run_longbench.sh [MODEL_NAME_OR_PATH] [TASK_SET] [BACKEND] [OPTIONS]"
     echo
     echo "Examples:"
-    echo "  ./scripts/run_longbench.sh /path/to/model torch --template-type auto"
-    echo "  ./scripts/run_longbench.sh /path/to/model nanovllm --datasets passage_count --num-samples 1"
-    echo "  ./scripts/run_longbench.sh /path/to/model torch --data-root ~/data/LongBench --e"
+    echo "  ./scripts/run_longbench.sh llama3.1-8b-instruct all torch"
+    echo "  ./scripts/run_longbench.sh llama3.1-8b-instruct triattention torch --num-samples 1"
+    echo "  ./scripts/run_longbench.sh /path/to/model triattention torch --data-root ~/data/LongBench"
     exit 1
 fi
 
-# Parse additional arguments
+# Backward compatibility:
+# - if arg2 is a backend, keep old [MODEL_PATH] [BACKEND] shape and default task set to all
+# - otherwise treat arg2 as task set and arg3 as optional backend
 EXTRA_ARGS=()
-if [ $# -gt 2 ]; then
-    shift 2
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --data-root)
-                DATA_ROOT="$2"
-                shift 2
-                ;;
-            *)
-                EXTRA_ARGS+=("$1")
-                shift
-                ;;
-        esac
-    done
+if [ $# -ge 2 ]; then
+    if [[ "$2" == "torch" || "$2" == "nanovllm" ]]; then
+        BACKEND="$2"
+        shift 2
+    else
+        TASK_SET="$2"
+        if [ $# -ge 3 ] && [[ "$3" == "torch" || "$3" == "nanovllm" ]]; then
+            BACKEND="$3"
+            shift 3
+        else
+            shift 2
+        fi
+    fi
+else
+    shift 1
 fi
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --data-root)
+            DATA_ROOT="$2"
+            shift 2
+            ;;
+        *)
+            EXTRA_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
 
 # Paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -70,7 +88,8 @@ echo "========================================"
 echo "LongBench Benchmark"
 echo "========================================"
 echo "Project:      $PROJECT_DIR"
-echo "Model Path:   $MODEL_PATH"
+echo "Model Ref:    $MODEL_REF"
+echo "Task Set:     $TASK_SET"
 echo "Backend:      $BACKEND"
 echo "CUDA Visible: $CUDA_VISIBLE_DEVICES"
 echo "Data Root:    $LONG_BENCH_DATA_ROOT"
@@ -80,4 +99,4 @@ fi
 echo "========================================"
 
 cd "${PROJECT_DIR}/eval/LongBench/scripts"
-bash ./run.sh --model-path "$MODEL_PATH" --backend "$BACKEND" --data-root "$LONG_BENCH_DATA_ROOT" "${EXTRA_ARGS[@]}"
+bash ./run.sh "$MODEL_REF" "$TASK_SET" --backend "$BACKEND" --data-root "$LONG_BENCH_DATA_ROOT" "${EXTRA_ARGS[@]}"

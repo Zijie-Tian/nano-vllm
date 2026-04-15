@@ -13,6 +13,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="COMPASS LongBench evaluator")
     parser.add_argument("--model-name", required=True)
     parser.add_argument("--output-root", required=True)
+    parser.add_argument("--datasets", help="Optional comma-separated dataset list to evaluate")
     parser.add_argument("--e", action="store_true")
     return parser.parse_args()
 
@@ -48,7 +49,15 @@ def main() -> None:
     output_root = Path(args.output_root)
     pred_dir = output_root / ("pred_e" if args.e else "pred") / args.model_name
     scores = {}
-    for jsonl_file in sorted(pred_dir.glob("*.jsonl")):
+    if args.datasets:
+        dataset_names = [item.strip() for item in args.datasets.split(",") if item.strip()]
+        jsonl_files = [pred_dir / f"{dataset_name}.jsonl" for dataset_name in dataset_names]
+    else:
+        jsonl_files = sorted(pred_dir.glob("*.jsonl"))
+
+    for jsonl_file in jsonl_files:
+        if not jsonl_file.exists():
+            raise FileNotFoundError(f"Missing prediction file for evaluation: {jsonl_file}")
         predictions, answers, lengths = [], [], []
         dataset = jsonl_file.stem
         all_classes = None
