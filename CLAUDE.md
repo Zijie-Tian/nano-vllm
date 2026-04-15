@@ -10,6 +10,7 @@
 | Claude 配置任务 | `docs/CLAUDE_SETUP_TASK.md` | Claude 专用的详细配置步骤 (7步) | 在新主机配置环境时 |
 | RULER XAttention 集成 | `docs/RULER_NANOVLLM_XATTN_INTEGRATION.md` | NanoVLLM XAttention 集成实现细节与测试结果 | 使用 RULER nanovllm 后端时 |
 | XAttn Chunked Prefill | `docs/XATTN_CHUNKED_PREFILL.md` | Chunked prefill 的 XAttention 实现、API 说明、使用方式 | 使用 chunked prefill 或 xattn_chunked metric 时 |
+| LongBench Benchmark 指南 | `docs/LONG_BENCH_BENCHMARK_GUIDE.md` | LongBench 运行命令、模型别名、子集 preset、输出规则 | 配置或运行 LongBench 测试时 |
 | 依赖列表 | `requirements.txt` | Python 依赖及版本 | pip install 时 |
 | **文档规则** | `.claude/rules/documentation-lazy-loading.md` | 文档写作的 lazy loading 规范 | 创建新文档时 |
 

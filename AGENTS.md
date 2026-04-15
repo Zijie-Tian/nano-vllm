@@ -22,6 +22,7 @@
 | Q head regrouping 方案 | `docs/04_q_head_regrouping.md` | Solution 4 方案设计与可行性结论 | 评估 dense head 重分组方案时 |
 | KV hidden-dim reorder 方案 | `docs/05_kv_dim_reorder.md` | Solution 5 方案设计与可行性结论 | 评估 KV 维度重排方案时 |
 | BLASST RULER 集成指南 | `docs/BLASST_RULER_INTEGRATION.md` | BLASST 在 RULER benchmark 中的运行与配置说明 | 使用或调试 BLASST metric 时 |
+| LongBench Benchmark 指南 | `docs/LONG_BENCH_BENCHMARK_GUIDE.md` | LongBench 命令入口、模型别名、子集 preset 与输出规则 | 配置或运行 `run_longbench.sh` / `eval/LongBench/scripts/run.sh` 时 |
 
 ### 使用方式
 ```bash
@@ -30,6 +31,9 @@ sed -n '1,220p' docs/ENVIRONMENT_SETUP.md
 
 # 做可行性分析前，先读取报告模板
 sed -n '1,260p' docs/FEASIBILITY_REPORT_TEMPLATE.md
+
+# 运行 LongBench 前，按需读取 LongBench 指南
+sed -n '1,260p' docs/LONG_BENCH_BENCHMARK_GUIDE.md
 ```
 
 ## Structured Codex Surfaces

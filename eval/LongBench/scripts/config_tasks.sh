@@ -48,8 +48,22 @@ LONG_BENCH_TRIATTENTION=(
     "repobench-p"
 )
 
+HAS_DATASET() {
+    local candidate="$1"
+    local dataset
+    for dataset in "${LONG_BENCH_ALL[@]}"; do
+        if [[ "$candidate" == "$dataset" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 TASKS_SELECT() {
     local task_set="$1"
+    local raw_item
+    local item
+    local resolved=()
 
     case "$task_set" in
         all)
@@ -59,8 +73,21 @@ TASKS_SELECT() {
             echo "${LONG_BENCH_TRIATTENTION[*]}"
             ;;
         *)
-            # Allow direct single-dataset or comma-separated overrides outside the named presets
-            echo "$task_set"
+            IFS=',' read -ra raw_items <<< "$task_set"
+            for raw_item in "${raw_items[@]}"; do
+                item="$(echo "$raw_item" | xargs)"
+                if [[ -z "$item" ]]; then
+                    continue
+                fi
+                if ! HAS_DATASET "$item"; then
+                    return 1
+                fi
+                resolved+=("$item")
+            done
+            if [[ ${#resolved[@]} -eq 0 ]]; then
+                return 1
+            fi
+            echo "${resolved[*]}"
             ;;
     esac
 }

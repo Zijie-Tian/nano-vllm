@@ -10,6 +10,7 @@
 | RULER XAttention 集成 | `docs/RULER_NANOVLLM_XATTN_INTEGRATION.md` | NanoVLLM XAttention 集成实现细节与测试结果 | 使用 RULER nanovllm 后端时 |
 | XAttn Chunked Prefill | `docs/XATTN_CHUNKED_PREFILL.md` | Chunked prefill 的 XAttention 实现、API 说明 | 使用 chunked prefill 或 xattn_chunked metric 时 |
 | BLASST RULER 集成 | `docs/BLASST_RULER_INTEGRATION.md` | BLASST 稀疏注意力与 RULER 集成 | 使用 BLASST metric 时 |
+| LongBench Benchmark 指南 | `docs/LONG_BENCH_BENCHMARK_GUIDE.md` | LongBench 运行命令、模型别名、子集 preset、输出规则 | 配置或运行 LongBench 测试时 |
 | GQA Dense Head 问题 | `docs/GQA_DENSE_HEAD_ISSUE.md` | GQA 中 Dense Head 问题分析 | 处理 GQA 稀疏化时 |
 | GQA 解决方案 | `docs/gqa-dense-head-solutions/*.md` | 10 种 GQA Dense Head 解决方案 | 评估/实现 GQA 优化方案时 |
 | Q Head Regrouping | `docs/04_q_head_regrouping.md` | Q-Head 重组方案 | 实现 Q-Head 重组时 |
