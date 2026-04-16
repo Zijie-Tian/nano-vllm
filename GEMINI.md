@@ -11,6 +11,8 @@
 | XAttn Chunked Prefill | `docs/XATTN_CHUNKED_PREFILL.md` | Chunked prefill 的 XAttention 实现、API 说明 | 使用 chunked prefill 或 xattn_chunked metric 时 |
 | BLASST RULER 集成 | `docs/BLASST_RULER_INTEGRATION.md` | BLASST 稀疏注意力与 RULER 集成 | 使用 BLASST metric 时 |
 | LongBench Benchmark 指南 | `docs/LONG_BENCH_BENCHMARK_GUIDE.md` | LongBench 运行命令、模型别名、子集 preset、输出规则 | 配置或运行 LongBench 测试时 |
+| TriAttention Calibration 指南 | `docs/TRIATTENTION_CALIBRATION_GUIDE.md` | TriAttention 标定脚本的作用、统计对象、公式与参数说明 | 理解或使用 TriAttention 标定时 |
+| TriAttention 复现指南 | `docs/TRIATTENTION_REPRODUCTION_GUIDE.md` | 当前工程 TriAttention 的复现逻辑、LongBench 接入方式，以及 standard 对照脚本使用方法 | 对比当前实现与 standard TriAttention 时 |
 | GQA Dense Head 问题 | `docs/GQA_DENSE_HEAD_ISSUE.md` | GQA 中 Dense Head 问题分析 | 处理 GQA 稀疏化时 |
 | GQA 解决方案 | `docs/gqa-dense-head-solutions/*.md` | 10 种 GQA Dense Head 解决方案 | 评估/实现 GQA 优化方案时 |
 | Q Head Regrouping | `docs/04_q_head_regrouping.md` | Q-Head 重组方案 | 实现 Q-Head 重组时 |
