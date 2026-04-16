@@ -85,12 +85,70 @@ class TorchModel:
         dtype: str = "bfloat16",
         trust_remote_code: bool = True,
         device_map: str = "auto",
+        compression_method: Optional[str] = None,
+        triattention_stats_path: Optional[str] = None,
+        triattention_budget: int = 2048,
+        triattention_frequency_window: int = 65536,
+        triattention_score_aggregation: str = "mean",
+        triattention_divide_length: int = 128,
+        triattention_disable_mlr: bool = False,
+        triattention_disable_trig: bool = False,
     ) -> None:
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            tokenizer_name_or_path or model_name_or_path,
-            trust_remote_code=trust_remote_code,
-            use_fast=False,
-        )
+        self.use_compass_loader = compression_method == "triattention"
+        if self.use_compass_loader:
+            from pathlib import Path
+            from compass.src.TriAttention import apply_triattention_patch
+
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                tokenizer_name_or_path or model_name_or_path,
+                trust_remote_code=trust_remote_code,
+                use_fast=False,
+            )
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name_or_path,
+                torch_dtype=_resolve_dtype(dtype) if torch.cuda.is_available() else _resolve_dtype(dtype),
+                low_cpu_mem_usage=True,
+                device_map=device_map,
+                use_cache=True,
+                attn_implementation="flash_attention_2",
+                trust_remote_code=trust_remote_code,
+            )
+            self.model.eval()
+            if not triattention_stats_path:
+                raise ValueError("triattention_stats_path must be provided when compression_method='triattention'")
+            apply_triattention_patch(
+                self.model,
+                stats_path=Path(triattention_stats_path).expanduser(),
+                model_path=Path(model_name_or_path),
+                kv_budget=int(triattention_budget),
+                offset_max_length=int(triattention_frequency_window),
+                score_aggregation=triattention_score_aggregation,
+                pruning_seed=0,
+                metadata_expectations={},
+                normalize_scores=True,
+                count_prompt_tokens=True,
+                allow_prefill_compression=False,
+                divide_length=int(triattention_divide_length),
+                use_slack_trigger=True,
+                per_head_pruning=True,
+                per_layer_perhead_pruning=False,
+                layer_perhead_aggregation="max",
+                disable_mlr=bool(triattention_disable_mlr),
+                disable_trig=bool(triattention_disable_trig),
+            )
+        else:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                tokenizer_name_or_path or model_name_or_path,
+                trust_remote_code=trust_remote_code,
+                use_fast=False,
+            )
+            model_kwargs = {"trust_remote_code": trust_remote_code}
+            if torch.cuda.is_available():
+                model_kwargs["dtype"] = _resolve_dtype(dtype)
+                model_kwargs["device_map"] = device_map
+            self.model = AutoModelForCausalLM.from_pretrained(model_name_or_path, **model_kwargs)
+            self.model.eval()
+
         if self.tokenizer.pad_token is None:
             fallback = self.tokenizer.eos_token or self.tokenizer.unk_token
             if fallback is None:
@@ -99,13 +157,6 @@ class TorchModel:
                 self.tokenizer.pad_token = fallback
                 self.tokenizer.pad_token_id = self.tokenizer.convert_tokens_to_ids(fallback)
         self.tokenizer.padding_side = "left"
-
-        model_kwargs = {"trust_remote_code": trust_remote_code}
-        if torch.cuda.is_available():
-            model_kwargs["dtype"] = _resolve_dtype(dtype)
-            model_kwargs["device_map"] = device_map
-        self.model = AutoModelForCausalLM.from_pretrained(model_name_or_path, **model_kwargs)
-        self.model.eval()
         try:
             self.device = next(self.model.parameters()).device
         except StopIteration:

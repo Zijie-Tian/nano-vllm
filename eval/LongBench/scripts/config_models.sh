@@ -17,6 +17,9 @@ MODEL_SELECT() {
     local template_type="auto"
     local dtype="${DTYPE}"
     local max_model_len=""
+    local compression_method=""
+    local triattention_stats_path=""
+    local triattention_budget=""
 
     case "$model_ref" in
         tiny-gpt2)
@@ -32,6 +35,30 @@ MODEL_SELECT() {
             template_type="auto"
             max_model_len="16384"
             ;;
+        qwen3-8b)
+            model_path="${model_dir}/Qwen3-8B"
+            model_name="Qwen3-8B"
+            template_type="auto"
+            max_model_len="16384"
+            ;;
+        qwen3-8b-triattention)
+            model_path="${model_dir}/Qwen3-8B"
+            model_name="Qwen3-8B"
+            template_type="auto"
+            max_model_len="16384"
+            compression_method="triattention"
+            triattention_stats_path="${TRIATTENTION_STATS_PATH:-}"
+            triattention_budget="${TRIATTENTION_BUDGET:-2048}"
+            ;;
+        llama3.1-8b-instruct-triattention)
+            model_path="${model_dir}/Llama-3.1-8B-Instruct"
+            model_name="Llama-3.1-8B-Instruct"
+            template_type="auto"
+            max_model_len="16384"
+            compression_method="triattention"
+            triattention_stats_path="${TRIATTENTION_STATS_PATH:-}"
+            triattention_budget="${TRIATTENTION_BUDGET:-2048}"
+            ;;
         llama3.1-nemotron-8b-ultralong-1m-instruct)
             model_path="${model_dir}/Llama-3.1-Nemotron-8B-UltraLong-1M-Instruct"
             model_name="Llama-3.1-Nemotron-8B-UltraLong-1M-Instruct"
@@ -43,5 +70,5 @@ MODEL_SELECT() {
             ;;
     esac
 
-    echo "${model_path}:${model_name}:${model_backend}:${tokenizer_path}:${template_type}:${dtype}:${max_model_len}"
+    echo "${model_path}:${model_name}:${model_backend}:${tokenizer_path}:${template_type}:${dtype}:${max_model_len}:${compression_method}:${triattention_stats_path}:${triattention_budget}"
 }

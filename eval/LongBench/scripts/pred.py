@@ -43,6 +43,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-trust-remote-code", action="store_true")
+    parser.add_argument("--compression-method", choices=["triattention"])
+    parser.add_argument("--triattention-stats-path")
+    parser.add_argument("--triattention-budget", type=int, default=2048)
+    parser.add_argument("--triattention-frequency-window", type=int, default=65536)
+    parser.add_argument("--triattention-score-aggregation", choices=["mean", "max"], default="mean")
+    parser.add_argument("--triattention-divide-length", type=int, default=128)
+    parser.add_argument("--triattention-disable-mlr", action="store_true")
+    parser.add_argument("--triattention-disable-trig", action="store_true")
     parser.add_argument("--nanovllm-cpu-offload", action="store_true")
     parser.add_argument("--nanovllm-num-gpu-blocks", type=int, default=2)
     parser.add_argument("--nanovllm-gpu-memory-utilization", type=float, default=0.9)
@@ -112,6 +120,14 @@ def build_backend(args: argparse.Namespace):
             tokenizer_name_or_path=args.tokenizer_path,
             dtype=args.dtype,
             trust_remote_code=trust_remote_code,
+            compression_method=args.compression_method,
+            triattention_stats_path=args.triattention_stats_path,
+            triattention_budget=args.triattention_budget,
+            triattention_frequency_window=args.triattention_frequency_window,
+            triattention_score_aggregation=args.triattention_score_aggregation,
+            triattention_divide_length=args.triattention_divide_length,
+            triattention_disable_mlr=args.triattention_disable_mlr,
+            triattention_disable_trig=args.triattention_disable_trig,
         )
 
     tokenizer_path = args.tokenizer_path or args.model_path

@@ -17,6 +17,9 @@ TOKENIZER_PATH=""
 TEMPLATE_TYPE=""
 DTYPE_OVERRIDE=""
 MAX_MODEL_LEN=""
+COMPRESSION_METHOD=""
+TRIATTENTION_STATS_PATH="${TRIATTENTION_STATS_PATH:-}"
+TRIATTENTION_BUDGET="${TRIATTENTION_BUDGET:-}"
 E_FLAG=()
 TASK_OVERRIDE=""
 NUM_SAMPLES_OVERRIDE=""
@@ -73,6 +76,34 @@ while [[ $# -gt 0 ]]; do
       MAX_MODEL_LEN="$2"
       shift 2
       ;;
+    --compression-method)
+      COMPRESSION_METHOD="$2"
+      shift 2
+      ;;
+    --triattention-stats-path)
+      TRIATTENTION_STATS_PATH="$2"
+      shift 2
+      ;;
+    --triattention-budget)
+      TRIATTENTION_BUDGET="$2"
+      shift 2
+      ;;
+    --triattention-frequency-window)
+      EXTRA_ARGS+=("$1" "$2")
+      shift 2
+      ;;
+    --triattention-score-aggregation)
+      EXTRA_ARGS+=("$1" "$2")
+      shift 2
+      ;;
+    --triattention-divide-length)
+      EXTRA_ARGS+=("$1" "$2")
+      shift 2
+      ;;
+    --triattention-disable-mlr|--triattention-disable-trig)
+      EXTRA_ARGS+=("$1")
+      shift
+      ;;
     --task)
       TASK_OVERRIDE="$2"
       shift 2
@@ -99,12 +130,15 @@ fi
 
 if [[ -z "${MODEL_PATH}" ]]; then
   MODEL_CONFIG="$(MODEL_SELECT "${MODEL_REF}" "${MODEL_DIR}")"
-  IFS=":" read -r MODEL_PATH MODEL_NAME MODEL_BACKEND TOKENIZER_PATH_DEFAULT TEMPLATE_TYPE_DEFAULT DTYPE_DEFAULT MODEL_MAX_MODEL_LEN <<< "${MODEL_CONFIG}"
+  IFS=":" read -r MODEL_PATH MODEL_NAME MODEL_BACKEND TOKENIZER_PATH_DEFAULT TEMPLATE_TYPE_DEFAULT DTYPE_DEFAULT MODEL_MAX_MODEL_LEN MODEL_COMPRESSION_METHOD MODEL_TRIATTENTION_STATS MODEL_TRIATTENTION_BUDGET <<< "${MODEL_CONFIG}"
   BACKEND="${BACKEND:-${MODEL_BACKEND}}"
   TOKENIZER_PATH="${TOKENIZER_PATH:-${TOKENIZER_PATH_DEFAULT}}"
   TEMPLATE_TYPE="${TEMPLATE_TYPE:-${TEMPLATE_TYPE_DEFAULT}}"
   DTYPE_OVERRIDE="${DTYPE_OVERRIDE:-${DTYPE_DEFAULT}}"
   MAX_MODEL_LEN="${MAX_MODEL_LEN:-${MODEL_MAX_MODEL_LEN}}"
+  COMPRESSION_METHOD="${COMPRESSION_METHOD:-${MODEL_COMPRESSION_METHOD}}"
+  TRIATTENTION_STATS_PATH="${TRIATTENTION_STATS_PATH:-${MODEL_TRIATTENTION_STATS}}"
+  TRIATTENTION_BUDGET="${TRIATTENTION_BUDGET:-${MODEL_TRIATTENTION_BUDGET}}"
 fi
 
 if [[ -z "${MODEL_NAME}" ]]; then
@@ -165,6 +199,18 @@ if [[ -n "${MAX_MODEL_LEN}" ]]; then
   PRED_CMD+=(--max-model-len "${MAX_MODEL_LEN}")
 fi
 
+if [[ -n "${COMPRESSION_METHOD}" ]]; then
+  PRED_CMD+=(--compression-method "${COMPRESSION_METHOD}")
+fi
+
+if [[ -n "${TRIATTENTION_STATS_PATH}" ]]; then
+  PRED_CMD+=(--triattention-stats-path "${TRIATTENTION_STATS_PATH}")
+fi
+
+if [[ -n "${TRIATTENTION_BUDGET}" ]]; then
+  PRED_CMD+=(--triattention-budget "${TRIATTENTION_BUDGET}")
+fi
+
 if [[ ${#E_FLAG[@]} -gt 0 ]]; then
   PRED_CMD+=("${E_FLAG[@]}")
 fi
@@ -193,6 +239,9 @@ echo "Model Name:    ${MODEL_NAME}"
 echo "Task Set:      ${TASK_SET}"
 echo "Datasets:      ${DATASETS_ARG}"
 echo "Backend:       ${BACKEND}"
+if [[ -n "${COMPRESSION_METHOD}" ]]; then
+  echo "Compression:   ${COMPRESSION_METHOD}"
+fi
 echo "Template Type: ${TEMPLATE_TYPE}"
 echo "Data Root:     ${DATA_ROOT}"
 echo "Output Root:   ${OUTPUT_ROOT}"

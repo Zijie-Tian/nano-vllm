@@ -1,10 +1,9 @@
+from pathlib import Path
 from typing import Optional, Tuple
 import torch
-from transformers import AutoTokenizer,StaticCache
-from transformers.models.llama.modeling_llama import Cache,LlamaForCausalLM
-from transformers.models.llama.modeling_llama import (
-    logging,
-)
+from transformers import AutoModelForCausalLM, AutoTokenizer, StaticCache
+from transformers.cache_utils import Cache
+from transformers.utils import logging
 
 from compass.threshold.llama_threshold import llama_fuse_16,llama_fuse_8,llama_fuse_4
 try:
@@ -44,6 +43,10 @@ try:
     from compass.src.Xattn_chunked import Xattention_chunked_full_prefill
 except:
     print("Xattn_chunked Prefill Import Fail")
+try:
+    from compass.src.TriAttention import apply_triattention_patch
+except:
+    print("TriAttention Import Fail")
 from compass.src.utils import *
 
 logger = logging.get_logger(__name__)
@@ -290,6 +293,9 @@ class FastPrefillConfig(dict):
         - compass_lambd (float): COMPASS sparsity threshold. Block is sparse if (m - m_local) > lambd. Default: 5.0.
         - top_k (int): Number of top blocks to select per query block row for AvgPool. Default: 64.
         - top_p (float): Cumulative probability threshold for AvgPool nucleus sampling. Default: None (use top_k).
+        - compression_method (str, optional): Optional post-forward cache compression strategy.
+        - triattention_stats_path (str, optional): Calibrated stats path for TriAttention.
+        - triattention_budget (int): KV budget for TriAttention compression.
 
         Methods:
         - __init__: Initializes the configuration with user-defined or default values.
@@ -304,6 +310,22 @@ class FastPrefillConfig(dict):
         compass_lambd: float = 5.0,
         top_k: int = 64,
         top_p: float = None,
+        compression_method: str = None,
+        triattention_stats_path: str = None,
+        triattention_budget: int = 2048,
+        triattention_frequency_window: int = 65536,
+        triattention_score_aggregation: str = "mean",
+        triattention_pruning_seed: int = 0,
+        triattention_normalize_scores: bool = True,
+        triattention_count_prompt_tokens: bool = True,
+        triattention_allow_prefill_compression: bool = False,
+        triattention_divide_length: int = 128,
+        triattention_slack_budget_trigger: bool = True,
+        triattention_per_head_pruning: bool = True,
+        triattention_per_layer_perhead_pruning: bool = False,
+        triattention_layer_perhead_aggregation: str = "max",
+        triattention_disable_mlr: bool = False,
+        triattention_disable_trig: bool = False,
     ):
         """
         Initialize the configuration with default or user-provided values.
@@ -315,6 +337,22 @@ class FastPrefillConfig(dict):
         self.compass_lambd = compass_lambd  # COMPASS sparsity threshold (default: 5.0)
         self.top_k = top_k  # AvgPool top-k blocks per row (default: 64)
         self.top_p = top_p  # AvgPool top-p cumulative threshold (default: None, use top_k)
+        self.compression_method = compression_method
+        self.triattention_stats_path = triattention_stats_path
+        self.triattention_budget = triattention_budget
+        self.triattention_frequency_window = triattention_frequency_window
+        self.triattention_score_aggregation = triattention_score_aggregation
+        self.triattention_pruning_seed = triattention_pruning_seed
+        self.triattention_normalize_scores = triattention_normalize_scores
+        self.triattention_count_prompt_tokens = triattention_count_prompt_tokens
+        self.triattention_allow_prefill_compression = triattention_allow_prefill_compression
+        self.triattention_divide_length = triattention_divide_length
+        self.triattention_slack_budget_trigger = triattention_slack_budget_trigger
+        self.triattention_per_head_pruning = triattention_per_head_pruning
+        self.triattention_per_layer_perhead_pruning = triattention_per_layer_perhead_pruning
+        self.triattention_layer_perhead_aggregation = triattention_layer_perhead_aggregation
+        self.triattention_disable_mlr = triattention_disable_mlr
+        self.triattention_disable_trig = triattention_disable_trig
         if threshold is not None:
             self.threshold = torch.ones((32,32)).to("cuda")*threshold
         else:
@@ -325,10 +363,18 @@ class FastPrefillConfig(dict):
             elif stride == 4:
                 self.threshold = torch.tensor(llama_fuse_4)
         self.threshold = self.threshold.to("cuda")
-        
-def load_model(fastprefillconfig=FastPrefillConfig(),name_or_path=""):
+
+def load_model(
+    fastprefillconfig=FastPrefillConfig(),
+    name_or_path="",
+    *,
+    device_map="balanced",
+    dtype: str | torch.dtype = torch.bfloat16,
+    trust_remote_code: bool = True,
+    attn_implementation: str = "flash_attention_2",
+):
     """
-        Loads a LLaMA model with FastPrefill optimizations applied.
+        Loads a causal LM model with FastPrefill optimizations applied.
 
         This function initializes the model, applies the FastPrefill configuration to attention 
         layers, and loads the tokenizer.
@@ -339,20 +385,49 @@ def load_model(fastprefillconfig=FastPrefillConfig(),name_or_path=""):
         - test_configs (dict, optional): Additional configurations for testing.
 
         Returns:
-        - Tuple[LlamaForCausalLM, AutoTokenizer]: The loaded model and tokenizer.
+        - Tuple[AutoModelForCausalLM, AutoTokenizer]: The loaded model and tokenizer.
     """
 
-    model = LlamaForCausalLM.from_pretrained(
+    torch_dtype = getattr(torch, dtype, dtype) if isinstance(dtype, str) else dtype
+    model = AutoModelForCausalLM.from_pretrained(
         name_or_path,
-        device_map="balanced", 
-        torch_dtype=torch.bfloat16,
+        device_map=device_map,
+        torch_dtype=torch_dtype,
+        trust_remote_code=trust_remote_code,
+        attn_implementation=attn_implementation,
     )
     model.eval()
-    for layer in model.model.layers:
-        layer.self_attn.fastprefillconfig = fastprefillconfig
-        layer.self_attn.forward = forward_eval.__get__(layer.self_attn)
+    use_triattention = getattr(fastprefillconfig, "compression_method", None) == "triattention"
+    if not use_triattention:
+        for layer in model.model.layers:
+            layer.self_attn.fastprefillconfig = fastprefillconfig
+            layer.self_attn.forward = forward_eval.__get__(layer.self_attn)
+    if use_triattention:
+        if not fastprefillconfig.triattention_stats_path:
+            raise ValueError("triattention_stats_path must be provided when compression_method='triattention'")
+        apply_triattention_patch(
+            model,
+            stats_path=Path(fastprefillconfig.triattention_stats_path).expanduser(),
+            model_path=name_or_path,
+            kv_budget=int(fastprefillconfig.triattention_budget),
+            offset_max_length=int(fastprefillconfig.triattention_frequency_window),
+            score_aggregation=fastprefillconfig.triattention_score_aggregation,
+            pruning_seed=int(fastprefillconfig.triattention_pruning_seed),
+            metadata_expectations={},
+            normalize_scores=bool(fastprefillconfig.triattention_normalize_scores),
+            count_prompt_tokens=bool(fastprefillconfig.triattention_count_prompt_tokens),
+            allow_prefill_compression=bool(fastprefillconfig.triattention_allow_prefill_compression),
+            divide_length=int(fastprefillconfig.triattention_divide_length),
+            use_slack_trigger=bool(fastprefillconfig.triattention_slack_budget_trigger),
+            per_head_pruning=bool(fastprefillconfig.triattention_per_head_pruning),
+            per_layer_perhead_pruning=bool(fastprefillconfig.triattention_per_layer_perhead_pruning),
+            layer_perhead_aggregation=fastprefillconfig.triattention_layer_perhead_aggregation,
+            disable_mlr=bool(fastprefillconfig.triattention_disable_mlr),
+            disable_trig=bool(fastprefillconfig.triattention_disable_trig),
+        )
     tokenizer = AutoTokenizer.from_pretrained(
-        name_or_path
+        name_or_path,
+        trust_remote_code=trust_remote_code,
     )
     return model, tokenizer
 
@@ -540,10 +615,12 @@ def forward_to_save(
         return attn_output, None
 
 def load_fake_model(layer_to_save,target_len,name_or_path=""):
-    model = LlamaForCausalLM.from_pretrained(
+    model = AutoModelForCausalLM.from_pretrained(
         name_or_path,
         device_map="balanced", 
         torch_dtype=torch.bfloat16,
+        trust_remote_code=True,
+        attn_implementation="flash_attention_2",
     )
     model.eval()
     for layer in model.model.layers:
@@ -552,6 +629,7 @@ def load_fake_model(layer_to_save,target_len,name_or_path=""):
         layer.self_attn.target_len = target_len
         layer.self_attn.forward = forward_to_save.__get__(layer.self_attn)
     tokenizer = AutoTokenizer.from_pretrained(
-        name_or_path
+        name_or_path,
+        trust_remote_code=True,
     )
     return model, tokenizer
