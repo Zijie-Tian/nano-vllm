@@ -71,15 +71,15 @@ tests/test_longbench_standard_runner.py
 
 ### 2.3 当前脚本的路径假设
 
-脚本内部当前写死了：
+脚本现在会基于 `__file__` 自动推导仓库根目录：
 
 ```python
-REPO_ROOT = Path("/mnt/data/tzj/Code/COMPASS")
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
 ```
 
-因此如果仓库不在这个路径下，脚本将找不到 `eval/LongBench/upstream/LongBench` 等依赖目录。
-
-如果你把仓库移动到别的位置，运行前要先把这个常量改掉，或者把脚本改成基于 `__file__` 自动推导仓库根目录。
+因此只要脚本仍位于仓库的 `tests/` 目录下，它就会自动找到同一 checkout 下的
+`eval/LongBench/upstream/LongBench` 等依赖目录，而不依赖机器特定的绝对路径。
 
 ---
 

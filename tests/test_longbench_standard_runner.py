@@ -17,14 +17,15 @@ from types import ModuleType
 
 import numpy as np
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
 
 
 # ============================================================
 # Configuration
 # ============================================================
 
-REPO_ROOT = Path("/mnt/data/tzj/Code/COMPASS")
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
 UPSTREAM_ROOT = REPO_ROOT / "eval" / "LongBench" / "upstream" / "LongBench"
 UPSTREAM_CONFIG = UPSTREAM_ROOT / "config"
 FALLBACK_METRICS = REPO_ROOT / "eval" / "LongBench" / "scripts" / "fallback_metrics.py"
@@ -104,6 +105,14 @@ def load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def ensure_upstream_exists() -> None:
+    if not UPSTREAM_CONFIG.exists():
+        raise FileNotFoundError(
+            f"LongBench upstream config not found at {UPSTREAM_CONFIG}. "
+            "Did you initialize the eval/LongBench/upstream submodule?"
+        )
+
+
 def load_metrics_module() -> ModuleType:
     upstream_metrics = UPSTREAM_ROOT / "metrics.py"
     candidates = [upstream_metrics, FALLBACK_METRICS] if upstream_metrics.exists() else [FALLBACK_METRICS]
@@ -119,6 +128,28 @@ def load_metrics_module() -> ModuleType:
         except ModuleNotFoundError as exc:
             last_error = exc
     raise last_error if last_error is not None else RuntimeError("Failed to load LongBench metrics module")
+
+
+def load_tokenizer(model_path: Path) -> PreTrainedTokenizerBase:
+    attempts = [
+        {"trust_remote_code": True, "use_fast": False},
+        {"trust_remote_code": True},
+        {"trust_remote_code": True, "use_fast": True},
+    ]
+    last_error: Exception | None = None
+    for kwargs in attempts:
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(model_path, **kwargs)
+        except Exception as exc:
+            last_error = exc
+            continue
+        if isinstance(tokenizer, PreTrainedTokenizerBase):
+            return tokenizer
+        last_error = TypeError(
+            "AutoTokenizer.from_pretrained returned "
+            f"{type(tokenizer).__name__} for {model_path} with kwargs={kwargs}"
+        )
+    raise RuntimeError(f"Failed to load a valid tokenizer from {model_path}") from last_error
 
 
 def dataset_metric_map():
@@ -206,6 +237,17 @@ def build_chat(prompt: str, tokenizer, model_name: str) -> str:
         return header + f" ### Human: {prompt}\n###"
     if "internlm" in lower:
         return f"<|User|>:{prompt}<eoh>\n<|Bot|>:"
+    if hasattr(tokenizer, "apply_chat_template"):
+        try:
+            rendered = tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            if isinstance(rendered, str) and rendered:
+                return rendered
+        except Exception:
+            pass
     return prompt
 
 
@@ -246,7 +288,7 @@ def truncate_prompt(prompt: str, tokenizer, max_model_len: int) -> str:
 
 def load_model_and_tokenizer(model_path: Path, dtype: str, device: str | None):
     torch_dtype = getattr(torch, dtype)
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, use_fast=False)
+    tokenizer = load_tokenizer(model_path)
     if tokenizer.pad_token is None:
         fallback = tokenizer.eos_token or tokenizer.unk_token
         if fallback is None:
@@ -331,6 +373,7 @@ output_root = Path(args.output_root).expanduser().resolve()
 pred_dir = output_root / "pred" / model_name
 pred_dir.mkdir(parents=True, exist_ok=True)
 
+ensure_upstream_exists()
 dataset2prompt = load_json(UPSTREAM_CONFIG / "dataset2prompt.json")
 dataset2maxlen = load_json(UPSTREAM_CONFIG / "dataset2maxlen.json")
 metric_map = dataset_metric_map()
