@@ -14,6 +14,7 @@
 - 推理：`eval/LongBench/scripts/pred.py`
 - 评测：`eval/LongBench/scripts/eval.py`
 - 上游基准资源：`eval/LongBench/upstream`
+- 独立 standard runner 指南：`docs/LONG_BENCH_STANDARD_RUNNER_GUIDE.md`
 
 ## 2. 默认行为
 

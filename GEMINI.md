@@ -13,6 +13,7 @@
 | LongBench Benchmark 指南 | `docs/LONG_BENCH_BENCHMARK_GUIDE.md` | LongBench 运行命令、模型别名、子集 preset、输出规则 | 配置或运行 LongBench 测试时 |
 | TriAttention Calibration 指南 | `docs/TRIATTENTION_CALIBRATION_GUIDE.md` | TriAttention 标定脚本的作用、统计对象、公式与参数说明 | 理解或使用 TriAttention 标定时 |
 | TriAttention 复现指南 | `docs/TRIATTENTION_REPRODUCTION_GUIDE.md` | 当前工程 TriAttention 的复现逻辑、LongBench 接入方式，以及 standard 对照脚本使用方法 | 对比当前实现与 standard TriAttention 时 |
+| LongBench Standard Runner 指南 | `docs/LONG_BENCH_STANDARD_RUNNER_GUIDE.md` | `tests/test_longbench_standard_runner.py` 的定位、参数、输入输出与推荐命令 | 需要跑独立的 upstream-like LongBench 对照路径时 |
 | GQA Dense Head 问题 | `docs/GQA_DENSE_HEAD_ISSUE.md` | GQA 中 Dense Head 问题分析 | 处理 GQA 稀疏化时 |
 | GQA 解决方案 | `docs/gqa-dense-head-solutions/*.md` | 10 种 GQA Dense Head 解决方案 | 评估/实现 GQA 优化方案时 |
 | Q Head Regrouping | `docs/04_q_head_regrouping.md` | Q-Head 重组方案 | 实现 Q-Head 重组时 |

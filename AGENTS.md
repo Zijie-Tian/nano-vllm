@@ -25,6 +25,7 @@
 | LongBench Benchmark 指南 | `docs/LONG_BENCH_BENCHMARK_GUIDE.md` | LongBench 命令入口、模型别名、子集 preset 与输出规则 | 配置或运行 `run_longbench.sh` / `eval/LongBench/scripts/run.sh` 时 |
 | TriAttention Calibration 指南 | `docs/TRIATTENTION_CALIBRATION_GUIDE.md` | 解释 `scripts/calibrate_triattention.py` 的统计对象、公式、离线校准意义与使用方式 | 理解或使用 TriAttention stats 标定时 |
 | TriAttention 复现指南 | `docs/TRIATTENTION_REPRODUCTION_GUIDE.md` | 解释当前工程内 TriAttention 的复现逻辑、LongBench 接入方式，以及 standard 对照脚本如何使用 | 对比当前实现与 standard 实现、或复现实验时 |
+| LongBench Standard Runner 指南 | `docs/LONG_BENCH_STANDARD_RUNNER_GUIDE.md` | 解释 `tests/test_longbench_standard_runner.py` 的定位、参数、输入输出与推荐命令 | 需要跑独立的 upstream-like LongBench 对照路径时 |
 
 ### 使用方式
 ```bash
@@ -42,6 +43,9 @@ sed -n '1,260p' docs/TRIATTENTION_CALIBRATION_GUIDE.md
 
 # 理解当前 TriAttention 复现逻辑和 standard 对照脚本时，按需读取复现指南
 sed -n '1,260p' docs/TRIATTENTION_REPRODUCTION_GUIDE.md
+
+# 使用独立 LongBench standard runner 时，按需读取对应指南
+sed -n '1,260p' docs/LONG_BENCH_STANDARD_RUNNER_GUIDE.md
 ```
 
 ## Structured Codex Surfaces
