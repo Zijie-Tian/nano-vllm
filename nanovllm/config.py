@@ -9,12 +9,14 @@ class SparsePolicyType(Enum):
     """Sparse attention policy types."""
 
     # fmt: off
-    FULL = auto()       # No sparse attention (load all blocks)
-    TRIATTENTION = auto()  # Full attention semantics, but apply RoPE inside Attention
-    QUEST = auto()      # Query-aware Top-K block selection (decode only)
-    XATTN_BSA = auto()  # XAttention Block Sparse Attention (prefill only, chunked)
-    COMPASS = auto()    # COMPASS sparse attention (prefill only, chunked)
-    BLASST = auto()     # BLASST sparse attention (prefill only, chunked)
+    FULL = auto()         # No sparse attention (load all blocks)
+    PREROPE = auto()      # Full attention, but KV cache persists pre-RoPE K
+    POSTROPE = auto()     # Full attention with explicit post-RoPE KV semantics
+    TRIATTENTION = auto() # Full attention semantics, but apply RoPE inside Attention
+    QUEST = auto()        # Query-aware Top-K block selection (decode only)
+    XATTN_BSA = auto()    # XAttention Block Sparse Attention (prefill only, chunked)
+    COMPASS = auto()      # COMPASS sparse attention (prefill only, chunked)
+    BLASST = auto()       # BLASST sparse attention (prefill only, chunked)
     # fmt: on
 
 
@@ -46,7 +48,8 @@ class Config:
     num_cpu_kvcache_blocks: int = -1
 
     # Sparse attention configuration
-    # FULL: no sparse attention (load all blocks)
+    # FULL/POSTROPE: post-RoPE KV cache semantics (load all blocks)
+    # PREROPE: full attention with pre-RoPE KV cache semantics
     # QUEST: decode-only sparse attention with Top-K block selection
     # XATTN_BSA: prefill-only block sparse attention with chunk-level selection
     sparse_policy: SparsePolicyType = SparsePolicyType.FULL

@@ -58,7 +58,8 @@ class ModelRunner:
         hf_config = config.hf_config
         self.block_size = config.kvcache_block_size
         self.enforce_eager = config.enforce_eager or (
-            config.sparse_policy == SparsePolicyType.TRIATTENTION
+            config.sparse_policy
+            in {SparsePolicyType.TRIATTENTION, SparsePolicyType.PREROPE}
         )
         self.world_size = config.tensor_parallel_size
         self.rank = rank

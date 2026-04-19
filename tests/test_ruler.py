@@ -381,7 +381,7 @@ def run_ruler_benchmark(
         sample_indices: Specific sample indices to test (overrides num_samples)
         fresh_llm: If True, reinitialize LLM for each sample (avoids state leakage)
         json_output: If True, output JSON results at the end
-        sparse_policy: Sparse attention policy (FULL, QUEST, MINFERENCE, XATTN)
+        sparse_policy: Sparse attention policy (FULL, PREROPE, POSTROPE, QUEST, MINFERENCE, XATTN)
 
     Returns:
         Dict with overall results and per-task results
@@ -733,7 +733,7 @@ if __name__ == "__main__":
         "--sparse-policy",
         type=str,
         default="",
-        help="Sparse attention policy (FULL, TRIATTENTION, QUEST, XATTN_BSA, COMPASS, BLASST)",
+        help="Sparse attention policy (FULL, PREROPE, POSTROPE, TRIATTENTION, QUEST, XATTN_BSA, COMPASS, BLASST)",
     )
     # XAttention BSA specific parameters
     parser.add_argument(
