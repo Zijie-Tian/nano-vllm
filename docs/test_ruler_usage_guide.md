@@ -58,7 +58,7 @@ CUDA_VISIBLE_DEVICES=<GPU_ID> PYTHONPATH=/home/zijie/Code/nano-vllm:$PYTHONPATH 
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--sparse-policy` | - | 稀疏策略: `FULL`, `QUEST`, `XATTN_BSA`, `COMPASS`, `BLASST` |
+| `--sparse-policy` | - | 稀疏策略: `FULL`, `POSTROPE`, `PREROPE`, `TRIATTENTION`, `QUEST`, `XATTN_BSA`, `COMPASS`, `BLASST` |
 | `--sparse-threshold` | 0.9 | XAttn cumulative attention 阈值 |
 | `--sparse-samples` | 128 | XAttn 每 chunk 采样数 |
 | `--sparse-stride` | 8 | XAttn Q/K 下采样步长 |
@@ -237,6 +237,46 @@ CUDA_VISIBLE_DEVICES=4 PYTHONPATH=/home/zijie/Code/nano-vllm:$PYTHONPATH \
 ```
 
 **结果**: 100% 准确率, 耗时 ~17s
+
+### 10. FULL / POSTROPE / PREROPE 对齐测试（32K, offload + chunked prefill）
+
+当需要验证三种 full-attention 语义策略是否完全对齐时，推荐固定：
+
+- `niah_single_1`
+- `sample-indices 0,1,2,3,4`
+- `--enable-offload`
+- `--max-model-len 40960`
+- `--block-size 4096`
+- `--num-gpu-blocks 4`
+
+示例命令：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/mnt/data/tzj/Code/nano-vllm:$PYTHONPATH \
+    conda run -n compass python tests/test_ruler.py \
+    --model ~/models/Llama-3.1-8B-Instruct \
+    --data-dir tests/data/ruler_32k \
+    --datasets niah_single_1 \
+    --sample-indices 0,1,2,3,4 \
+    --max-model-len 40960 \
+    --enable-offload \
+    --sparse-policy FULL \
+    --json-output
+```
+
+将 `FULL` 替换为 `POSTROPE` 和 `PREROPE` 后，可对比三组结果的 aggregate JSON；如果需要比较逐样本的文本和 token IDs，请复用 `tests/test_ruler.py` 里的 `load_samples()` 与 `convert_prompt_for_model()` 逻辑。
+
+**已验证结果（2026-04-19）**：
+
+- 在 `GPU0` 和 `GPU1` 上，`FULL` / `POSTROPE` / `PREROPE`
+- 对 `niah_single_1` 的前 5 个样本
+- 在 offload + chunked prefill 路径下
+- 生成文本与 `token_ids` **完全一致**
+
+详见：
+
+- [`docs/ruler_rope_policy_alignment.md`](docs/ruler_rope_policy_alignment.md)
+- [`docs/rope_policy_design.md`](docs/rope_policy_design.md)
 
 ---
 

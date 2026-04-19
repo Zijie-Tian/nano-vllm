@@ -6,6 +6,10 @@ This document describes the SparsePolicy abstraction for chunked attention compu
 
 SparsePolicy is an abstract base class that defines how attention is computed during chunked prefill and decode phases. All attention computation logic is delegated to the policy, allowing different sparse attention strategies to be implemented without modifying the core attention layer.
 
+For the RoPE-placement semantic variants built on top of this abstraction, see:
+
+- [`docs/rope_policy_design.md`](docs/rope_policy_design.md)
+
 ```
 attention.py                     SparsePolicy
     |                                 |
@@ -97,6 +101,17 @@ def compute_chunked_decode(
 **File**: `nanovllm/kvcache/sparse/full_policy.py`
 
 The default policy that loads all blocks (no sparsity). Serves as the baseline implementation.
+
+### Explicit RoPE semantic variants
+
+The same full-attention pipeline now has two explicit semantic variants:
+
+| Policy | Purpose |
+|---|---|
+| `POSTROPE` | Explicit named alias of the existing FULL/post-RoPE baseline |
+| `PREROPE` | Full-attention semantics with pre-RoPE K persisted in KV cache / CPU offload |
+
+`PREROPE` exists to preserve exact FULL outputs while moving RoPE application into the policy compute methods. The detailed design, invariants, and synchronization notes are documented in [`docs/rope_policy_design.md`](docs/rope_policy_design.md).
 
 ### Flags
 

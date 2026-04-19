@@ -144,6 +144,7 @@ The architecture consists of 4 core modules:
 |----------|---------|
 | [`docs/architecture_guide.md`](docs/architecture_guide.md) | Core components, CPU offload design, ring buffer. |
 | [`docs/sparse_policy_architecture.md`](docs/sparse_policy_architecture.md) | SparsePolicy abstraction and pipeline modes. |
+| [`docs/rope_policy_design.md`](docs/rope_policy_design.md) | PREROPE / POSTROPE semantic design: RoPE placement, KV-cache persistence, and stream-sync rules. |
 | [`docs/sparse_attention_guide.md`](docs/sparse_attention_guide.md) | Block sparse attention methods (XAttention, MInference, etc.). |
 | [`docs/sparse_attention_blasst.md`](docs/sparse_attention_blasst.md) | BLASST sparse attention: dynamic pruning, online softmax thresholding. |
 | [`docs/blasst_performance_analysis.md`](docs/blasst_performance_analysis.md) | Performance report for BLASST: λ vs density, accuracy stability. |
@@ -152,6 +153,7 @@ The architecture consists of 4 core modules:
 | [`docs/debugging_guide.md`](docs/debugging_guide.md) | PyTorch hooks, tensor comparison, memory profiling. |
 | [`docs/optimization_guide.md`](docs/optimization_guide.md) | Performance optimizations (sgDMA, Triton merge). |
 | [`docs/test_ruler_usage_guide.md`](docs/test_ruler_usage_guide.md) | Comprehensive guide for `test_ruler.py`. |
+| [`docs/ruler_rope_policy_alignment.md`](docs/ruler_rope_policy_alignment.md) | FULL / POSTROPE / PREROPE exact-output alignment record for five RULER samples on GPU0/GPU1 under offload + chunked prefill. |
 | [`docs/known_issues.md`](docs/known_issues.md) | Documented bugs and resolution history. |
 | [`docs/trtllm_skip_softmax_implementation_details.md`](docs/trtllm_skip_softmax_implementation_details.md) | Deep dive into Skip Softmax (BLASST) in TensorRT-LLM: math, kernels, and ModelOpt. |
 | [`docs/sparse_policy_offload_control_guide.md`](docs/sparse_policy_offload_control_guide.md) | Guide for controlling KV cache offloading within custom SparsePolicies. |
