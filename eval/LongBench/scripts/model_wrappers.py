@@ -4,13 +4,14 @@ from dataclasses import dataclass
 from typing import Iterable, Optional
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
 
 
 @dataclass
 class GenerationRequest:
     prompt: str
     max_new_tokens: int
+    dataset: Optional[str] = None
     temperature: float = 0.0
     top_p: float = 1.0
     top_k: int = 32
@@ -30,6 +31,42 @@ def _trim_stop_strings(text: str, stop: Optional[Iterable[str]]) -> str:
         if needle:
             text = text.split(needle)[0]
     return text
+
+
+def load_tokenizer_with_fallback(
+    model_name_or_path: str,
+    *,
+    trust_remote_code: bool = True,
+) -> PreTrainedTokenizerBase:
+    attempts = [
+        {"trust_remote_code": trust_remote_code, "use_fast": False},
+        {"trust_remote_code": trust_remote_code},
+        {"trust_remote_code": trust_remote_code, "use_fast": True},
+    ]
+    last_error: Exception | None = None
+    for kwargs in attempts:
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, **kwargs)
+        except Exception as exc:
+            last_error = exc
+            continue
+        if isinstance(tokenizer, PreTrainedTokenizerBase):
+            return tokenizer
+        last_error = TypeError(
+            "AutoTokenizer.from_pretrained returned "
+            f"{type(tokenizer).__name__} for {model_name_or_path} with kwargs={kwargs}"
+        )
+    raise RuntimeError(f"Failed to load a valid tokenizer from {model_name_or_path}") from last_error
+
+
+def _resolve_eos_token_id(model, tokenizer):
+    for source in (getattr(model, "generation_config", None), getattr(model, "config", None)):
+        if source is None:
+            continue
+        eos_token_id = getattr(source, "eos_token_id", None)
+        if eos_token_id is not None:
+            return eos_token_id
+    return tokenizer.eos_token_id
 
 
 def format_chat_prompt(prompt: str, tokenizer, template_type: str) -> str:
@@ -99,10 +136,9 @@ class TorchModel:
             from pathlib import Path
             from compass.src.TriAttention import apply_triattention_patch
 
-            self.tokenizer = AutoTokenizer.from_pretrained(
+            self.tokenizer = load_tokenizer_with_fallback(
                 tokenizer_name_or_path or model_name_or_path,
                 trust_remote_code=trust_remote_code,
-                use_fast=False,
             )
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_name_or_path,
@@ -137,10 +173,9 @@ class TorchModel:
                 disable_trig=bool(triattention_disable_trig),
             )
         else:
-            self.tokenizer = AutoTokenizer.from_pretrained(
+            self.tokenizer = load_tokenizer_with_fallback(
                 tokenizer_name_or_path or model_name_or_path,
                 trust_remote_code=trust_remote_code,
-                use_fast=False,
             )
             model_kwargs = {"trust_remote_code": trust_remote_code}
             if torch.cuda.is_available():
@@ -161,6 +196,7 @@ class TorchModel:
             self.device = next(self.model.parameters()).device
         except StopIteration:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.eos_token_id = _resolve_eos_token_id(self.model, self.tokenizer)
 
     def generate(self, request: GenerationRequest, *, template_type: str = "auto") -> str:
         prompt = format_chat_prompt(request.prompt, self.tokenizer, template_type)
@@ -177,8 +213,17 @@ class TorchModel:
             top_p=request.top_p if do_sample else None,
             top_k=request.top_k if do_sample else None,
             pad_token_id=self.tokenizer.pad_token_id,
-            eos_token_id=self.tokenizer.eos_token_id,
+            eos_token_id=self.eos_token_id,
         )
+        if request.dataset == "samsum":
+            newline_token = self.tokenizer.encode("\n", add_special_tokens=False)
+            eos_ids = generation_kwargs["eos_token_id"]
+            if not isinstance(eos_ids, list):
+                eos_ids = [eos_ids]
+            if newline_token:
+                eos_ids.append(newline_token[-1])
+            generation_kwargs["eos_token_id"] = eos_ids
+            generation_kwargs["min_length"] = prompt_len + 1
         generation_kwargs = {k: v for k, v in generation_kwargs.items() if v is not None}
 
         with torch.no_grad():

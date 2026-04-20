@@ -12,10 +12,9 @@ import numpy as np
 import torch
 from datasets import load_dataset
 from huggingface_hub import hf_hub_download
-from transformers import AutoTokenizer
 from tqdm import tqdm
 
-from model_wrappers import GenerationRequest, NanoVLLMModel, TorchModel
+from model_wrappers import GenerationRequest, NanoVLLMModel, TorchModel, load_tokenizer_with_fallback
 from upstream_utils import (
     LONG_BENCH_DATASETS,
     LONG_BENCH_E_DATASETS,
@@ -131,10 +130,9 @@ def build_backend(args: argparse.Namespace):
         )
 
     tokenizer_path = args.tokenizer_path or args.model_path
-    tokenizer = AutoTokenizer.from_pretrained(
+    tokenizer = load_tokenizer_with_fallback(
         tokenizer_path,
         trust_remote_code=trust_remote_code,
-        use_fast=False,
     )
     max_model_len = resolve_max_model_len(args, tokenizer, infer_model_name(args))
     return NanoVLLMModel(
@@ -279,6 +277,7 @@ def main() -> None:
                 GenerationRequest(
                     prompt=prompt_for_model,
                     max_new_tokens=max_new_tokens,
+                    dataset=dataset_name,
                     temperature=args.temperature,
                     top_p=args.top_p,
                     top_k=args.top_k,
