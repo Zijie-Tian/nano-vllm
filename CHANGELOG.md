@@ -2,6 +2,146 @@
 
 This file serves as the durable memory and session log for Feynman. It tracks major progress, completed milestones, failed approaches, and ongoing blockers across sessions.
 
+## 2026-04-19: Autoresearch start for POSTROPE -> SpargeAttn prefill
+- **Action**: Started a local autoresearch loop on branch `tzj/rope_prefill` to replace `POSTROPE`'s delegate-to-FULL implementation with a SpargeAttn-style two-stage sparse prefill path while keeping the policy name unchanged.
+- **Baseline**: On `GPU1` with `/mnt/data/tzj/models/Llama-3.1-8B-Instruct`, `tests/test_ruler.py` on `ruler_32k / niah_single_1 / sample-indices 0..4 / --enable-offload / --sparse-policy POSTROPE` scored **5/5**.
+- **Observed runtime**: Total benchmark time `47.29s`; prefill summary `select_blocks=0.023s`, `compute_chunked_prefill=9.801s`, `offload_prefill_chunk=0.107s`.
+- **Next Step**: Implement a conservative sparse prefill path using existing COMPASS/BLASST building blocks, then re-run the same 5-sample RULER gate.
+- **Iteration 1 Result**: Replaced `POSTROPE`'s delegate-only implementation with a conservative SpargeAttn-style prefill path in `nanovllm/kvcache/sparse/postrope.py`.
+  - Stage 1 now does GPU-side pooled-Q / pooled-K chunk selection with self-similarity protection during `select_blocks()`.
+  - Stage 2 now uses BLASST-backed online sparse chunked prefill for the selected historical chunks.
+  - GPU-only prefill/decode and chunked decode remain delegated to `FullAttentionPolicy`.
+- **Verification**:
+  - `python -m unittest tests.test_dense_prefill_policy -q` passed.
+  - `CUDA_VISIBLE_DEVICES=1 ... tests/test_ruler.py --data-dir tests/data/ruler_32k --datasets niah_single_1 --sample-indices 0,1,2,3,4 --enable-offload --sparse-policy POSTROPE --json-output` scored **5/5**.
+- **Observed runtime**: Total benchmark time increased to `81.70s`; prefill summary `select_blocks=16.362s`, `compute_chunked_prefill=24.551s`, `offload_prefill_chunk=4.842s`.
+- **Observation**: Stage 1 is currently correctness-first and still selected all historical 4096-token parent chunks on this gate, while Stage 2 did introduce meaningful compute pruning; the next useful optimization would be to tune parent-chunk selectivity without regressing the 5-sample pass gate.
+- **Iteration 2 Result**: Refined `POSTROPE` stage-1 selection so that K-cache persistence is decided explicitly at parent-chunk granularity via chunk-level self-cosine.
+  - Historical K summaries are collapsed to per-parent-chunk representations for selection.
+  - Low-self-cosine parent chunks are force-kept as persistent K-cache chunks.
+  - Non-persistent parent chunks are selected by GPU chunk-level top-p scoring.
+  - `select_blocks()` now logs selected K-chunk density and persistent K-chunk density directly.
+- **Verification**:
+  - Re-ran the GPU1 5-sample RULER gate and kept **5/5**.
+- **Observed density**:
+  - Early windows now sometimes prune parent chunks, e.g. `8 -> 6` historical chunks (`75.0%` density) and `8 -> 7` (`87.5%` density).
+  - Later windows often remain fully persistent under the current `THETA=0.60`, so they still select all historical chunks.
+- **Observed runtime**:
+  - Latest validated run: benchmark total `74.57s`; prefill summary `select_blocks=2.485s`, `compute_chunked_prefill=17.577s`, `offload_prefill_chunk=5.221s`, prefill total `25.283s`.
+- **Next Step**: Tune the persistence aggregation rule and/or threshold so later historical windows do not all become persistent, while preserving the 5/5 gate.
+- **Iteration 3 Result (Rejected)**: Tried lowering the *physical* KV cache/offload block size to `128` tokens to see whether phase 1 could push selected density lower.
+  - Relaxed the temporary config guard and ran a GPU1 smoke test on `niah_single_1` sample `0` with `--block-size 128`.
+  - Correctness was still `1/1`, but runtime became pathological: total benchmark time `477.79s`; prefill summary `select_blocks=42.269s`, `compute_chunked_prefill=387.318s`, `offload_prefill_chunk=3.570s`, prefill total `433.158s`.
+  - The hoped-for useful density gain did not appear in the later regime: many later windows became fully persistent again (`218 -> 218`, `219 -> 219`, ...).
+  - Decision: abandon the 128-token physical-KV-chunk direction and return to the normal `4096` KV chunk size.
+- **User Requirement Update**: `POSTROPE` must be implemented as a **fully independent policy** with no direct delegation to other policy implementations such as `FullAttentionPolicy` or `BLASSTPolicy`.
+- **Iteration 4 Result**: Refactored `nanovllm/kvcache/sparse/postrope.py` so `POSTROPE` is now self-contained.
+  - Removed direct policy delegation fields and calls.
+  - Inlined the GPU-only full-attention prefill/decode paths directly in `POSTROPE`.
+  - Inlined chunked decode ring-buffer logic directly in `POSTROPE`.
+  - Inlined stage-2 online sparse chunked prefill logic directly in `POSTROPE` while still reusing low-level ops/kernels.
+- **Verification**:
+  - `python -m py_compile nanovllm/config.py nanovllm/kvcache/sparse/postrope.py` passed.
+  - `python -m unittest tests.test_dense_prefill_policy -q` passed.
+  - `grep -n "FullAttentionPolicy\|BLASSTPolicy" nanovllm/kvcache/sparse/postrope.py` returned no matches.
+  - GPU1 smoke test on `4096` block size passed `1/1`.
+  - GPU1 full RULER gate (`niah_single_1`, samples `0..4`, offload, `POSTROPE`) passed **5/5**.
+- **Observed runtime after the independence refactor**:
+  - Total benchmark time `60.80s`.
+  - Prefill summary `select_blocks=2.406s`, `compute_chunked_prefill=17.801s`, `offload_prefill_chunk=4.853s`, prefill total `25.060s`.
+- **Observed density after the independence refactor**:
+  - Early historical windows still prune to `8 -> 6` (`75.0%`) or `8 -> 7` (`87.5%`).
+  - Later windows still often become fully persistent under the current `THETA=0.60`.
+- **Next Step**: Keep the fully independent `POSTROPE` structure and continue the next iteration by reducing late-window persistence while preserving the `5/5` gate on GPU1.
+- **Iteration 5 Result**: Eliminated the remaining external stage-2 helper dependency and evaluated `1024`-token physical KV chunks on GPU1.
+  - Inlined the stage-2 Triton wrapper directly into `nanovllm/kvcache/sparse/postrope.py`.
+  - Removed imports of `nanovllm.ops.blasst_chunked_prefill` and `nanovllm.ops.chunked_attention` helpers from `POSTROPE`.
+  - Added a stricter small-block persistence rule: keep `THETA=0.60` for `4096`-token KV chunks, but use `SMALL_BLOCK_THETA=0.45` when the physical KV chunk size is `<=1024`.
+- **Verification**:
+  - `grep -n "blasst_chunked_prefill\|flash_attn_with_lse_flashinfer\|merge_attention_outputs_flashinfer\|nanovllm.ops" nanovllm/kvcache/sparse/postrope.py` returned no matches.
+  - `python -m py_compile nanovllm/kvcache/sparse/postrope.py` passed.
+  - `python -m unittest tests.test_dense_prefill_policy -q` passed.
+  - GPU1 smoke test on `--block-size 4096` still passed `1/1`.
+  - GPU1 smoke test on `--block-size 1024` passed `1/1`.
+  - GPU1 5-sample RULER gate on `--block-size 1024` passed **5/5**.
+- **Observed runtime**:
+  - `1024`-block full gate total benchmark time: `118.71s`.
+  - Prefill summary: `select_blocks=9.893s`, `compute_chunked_prefill=57.116s`, `offload_prefill_chunk=6.340s`, prefill total `73.349s`.
+  - This is materially slower than the current validated `4096`-block path (`60.80s` total benchmark time).
+- **Observed communication savings with `1024` blocks**:
+  - Later windows no longer stay universally persistent; examples include `20 -> 18`, `25 -> 21`, `30 -> 25`, and some `32 -> 22/23` cases.
+  - Parsed over all logged layer-0 chunk selections in the 5-sample `1024` run:
+    - available chunks: `3440`
+    - selected chunks: `2963`
+    - skipped chunk communications: **`477` 1024-token chunks**
+    - selection density: `86.13%`
+  - Compared with the validated `4096` run:
+    - skipped chunk communications: `54` 4096-token chunks
+    - selection density: `85.79%`
+  - In token-equivalent terms, the `1024` experiment skips about **2.21×** more KV-token communication than the `4096` run (`488,448` vs `221,184` skipped-token equivalents).
+- **Conclusion**:
+  - `1024` physical KV chunks improve communication granularity and increase total skipped KV-token communication.
+  - But they are currently a net runtime loss, so this is an analysis/communication improvement rather than a throughput win.
+- **Next Step**: Preserve the fully self-contained `POSTROPE` implementation and decide whether to keep optimizing the `1024` path for communication studies or refocus on the faster `4096` path for end-to-end performance.
+- **Iteration 6 Result**: Added a paper-closer **Q-side persistent / fix-row** rule to `POSTROPE`'s stage-1 chunked-prefill adaptation while keeping decode dense.
+  - Added query-side self-cosine estimation at the same `ESTIMATE_CHUNK_SIZE=128` granularity.
+  - Folded query-side scalar metrics from Q heads into KV-head groups.
+  - If any pooled query group in a KV-head group falls below the active theta, that head now forces all historical blocks on for the current chunk.
+  - Kept the 1D selected-block interface because this implementation is targeting chunked prefill, not a full 2D `M_g[i,j]` runtime.
+  - Left decode unchanged, so decode remains dense/conservative.
+- **Verification**:
+  - `python -m py_compile nanovllm/kvcache/sparse/postrope.py` passed.
+  - `python -m unittest tests.test_dense_prefill_policy -q` passed.
+  - `grep -n "FullAttentionPolicy\|BLASSTPolicy\|nanovllm.ops" nanovllm/kvcache/sparse/postrope.py` returned no matches.
+  - GPU1 smoke test on the main `4096`-block path passed `1/1`.
+  - GPU1 full 5-sample RULER gate on the main `4096`-block path passed **5/5**.
+- **Observed runtime on the validated 4096 run**:
+  - total benchmark time `64.66s`
+  - prefill summary `select_blocks=5.738s`, `compute_chunked_prefill=18.125s`, `offload_prefill_chunk=4.900s`, prefill total `28.763s`
+- **Observed phase-1 behavior**:
+  - overall selected density stayed `326 / 380 = 85.79%`, identical to the prior validated 4096 run
+  - persistent K-block count stayed `140`
+  - the new Q-side path did not trigger on this five-sample gate:
+    - `q_persistent_groups_total = 0`
+    - `q_force_heads_total = 0`
+    - `q_force_keep_all_calls = 0`
+- **Conclusion**:
+  - the requested Q-side fix-row logic is now implemented in the chunked-prefill adaptation
+  - correctness is preserved on the GPU1 5-sample gate
+  - these validation samples did not exercise the new rule, so phase-1 density stayed unchanged
+  - the added Q-side self-cos computation increased stage-1 overhead materially, so a cheaper estimator may be needed if this path is kept enabled
+- **Next Step**: Decide whether to keep the paper-closer Q-side logic always on, gate it behind a cheaper trigger, or search for samples / datasets that actually activate it before optimizing the added overhead.
+- **Iteration 7 Result**: Cross-checked the local official SpargeAttn repo and tightened the Q/K fix-block semantics to match it more closely.
+  - In `SpargeAttn/spas_sage_attn/utils.py`, official stage 1 computes boolean `sim_qblocks` / `sim_kblocks` first and then applies fix rows/columns with `final_map[~sim_qblocks] = 1` and `final_map[~sim_kblocks] = 1`.
+  - Updated `POSTROPE` so query-side self-cos is thresholded per Q head first and then folded to KV-head groups via logical OR, instead of averaging scalar self-cos values before thresholding.
+  - Updated K-side persistence similarly: a parent KV chunk is now persistent if **any** KV head in that chunk is low-self-sim, which is closer to the official block-map semantics than mean-thresholding across KV heads.
+- **Verification**:
+  - `python -m py_compile nanovllm/kvcache/sparse/postrope.py` passed.
+  - `python -m unittest tests.test_dense_prefill_policy -q` passed.
+  - GPU1 smoke test on the main `4096`-block path passed `1/1`.
+  - GPU1 full 5-sample RULER gate on the main `4096`-block path passed **5/5**.
+- **Observed runtime on the validated 4096 run**:
+  - total benchmark time `64.40s`
+  - prefill summary `select_blocks=5.452s`, `compute_chunked_prefill=18.524s`, `offload_prefill_chunk=4.761s`, prefill total `28.737s`
+- **Observed phase-1 behavior after the repo-closer boolean semantics**:
+  - overall phase-1 density increased to `350 / 380 = 92.11%`
+  - persistent K-block total stayed `140`
+  - the Q-side path now activates heavily on the validated samples:
+    - `q_persistent_groups_total = 2910`
+    - `q_force_heads_total = 95`
+    - `q_force_keep_all_calls = 65`
+  - practical effect: under the current 1D chunked-prefill interface, any activated Q-side fix-row head often forces all historical blocks to stay selected, so several windows move from `8 -> 6` to `8 -> 7`.
+- **Conclusion**:
+  - the new behavior is more faithful to the official SpargeAttn code's threshold-before-grouping semantics
+  - but that faithfulness is expensive under the current 1D selected-block interface, materially reducing stage-1 sparsity
+  - correctness remains intact, but the remaining design problem is now how to preserve Q-side fix-row semantics without letting the 1D interface collapse the intended sparsity benefit
+- **Next Step**: Decide whether to keep the repo-closer boolean semantics as the default, introduce a chunked-prefill-specific relaxation for Q-side fix rows, or gate the Q-side rule so it only escalates to full historical retention when a smaller trigger criterion is met.
+- **Documentation Update**: Recorded the current Sparge-style `POSTROPE` design and validation workflow under `docs/`.
+  - Added `docs/postrope_sparge_chunked_prefill_design.md` covering: current design constraints, stage-1 / stage-2 flow, official SpargeAttn repo alignment, dense decode rule, validated RULER commands, and current measured results.
+  - Updated `docs/test_ruler_usage_guide.md` with the canonical GPU1 `POSTROPE` smoke / 5-sample / 1024-experiment commands.
+  - Added a historical-scope note to `docs/rope_policy_design.md` so readers are redirected to the new current-design document.
+  - Synced the new docs entry into `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` per the doc-sync rule.
+
 ## 2026-04-10: Feynman Development Environment Setup
 - **Action**: Initialized Feynman's native AI development environment for `nano-vllm`.
 - **Details**: 

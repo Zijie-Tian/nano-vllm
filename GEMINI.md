@@ -145,6 +145,7 @@ The architecture consists of 4 core modules:
 | [`docs/architecture_guide.md`](docs/architecture_guide.md) | Core components, CPU offload design, ring buffer. |
 | [`docs/sparse_policy_architecture.md`](docs/sparse_policy_architecture.md) | SparsePolicy abstraction and pipeline modes. |
 | [`docs/rope_policy_design.md`](docs/rope_policy_design.md) | PREROPE / POSTROPE semantic design: RoPE placement, KV-cache persistence, and stream-sync rules. |
+| [`docs/postrope_sparge_chunked_prefill_design.md`](docs/postrope_sparge_chunked_prefill_design.md) | Current Sparge-style POSTROPE design: independent policy structure, Q/K fix-block adaptation, dense decode, and validated RULER commands/results. |
 | [`docs/sparse_attention_guide.md`](docs/sparse_attention_guide.md) | Block sparse attention methods (XAttention, MInference, etc.). |
 | [`docs/sparse_attention_blasst.md`](docs/sparse_attention_blasst.md) | BLASST sparse attention: dynamic pruning, online softmax thresholding. |
 | [`docs/blasst_performance_analysis.md`](docs/blasst_performance_analysis.md) | Performance report for BLASST: λ vs density, accuracy stability. |

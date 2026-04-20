@@ -1,5 +1,7 @@
 # RoPE Semantic Policy Design
 
+> **Historical-scope note (2026-04-19):** this document explains the original PREROPE / POSTROPE semantic split and its alignment invariants. The **current Sparge-style sparse `POSTROPE` chunked-prefill implementation** is documented separately in [`docs/postrope_sparge_chunked_prefill_design.md`](postrope_sparge_chunked_prefill_design.md).
+
 This document explains the design and invariants of the explicit `PREROPE` and `POSTROPE` policies.
 
 ## Why these policies exist

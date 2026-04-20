@@ -278,6 +278,68 @@ CUDA_VISIBLE_DEVICES=0 PYTHONPATH=/mnt/data/tzj/Code/nano-vllm:$PYTHONPATH \
 - [`docs/ruler_rope_policy_alignment.md`](docs/ruler_rope_policy_alignment.md)
 - [`docs/rope_policy_design.md`](docs/rope_policy_design.md)
 
+### 11. 当前 Sparge-style POSTROPE 主线验证命令（GPU1, 2026-04-19）
+
+以下命令对应当前的 `POSTROPE` 设计主线：
+
+- `POSTROPE` 保持公开策略名不变
+- 稀疏化仅用于 chunked prefill
+- decode 保持 dense
+- 无 quantization-specific 逻辑
+- 主线物理 KV block size 为 `4096`
+
+#### Smoke（1 sample）
+
+```bash
+CUDA_VISIBLE_DEVICES=1 PYTHONPATH=/mnt/data/tzj/Code/nano-vllm:$PYTHONPATH \
+    python tests/test_ruler.py \
+    --model /mnt/data/tzj/models/Llama-3.1-8B-Instruct \
+    --data-dir tests/data/ruler_32k \
+    --datasets niah_single_1 \
+    --sample-indices 0 \
+    --max-model-len 40960 \
+    --enable-offload \
+    --sparse-policy POSTROPE \
+    --quiet --json-output
+```
+
+#### 5-sample gate（推荐）
+
+```bash
+CUDA_VISIBLE_DEVICES=1 PYTHONPATH=/mnt/data/tzj/Code/nano-vllm:$PYTHONPATH \
+    python tests/test_ruler.py \
+    --model /mnt/data/tzj/models/Llama-3.1-8B-Instruct \
+    --data-dir tests/data/ruler_32k \
+    --datasets niah_single_1 \
+    --sample-indices 0,1,2,3,4 \
+    --max-model-len 40960 \
+    --enable-offload \
+    --sparse-policy POSTROPE \
+    --quiet --json-output
+```
+
+#### 1024-block 通信实验（可选，非主线）
+
+```bash
+CUDA_VISIBLE_DEVICES=1 PYTHONPATH=/mnt/data/tzj/Code/nano-vllm:$PYTHONPATH \
+    python tests/test_ruler.py \
+    --model /mnt/data/tzj/models/Llama-3.1-8B-Instruct \
+    --data-dir tests/data/ruler_32k \
+    --datasets niah_single_1 \
+    --sample-indices 0,1,2,3,4 \
+    --max-model-len 40960 \
+    --enable-offload \
+    --sparse-policy POSTROPE \
+    --block-size 1024 \
+    --quiet --json-output
+```
+
+**说明**：
+- `4096` 是当前推荐主线，端到端性能更好。
+- `1024` 可用于更细粒度的 phase-1 通信分析，但当前总耗时更差。
+- 当前 `POSTROPE` 设计与官方 SpargeAttn 仓库的对照、Q-side / K-side fix-block 适配方式、以及最新验证结果，详见：
+  - [`docs/postrope_sparge_chunked_prefill_design.md`](postrope_sparge_chunked_prefill_design.md)
+
 ---
 
 ## 数据目录结构

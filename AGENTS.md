@@ -13,6 +13,7 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 | [`docs/architecture_guide.md`](docs/architecture_guide.md) | Core components, CPU offload system design, ring buffer architecture, stream configuration |
 | [`docs/sparse_policy_architecture.md`](docs/sparse_policy_architecture.md) | SparsePolicy abstraction: prefill/decode delegation, pipeline modes, policy implementations |
 | [`docs/rope_policy_design.md`](docs/rope_policy_design.md) | PREROPE / POSTROPE 语义设计：RoPE 放置位置、KV cache/offload 语义、以及与 FULL 对齐所需的同步约束。 |
+| [`docs/postrope_sparge_chunked_prefill_design.md`](docs/postrope_sparge_chunked_prefill_design.md) | 当前 Sparge-style POSTROPE 设计：独立 policy、Q/K fix-block 适配、dense decode、RULER 主线命令与验证结果。 |
 | [`docs/sparse_policy_implementation_guide.md`](docs/sparse_policy_implementation_guide.md) | How to implement custom SparsePolicy: required methods, hooks, ring buffer pipeline pattern |
 | [`docs/sparse_attention_guide.md`](docs/sparse_attention_guide.md) | Block sparse attention methods (XAttention, FlexPrefill, MInference, AvgPool, Quest), computation flow, algorithms |
 | [`docs/xattention_algorithm_guide.md`](docs/xattention_algorithm_guide.md) | XAttention 算法详解: stride reshape、Triton kernels、BSA 依赖、块选择算法 |
