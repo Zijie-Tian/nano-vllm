@@ -69,6 +69,7 @@ COMPASS_LAMBDA=${COMPASS_LAMBDA:-""}
 COMPASS_THETA=${COMPASS_THETA:-""}
 TASK_OVERRIDE=""
 NUM_SAMPLES_OVERRIDE=""
+SEQ_LENGTHS_OVERRIDE=""
 
 shift 2 # Remove MODEL_NAME and BENCHMARK
 while [[ $# -gt 0 ]]; do
@@ -113,6 +114,10 @@ while [[ $# -gt 0 ]]; do
             NUM_SAMPLES_OVERRIDE="$2"
             shift 2
             ;;
+        --seq_len|--seq_lengths)
+            SEQ_LENGTHS_OVERRIDE="$2"
+            shift 2
+            ;;
         --task)
             TASK_OVERRIDE="$2"
             shift 2
@@ -134,6 +139,12 @@ fi
 if [ -n "${NUM_SAMPLES_OVERRIDE}" ]; then
     NUM_SAMPLES="${NUM_SAMPLES_OVERRIDE}"
     echo "Num samples override: ${NUM_SAMPLES}"
+fi
+
+# Override SEQ_LENGTHS if --seq_len / --seq_lengths is specified
+if [ -n "${SEQ_LENGTHS_OVERRIDE}" ]; then
+    IFS=',' read -ra SEQ_LENGTHS <<< "${SEQ_LENGTHS_OVERRIDE}"
+    echo "Sequence lengths override: ${SEQ_LENGTHS[*]}"
 fi
 
 # Start server (you may want to run in other container.)
@@ -201,7 +212,7 @@ for MAX_SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
         if [[ -n ${COMPASS_THETA} ]]; then
             SETTINGS_INFO+="theta${COMPASS_THETA##* }_"
         fi
-    else
+    elif [[ "${METRIC_NAME}" == "xattn" ]]; then
         # For xattn (nanovllm or other backends), include stride in folder name
         if [[ -n ${STRIDE} ]]; then
             SETTINGS_INFO+="stride${STRIDE##* }_"

@@ -5,11 +5,14 @@
 # Examples:
 #   ./scripts/run_ruler.sh llama3.1-8b-nanovllm synthetic xattn --stride 8
 #   ./scripts/run_ruler.sh llama3.1-8b-nanovllm synthetic xattn --stride 16 --task niah_single_1
+#   GPULIST=0,1,2,3,4,5 ./scripts/run_ruler.sh llama3.1-8b-nanovllm synthetic postrope --seq_len 32768 --num_samples 1 --task niah_single_1,niah_single_2,niah_single_3,niah_multikey_1,niah_multikey_2,niah_multikey_3,niah_multivalue,niah_multiquery
 #   CUDA_VISIBLE_DEVICES=0 ./scripts/run_ruler.sh llama3.1-8b-nanovllm synthetic xattn --stride 8
 #
 # Options:
 #   --stride N     Set XAttention stride (for nanovllm xattn)
 #   --task TASK    Run specific task(s) only
+#   --num_samples N  Override sample count for debug runs
+#   --seq_len N    Override RULER context length(s); accepts a single value or comma-separated list
 #   --threshold N  Set XAttention threshold
 #   --compass_topp N    Set COMPASS top-p threshold
 #   --compass_lambda N  Set COMPASS lambda threshold
@@ -31,7 +34,7 @@ set -e
 # Model settings
 MODEL_NAME="${1:-llama3.1-8b-chat}"
 BENCHMARK="${2:-synthetic}"
-METRIC="${3:-full}"  # Options: full, xattn, avgpool, compass, minfer, flex, blasst
+METRIC="${3:-full}"  # Options: full, postrope, xattn, avgpool, compass, minfer, flex, blasst
 
 # Parse additional arguments (--task)
 EXTRA_ARGS=""

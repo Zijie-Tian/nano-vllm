@@ -225,6 +225,7 @@ def get_llm(tokens_to_generate):
         # Note: nanovllm uses XATTN_BSA (not XATTN) for XAttention Block Sparse Attention
         metric_to_policy = {
             'full': 'FULL',
+            'postrope': 'POSTROPE',    # Explicit post-RoPE baseline policy
             'xattn': 'XATTN_BSA',      # XAttention Block Sparse Attention
             'compass': 'COMPASS',      # COMPASS sparse attention
             'blasst': 'BLASST',        # BLASST sparse attention

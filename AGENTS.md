@@ -22,6 +22,7 @@
 | Q head regrouping 方案 | `docs/04_q_head_regrouping.md` | Solution 4 方案设计与可行性结论 | 评估 dense head 重分组方案时 |
 | KV hidden-dim reorder 方案 | `docs/05_kv_dim_reorder.md` | Solution 5 方案设计与可行性结论 | 评估 KV 维度重排方案时 |
 | BLASST RULER 集成指南 | `docs/BLASST_RULER_INTEGRATION.md` | BLASST 在 RULER benchmark 中的运行与配置说明 | 使用或调试 BLASST metric 时 |
+| POSTROPE RULER 集成指南 | `docs/POSTROPE_RULER_INTEGRATION.md` | POSTROPE 在 RULER benchmark 中的运行、配置方式与已验证命令 | 使用或调试 POSTROPE metric 时 |
 | LongBench Benchmark 指南 | `docs/LONG_BENCH_BENCHMARK_GUIDE.md` | LongBench 命令入口、模型别名、子集 preset 与输出规则 | 配置或运行 `run_longbench.sh` / `eval/LongBench/scripts/run.sh` 时 |
 | TriAttention Calibration 指南 | `docs/TRIATTENTION_CALIBRATION_GUIDE.md` | 解释 `scripts/calibrate_triattention.py` 的统计对象、公式、离线校准意义与使用方式 | 理解或使用 TriAttention stats 标定时 |
 | TriAttention 复现指南 | `docs/TRIATTENTION_REPRODUCTION_GUIDE.md` | 解释当前工程内 TriAttention 的复现逻辑、LongBench 接入方式，以及 standard 对照脚本如何使用 | 对比当前实现与 standard 实现、或复现实验时 |
@@ -102,6 +103,7 @@ bash run.sh llama3.1-8b-chat synthetic --metric full
 | Metric | Description |
 |--------|-------------|
 | `full` | Full attention (baseline) |
+| `postrope` | Explicit post-RoPE baseline policy |
 | `xattn` | X-attention sparse |
 | `xattn_chunked` | X-attention (chunked prefill) |
 | `avgpool` | Average pooling sparse |

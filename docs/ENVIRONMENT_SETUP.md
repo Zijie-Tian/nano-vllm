@@ -136,6 +136,9 @@ bash run.sh llama3.1-8b-chat synthetic --metric full
 # 测试 xattn (X-attention)
 bash run.sh llama3.1-8b-chat synthetic --metric xattn
 
+# 测试 postrope (NanoVLLM POSTROPE policy)
+./scripts/run_ruler.sh llama3.1-8b-nanovllm synthetic postrope
+
 # 指定特定任务
 bash run.sh llama3.1-8b-chat synthetic --metric full --task niah_single_1
 
@@ -148,6 +151,7 @@ bash run.sh llama3.1-8b-chat synthetic --metric full --task niah_single_1,niah_s
 | Metric | 描述 |
 |--------|------|
 | `full` | 完整 attention (基准) |
+| `postrope` | 显式 post-RoPE baseline policy |
 | `xattn` | X-attention 优化 |
 | `avgpool` | 平均池化稀疏 |
 | `minfer` | Minference 优化 |
@@ -183,6 +187,10 @@ synthetic=(
 ### config_models.sh
 
 配置模型路径和参数，包含 `llama3.1-8b-chat` 等模型定义。
+
+POSTROPE 的详细运行方式、配置驱动 workflow、以及已验证命令见：
+
+- [`docs/POSTROPE_RULER_INTEGRATION.md`](POSTROPE_RULER_INTEGRATION.md)
 
 ## 常见问题
 
