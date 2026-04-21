@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import torch
@@ -235,6 +236,312 @@ def _postrope_stage2_chunked_prefill_fwd_kernel(
     tl.store(mgout_ptrs, m_global, mask=(offs_m < N_CTX_Q))
 
 
+@triton.jit
+def _postrope_stage2_pass1_kernel(
+    Q,
+    K,
+    sm_scale,
+    threshold_ln_lambda,
+    Lse,
+    MglobalIn,
+    MglobalOut,
+    Mask,
+    stride_qz,
+    stride_qh,
+    stride_qm,
+    stride_qk,
+    stride_kz,
+    stride_kh,
+    stride_kn,
+    stride_kk,
+    stride_lsez,
+    stride_lseh,
+    stride_lsem,
+    stride_mgin_z,
+    stride_mgin_h,
+    stride_mgin_m,
+    stride_mgout_z,
+    stride_mgout_h,
+    stride_mgout_m,
+    stride_mask_g0,
+    stride_mask_g1,
+    stride_mask_b,
+    Z,
+    H,
+    H_KV,
+    N_CTX_Q,
+    N_CTX_K,
+    KV_OFFSET,
+    HEAD_DIM,
+    HAS_MGLOBAL_IN: tl.constexpr,
+    IS_CAUSAL: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+):
+    pid_m = tl.program_id(0).to(tl.int64)
+    off_hz = tl.program_id(1).to(tl.int64)
+
+    h_i64 = H
+    off_z = off_hz // h_i64
+    off_h = off_hz % h_i64
+    h_kv_i64 = H_KV
+    off_h_kv = off_h // (h_i64 // h_kv_i64)
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = tl.arange(0, BLOCK_N)
+    offs_d = tl.arange(0, BLOCK_DMODEL)
+
+    offs_m_i64 = offs_m.to(tl.int64)
+    offs_n_i64 = offs_n.to(tl.int64)
+    offs_d_i64 = offs_d.to(tl.int64)
+
+    q_mask = offs_m[:, None] < N_CTX_Q
+    if IS_CAUSAL:
+        q_global_pos = KV_OFFSET + offs_m
+
+    if HAS_MGLOBAL_IN:
+        mgin_ptrs = (
+            MglobalIn
+            + off_z * stride_mgin_z
+            + off_h * stride_mgin_h
+            + offs_m_i64 * stride_mgin_m
+        )
+        m_global = tl.load(mgin_ptrs, mask=(offs_m < N_CTX_Q), other=-float("inf"))
+    else:
+        m_global = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
+
+    m_chunk = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
+    l_chunk = tl.zeros([BLOCK_M], dtype=tl.float32)
+
+    block_idx = 0
+    for start_n in range(0, N_CTX_K, BLOCK_N):
+        do_compute = 1
+        if IS_CAUSAL:
+            kv_block_start = KV_OFFSET + start_n
+            q_block_max = KV_OFFSET + pid_m * BLOCK_M + BLOCK_M - 1
+            if kv_block_start > q_block_max:
+                do_compute = 0
+
+        if do_compute == 1:
+            qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+            k_mask_1d = (offs_n + start_n) < N_CTX_K
+
+            for d_start in range(0, HEAD_DIM, BLOCK_DMODEL):
+                d_start_i64 = tl.full([1], d_start, dtype=tl.int64)
+                q_ptrs = (
+                    Q
+                    + off_z * stride_qz
+                    + off_h * stride_qh
+                    + (
+                        offs_m_i64[:, None] * stride_qm
+                        + (offs_d_i64[None, :] + d_start_i64) * stride_qk
+                    )
+                )
+                k_ptrs = (
+                    K
+                    + off_z * stride_kz
+                    + off_h_kv * stride_kh
+                    + (
+                        (offs_n_i64[:, None] + start_n) * stride_kn
+                        + (offs_d_i64[None, :] + d_start_i64) * stride_kk
+                    )
+                )
+
+                d_mask = (offs_d + d_start) < HEAD_DIM
+                q = tl.load(q_ptrs, mask=q_mask & d_mask[None, :], other=0.0)
+                k = tl.load(k_ptrs, mask=k_mask_1d[:, None] & d_mask[None, :], other=0.0)
+                qk += tl.dot(q, tl.trans(k))
+
+            qk *= sm_scale
+            valid_mask = q_mask & k_mask_1d[None, :]
+            if IS_CAUSAL:
+                kv_global_pos = KV_OFFSET + start_n + offs_n
+                causal_mask = q_global_pos[:, None] >= kv_global_pos[None, :]
+                valid_mask = valid_mask & causal_mask
+
+            qk = tl.where(valid_mask, qk, float("-inf"))
+            m_local = tl.max(qk, axis=1)
+
+            diff = m_local - m_global
+            max_diff = tl.max(diff, axis=0)
+            m_global = tl.maximum(m_global, m_local)
+
+            if max_diff < threshold_ln_lambda:
+                do_compute = 0
+            else:
+                m_chunk_new = tl.maximum(m_chunk, m_local)
+                p = tl.math.exp2((qk - m_chunk_new[:, None]) * 1.44269504)
+                scale_factor = tl.math.exp2((m_chunk - m_chunk_new) * 1.44269504)
+                l_chunk = l_chunk * scale_factor + tl.sum(p, axis=1)
+                m_chunk = m_chunk_new
+
+        tl.store(
+            Mask + pid_m * stride_mask_g0 + off_hz * stride_mask_g1 + block_idx * stride_mask_b,
+            tl.cast(do_compute, tl.int8),
+        )
+        block_idx += 1
+
+    l_chunk_safe = tl.where(l_chunk > 0.0, l_chunk, 1.0)
+    lse_chunk = tl.where(
+        l_chunk > 0.0,
+        m_chunk + tl.math.log2(l_chunk_safe) * 0.69314718,
+        -float("inf"),
+    )
+
+    lse_ptrs = Lse + off_z * stride_lsez + off_h * stride_lseh + offs_m_i64 * stride_lsem
+    tl.store(lse_ptrs, lse_chunk, mask=(offs_m < N_CTX_Q))
+
+    mgout_ptrs = (
+        MglobalOut
+        + off_z * stride_mgout_z
+        + off_h * stride_mgout_h
+        + offs_m_i64 * stride_mgout_m
+    )
+    tl.store(mgout_ptrs, m_global, mask=(offs_m < N_CTX_Q))
+
+
+@triton.jit
+def _postrope_stage2_pass2_kernel(
+    Q,
+    K,
+    V,
+    Lse,
+    Mask,
+    Out,
+    sm_scale,
+    stride_qz,
+    stride_qh,
+    stride_qm,
+    stride_qk,
+    stride_kz,
+    stride_kh,
+    stride_kn,
+    stride_kk,
+    stride_vz,
+    stride_vh,
+    stride_vn,
+    stride_vk,
+    stride_lsez,
+    stride_lseh,
+    stride_lsem,
+    stride_oz,
+    stride_oh,
+    stride_om,
+    stride_ok,
+    stride_mask_g0,
+    stride_mask_g1,
+    stride_mask_b,
+    Z,
+    H,
+    H_KV,
+    N_CTX_Q,
+    N_CTX_K,
+    KV_OFFSET,
+    HEAD_DIM,
+    IS_CAUSAL: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+    BLOCK_OUT: tl.constexpr,
+):
+    pid_m = tl.program_id(0).to(tl.int64)
+    off_hz = tl.program_id(1).to(tl.int64)
+    pid_do = tl.program_id(2).to(tl.int64)
+
+    h_i64 = H
+    off_z = off_hz // h_i64
+    off_h = off_hz % h_i64
+    h_kv_i64 = H_KV
+    off_h_kv = off_h // (h_i64 // h_kv_i64)
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = tl.arange(0, BLOCK_N)
+    offs_d = tl.arange(0, BLOCK_DMODEL)
+    offs_do = pid_do * BLOCK_OUT + tl.arange(0, BLOCK_OUT)
+
+    offs_m_i64 = offs_m.to(tl.int64)
+    offs_n_i64 = offs_n.to(tl.int64)
+    offs_d_i64 = offs_d.to(tl.int64)
+    offs_do_i64 = offs_do.to(tl.int64)
+
+    q_mask = offs_m[:, None] < N_CTX_Q
+    if IS_CAUSAL:
+        q_global_pos = KV_OFFSET + offs_m
+
+    lse_ptrs = Lse + off_z * stride_lsez + off_h * stride_lseh + offs_m_i64 * stride_lsem
+    lse_row = tl.load(lse_ptrs, mask=(offs_m < N_CTX_Q), other=-float("inf"))
+    acc = tl.zeros([BLOCK_M, BLOCK_OUT], dtype=tl.float32)
+
+    block_idx = 0
+    for start_n in range(0, N_CTX_K, BLOCK_N):
+        do_compute = tl.load(
+            Mask + pid_m * stride_mask_g0 + off_hz * stride_mask_g1 + block_idx * stride_mask_b
+        )
+        if do_compute != 0:
+            qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+            k_mask_1d = (offs_n + start_n) < N_CTX_K
+
+            for d_start in range(0, HEAD_DIM, BLOCK_DMODEL):
+                d_start_i64 = tl.full([1], d_start, dtype=tl.int64)
+                q_ptrs = (
+                    Q
+                    + off_z * stride_qz
+                    + off_h * stride_qh
+                    + (
+                        offs_m_i64[:, None] * stride_qm
+                        + (offs_d_i64[None, :] + d_start_i64) * stride_qk
+                    )
+                )
+                k_ptrs = (
+                    K
+                    + off_z * stride_kz
+                    + off_h_kv * stride_kh
+                    + (
+                        (offs_n_i64[:, None] + start_n) * stride_kn
+                        + (offs_d_i64[None, :] + d_start_i64) * stride_kk
+                    )
+                )
+
+                d_mask = (offs_d + d_start) < HEAD_DIM
+                q = tl.load(q_ptrs, mask=q_mask & d_mask[None, :], other=0.0)
+                k = tl.load(k_ptrs, mask=k_mask_1d[:, None] & d_mask[None, :], other=0.0)
+                qk += tl.dot(q, tl.trans(k))
+
+            qk *= sm_scale
+            valid_mask = q_mask & k_mask_1d[None, :]
+            if IS_CAUSAL:
+                kv_global_pos = KV_OFFSET + start_n + offs_n
+                causal_mask = q_global_pos[:, None] >= kv_global_pos[None, :]
+                valid_mask = valid_mask & causal_mask
+
+            qk = tl.where(valid_mask, qk, float("-inf"))
+            p = tl.math.exp2((qk - lse_row[:, None]) * 1.44269504)
+
+            v_ptrs = (
+                V
+                + off_z * stride_vz
+                + off_h_kv * stride_vh
+                + (
+                    (offs_n_i64[:, None] + start_n) * stride_vn
+                    + offs_do_i64[None, :] * stride_vk
+                )
+            )
+            do_mask = offs_do < HEAD_DIM
+            v = tl.load(v_ptrs, mask=k_mask_1d[:, None] & do_mask[None, :], other=0.0)
+            acc += tl.dot(p.to(v.dtype), v)
+
+        block_idx += 1
+
+    out_ptrs = (
+        Out
+        + off_z * stride_oz
+        + off_h * stride_oh
+        + (offs_m_i64[:, None] * stride_om + offs_do_i64[None, :] * stride_ok)
+    )
+    tl.store(out_ptrs, acc.to(Out.dtype.element_ty), mask=q_mask & (offs_do[None, :] < HEAD_DIM))
+
+
 def _postrope_flash_attn_with_lse(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -280,6 +587,27 @@ def _postrope_merge_attention_outputs(
     return o_merged, lse_merged.to(dtype=lse1.dtype)
 
 
+def _postrope_merge_attention_outputs_inplace(
+    o_acc: torch.Tensor,
+    lse_acc: torch.Tensor,
+    o_new: torch.Tensor,
+    lse_new: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    lse_acc_f = lse_acc.float()
+    lse_new_f = lse_new.float()
+    max_lse = torch.maximum(lse_acc_f, lse_new_f)
+    exp1 = torch.exp(lse_acc_f - max_lse)
+    exp2 = torch.exp(lse_new_f - max_lse)
+    denom = (exp1 + exp2).clamp_min_(1e-20)
+    lse_merged = max_lse + torch.log(denom)
+
+    w1 = (exp1 / denom).transpose(1, 2).unsqueeze(-1).to(dtype=o_acc.dtype)
+    w2 = (exp2 / denom).transpose(1, 2).unsqueeze(-1).to(dtype=o_acc.dtype)
+    o_acc.mul_(w1)
+    o_acc.add_(o_new * w2)
+    lse_acc.copy_(lse_merged.to(dtype=lse_acc.dtype))
+    return o_acc, lse_acc
+
 def _postrope_stage2_chunked_prefill(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -291,14 +619,20 @@ def _postrope_stage2_chunked_prefill(
     kv_offset: int = 0,
 ):
     assert q.is_cuda and k.is_cuda and v.is_cuda
-    batch, num_heads, q_len, head_dim = q.shape
-    _, num_kv_heads, kv_len, _ = k.shape
+    batch, q_len, num_heads, head_dim = q.shape
+    _, kv_len, num_kv_heads, _ = k.shape
 
+    two_pass = os.environ.get("POSTROPE_STAGE2_TWO_PASS", "0") == "1"
     out = torch.empty_like(q)
     lse = torch.empty((batch, num_heads, q_len), device=q.device, dtype=torch.float32)
     m_global_out = torch.empty((batch, num_heads, q_len), device=q.device, dtype=torch.float32)
 
-    block_m, block_n = 128, 64
+    block_m = int(os.environ.get("POSTROPE_STAGE2_BLOCK_M", "128"))
+    block_n = int(os.environ.get("POSTROPE_STAGE2_BLOCK_N", "64"))
+    num_warps = int(os.environ.get("POSTROPE_STAGE2_NUM_WARPS", "8"))
+    num_stages = int(os.environ.get("POSTROPE_STAGE2_NUM_STAGES", "2"))
+    maxnreg_env = os.environ.get("POSTROPE_STAGE2_MAXNREG")
+    maxnreg = int(maxnreg_env) if maxnreg_env else None
     grid = (triton.cdiv(q_len, block_m), batch * num_heads)
     sm_scale = 1.0 / (head_dim**0.5)
 
@@ -310,60 +644,163 @@ def _postrope_stage2_chunked_prefill(
     mask_tensor = mask_buffer if has_mask else lse
     mask_strides = mask_tensor.stride()
 
-    _postrope_stage2_chunked_prefill_fwd_kernel[grid](
-        q,
-        k,
-        v,
-        sm_scale,
-        threshold_ln_lambda,
-        out,
-        lse,
-        mgin,
-        m_global_out,
-        mask_tensor,
-        q.stride(0),
-        q.stride(1),
-        q.stride(2),
-        q.stride(3),
-        k.stride(0),
-        k.stride(1),
-        k.stride(2),
-        k.stride(3),
-        v.stride(0),
-        v.stride(1),
-        v.stride(2),
-        v.stride(3),
-        out.stride(0),
-        out.stride(1),
-        out.stride(2),
-        out.stride(3),
-        lse.stride(0),
-        lse.stride(1),
-        lse.stride(2),
-        mgin_strides[0],
-        mgin_strides[1],
-        mgin_strides[2],
-        m_global_out.stride(0),
-        m_global_out.stride(1),
-        m_global_out.stride(2),
-        mask_strides[0],
-        mask_strides[1],
-        mask_strides[2],
-        batch,
-        num_heads,
-        num_kv_heads,
-        q_len,
-        kv_len,
-        kv_offset,
-        has_mglobal_in,
-        has_mask,
-        is_causal,
-        BLOCK_M=block_m,
-        BLOCK_DMODEL=head_dim,
-        BLOCK_N=block_n,
-        num_warps=8,
-        num_stages=2,
-    )
+    if two_pass:
+        if not has_mask:
+            num_sub = triton.cdiv(kv_len, block_n)
+            mask_tensor = torch.empty(
+                (grid[0], grid[1], num_sub), device=q.device, dtype=torch.int8
+            )
+            mask_strides = mask_tensor.stride()
+
+        _postrope_stage2_pass1_kernel[grid](
+            q,
+            k,
+            sm_scale,
+            threshold_ln_lambda,
+            lse,
+            mgin,
+            m_global_out,
+            mask_tensor,
+            q.stride(0),
+            q.stride(2),
+            q.stride(1),
+            q.stride(3),
+            k.stride(0),
+            k.stride(2),
+            k.stride(1),
+            k.stride(3),
+            lse.stride(0),
+            lse.stride(1),
+            lse.stride(2),
+            mgin_strides[0],
+            mgin_strides[1],
+            mgin_strides[2],
+            m_global_out.stride(0),
+            m_global_out.stride(1),
+            m_global_out.stride(2),
+            mask_strides[0],
+            mask_strides[1],
+            mask_strides[2],
+            batch,
+            num_heads,
+            num_kv_heads,
+            q_len,
+            kv_len,
+            kv_offset,
+            head_dim,
+            has_mglobal_in,
+            is_causal,
+            BLOCK_M=block_m,
+            BLOCK_N=block_n,
+            BLOCK_DMODEL=64,
+            num_warps=num_warps,
+            num_stages=num_stages,
+            maxnreg=maxnreg,
+        )
+
+        grid2 = (grid[0], grid[1], triton.cdiv(head_dim, 64))
+        _postrope_stage2_pass2_kernel[grid2](
+            q,
+            k,
+            v,
+            lse,
+            mask_tensor,
+            out,
+            sm_scale,
+            q.stride(0),
+            q.stride(2),
+            q.stride(1),
+            q.stride(3),
+            k.stride(0),
+            k.stride(2),
+            k.stride(1),
+            k.stride(3),
+            v.stride(0),
+            v.stride(2),
+            v.stride(1),
+            v.stride(3),
+            lse.stride(0),
+            lse.stride(1),
+            lse.stride(2),
+            out.stride(0),
+            out.stride(2),
+            out.stride(1),
+            out.stride(3),
+            mask_strides[0],
+            mask_strides[1],
+            mask_strides[2],
+            batch,
+            num_heads,
+            num_kv_heads,
+            q_len,
+            kv_len,
+            kv_offset,
+            head_dim,
+            is_causal,
+            BLOCK_M=block_m,
+            BLOCK_N=block_n,
+            BLOCK_DMODEL=64,
+            BLOCK_OUT=64,
+            num_warps=num_warps,
+            num_stages=num_stages,
+            maxnreg=maxnreg,
+        )
+    else:
+        _postrope_stage2_chunked_prefill_fwd_kernel[grid](
+            q,
+            k,
+            v,
+            sm_scale,
+            threshold_ln_lambda,
+            out,
+            lse,
+            mgin,
+            m_global_out,
+            mask_tensor,
+            q.stride(0),
+            q.stride(2),
+            q.stride(1),
+            q.stride(3),
+            k.stride(0),
+            k.stride(2),
+            k.stride(1),
+            k.stride(3),
+            v.stride(0),
+            v.stride(2),
+            v.stride(1),
+            v.stride(3),
+            out.stride(0),
+            out.stride(2),
+            out.stride(1),
+            out.stride(3),
+            lse.stride(0),
+            lse.stride(1),
+            lse.stride(2),
+            mgin_strides[0],
+            mgin_strides[1],
+            mgin_strides[2],
+            m_global_out.stride(0),
+            m_global_out.stride(1),
+            m_global_out.stride(2),
+            mask_strides[0],
+            mask_strides[1],
+            mask_strides[2],
+            batch,
+            num_heads,
+            num_kv_heads,
+            q_len,
+            kv_len,
+            kv_offset,
+            has_mglobal_in,
+            has_mask,
+            is_causal,
+            BLOCK_M=block_m,
+            BLOCK_DMODEL=head_dim,
+            BLOCK_N=block_n,
+            num_warps=num_warps,
+            num_stages=num_stages,
+            maxnreg=maxnreg,
+        )
 
     return out, lse, m_global_out
 
@@ -398,7 +835,7 @@ class PostRoPEPolicy(SparsePolicy):
         self._num_layers = 0
         self._kvcache_block_size = 4096
 
-        # layer_id -> {cpu_block_id -> (pooled_k [G_k, H_kv, D], self_cos [G_k, H_kv])}
+        # layer_id -> {cpu_block_id -> (pooled_k_chunk [H_kv, D], self_cos_chunk [H_kv])}
         self._k_summary_cache: Dict[int, Dict[int, Tuple[torch.Tensor, torch.Tensor]]] = {}
 
         # Stage-1 selection stats
@@ -523,28 +960,47 @@ class PostRoPEPolicy(SparsePolicy):
         """Mean-pool `[T, H, D]` into `[G, H, D]` with partial-tail support."""
         if x.numel() == 0:
             return x.new_empty((0, x.shape[1], x.shape[2]), dtype=torch.float32)
+        full_groups, tail = divmod(x.shape[0], chunk_size)
+        x_float = x.float()
+        if tail == 0:
+            return x_float.view(full_groups, chunk_size, x.shape[1], x.shape[2]).mean(dim=1)
 
         groups = []
-        for start in range(0, x.shape[0], chunk_size):
-            part = x[start : start + chunk_size].float()
-            groups.append(part.mean(dim=0))
-        return torch.stack(groups, dim=0)
+        if full_groups > 0:
+            groups.append(
+                x_float[: full_groups * chunk_size]
+                .view(full_groups, chunk_size, x.shape[1], x.shape[2])
+                .mean(dim=1)
+            )
+        groups.append(x_float[full_groups * chunk_size :].mean(dim=0, keepdim=True))
+        return torch.cat(groups, dim=0)
 
     @staticmethod
     def _compute_self_cosine(x: torch.Tensor, chunk_size: int) -> torch.Tensor:
         """Compute SpargeAttn-style self-cosine per pooled group and head."""
         if x.numel() == 0:
             return x.new_empty((0, x.shape[1]), dtype=torch.float32)
-
-        values = []
-        for start in range(0, x.shape[0], chunk_size):
-            part = x[start : start + chunk_size].float()  # [t, h, d]
-            part = part.permute(1, 0, 2).contiguous()  # [h, t, d]
+        # Mean pairwise cosine equals ||mean(normalized_tokens)||^2, which is
+        # mathematically identical to averaging the full Gram matrix while
+        # avoiding the explicit O(T^2) construction.
+        def reduce_groups(part: torch.Tensor) -> torch.Tensor:
+            part = part.permute(0, 2, 1, 3).contiguous()  # [G, H, T, D]
             norm = part.norm(dim=-1, keepdim=True).clamp_min_(1e-6)
-            part = part / norm
-            gram = torch.matmul(part, part.transpose(1, 2))
-            values.append(gram.mean(dim=(1, 2)))
-        return torch.stack(values, dim=0)  # [g, h]
+            normalized = part / norm
+            mean_vec = normalized.mean(dim=2)
+            return (mean_vec * mean_vec).sum(dim=-1)
+
+        full_groups, tail = divmod(x.shape[0], chunk_size)
+        x_float = x.float()
+        values = []
+        if full_groups > 0:
+            full = x_float[: full_groups * chunk_size].view(
+                full_groups, chunk_size, x.shape[1], x.shape[2]
+            )
+            values.append(reduce_groups(full))
+        if tail > 0:
+            values.append(reduce_groups(x_float[full_groups * chunk_size :].unsqueeze(0)))
+        return torch.cat(values, dim=0)
 
     def _fold_q_heads(self, pooled_q: torch.Tensor) -> torch.Tensor:
         """Map query heads `[G, H_q, D]` to KV-head groups `[G, H_kv, D]`."""
@@ -616,6 +1072,7 @@ class PostRoPEPolicy(SparsePolicy):
         layer_id: int,
         available_blocks: List[int],
         q: torch.Tensor,
+        record_info: bool,
     ) -> List[int]:
         """Run stage-1 chunk selection fully on GPU.
 
@@ -633,12 +1090,13 @@ class PostRoPEPolicy(SparsePolicy):
         missing = [bid for bid in available_blocks if bid not in layer_cache]
         if missing:
             self._stats_cache_miss_fallbacks += 1
-            self._record_selection_info(
-                available_blocks=len(available_blocks),
-                selected_blocks=len(available_blocks),
-                persistent_blocks=0,
-                top_p_selected_blocks=len(available_blocks),
-            )
+            if record_info:
+                self._record_selection_info(
+                    available_blocks=len(available_blocks),
+                    selected_blocks=len(available_blocks),
+                    persistent_blocks=0,
+                    top_p_selected_blocks=len(available_blocks),
+                )
             logger.warning(
                 "[PostRoPE Sparge] summary cache miss on layer=%s blocks=%s -> fallback to full",
                 layer_id,
@@ -648,12 +1106,13 @@ class PostRoPEPolicy(SparsePolicy):
 
         q_pooled = self._fold_q_heads(self._mean_pool(q, self.ESTIMATE_CHUNK_SIZE)).to(torch.float32)
         if q_pooled.numel() == 0:
-            self._record_selection_info(
-                available_blocks=len(available_blocks),
-                selected_blocks=len(available_blocks),
-                persistent_blocks=0,
-                top_p_selected_blocks=len(available_blocks),
-            )
+            if record_info:
+                self._record_selection_info(
+                    available_blocks=len(available_blocks),
+                    selected_blocks=len(available_blocks),
+                    persistent_blocks=0,
+                    top_p_selected_blocks=len(available_blocks),
+                )
             return available_blocks
 
         theta = self._get_stage1_theta()
@@ -670,10 +1129,8 @@ class PostRoPEPolicy(SparsePolicy):
         chunk_self_cos = []
         for bid in available_blocks:
             pooled_k, self_cos_k = layer_cache[bid]
-            pooled_k_gpu = pooled_k.to(device=device, dtype=torch.float32)
-            self_cos_k_gpu = self_cos_k.to(device=device, dtype=torch.float32)
-            pooled_k_chunks.append(pooled_k_gpu.mean(dim=0))
-            chunk_self_cos.append(self_cos_k_gpu.mean(dim=0))
+            pooled_k_chunks.append(pooled_k.to(device=device, dtype=torch.float32))
+            chunk_self_cos.append(self_cos_k.to(device=device, dtype=torch.float32))
 
         k_chunk = torch.stack(pooled_k_chunks, dim=0)  # [B, H_kv, D]
         k_chunk_self_cos = torch.stack(chunk_self_cos, dim=0)  # [B, H_kv]
@@ -723,9 +1180,18 @@ class PostRoPEPolicy(SparsePolicy):
                 min=1, max=probs_for_sort.shape[-1]
             )
             selectable_idx = selectable.nonzero(as_tuple=True)[0]
-            for local_h, h in enumerate(active_head_idx.tolist()):
-                chosen_local = sorted_local_idx[local_h, : int(num_to_select[local_h].item())]
-                selected_by_head[h, selectable_idx[chosen_local]] = True
+            keep_mask_sorted = (
+                torch.arange(
+                    probs_for_sort.shape[-1], device=device, dtype=num_to_select.dtype
+                ).unsqueeze(0)
+                < num_to_select.unsqueeze(1)
+            )
+            selected_local = torch.zeros_like(probs_for_sort, dtype=torch.bool)
+            selected_local.scatter_(1, sorted_local_idx, keep_mask_sorted)
+
+            active_selected = selected_by_head.index_select(0, active_head_idx)
+            active_selected[:, selectable_idx] |= selected_local
+            selected_by_head.index_copy_(0, active_head_idx, active_selected)
 
         if num_blocks > 0:
             selected_by_head[:, 0] = True  # attention sink / anchor chunk
@@ -741,17 +1207,18 @@ class PostRoPEPolicy(SparsePolicy):
         selected_blocks = [
             bid for bid, keep in zip(available_blocks, selected_chunks.tolist()) if keep
         ]
-        persistent_count = int(persistent_chunks.sum().item())
-        top_p_selected_count = max(0, len(selected_blocks) - persistent_count)
-        self._record_selection_info(
-            available_blocks=len(available_blocks),
-            selected_blocks=len(selected_blocks),
-            persistent_blocks=persistent_count,
-            top_p_selected_blocks=top_p_selected_count,
-            q_persistent_groups=int(q_persistent_groups.sum().item()),
-            q_force_heads=int(q_force_heads.sum().item()),
-            q_force_keep_all=bool(q_force_heads.any().item()),
-        )
+        if record_info:
+            persistent_count = int(persistent_chunks.sum().item())
+            top_p_selected_count = max(0, len(selected_blocks) - persistent_count)
+            self._record_selection_info(
+                available_blocks=len(available_blocks),
+                selected_blocks=len(selected_blocks),
+                persistent_blocks=persistent_count,
+                top_p_selected_blocks=top_p_selected_count,
+                q_persistent_groups=int(q_persistent_groups.sum().item()),
+                q_force_heads=int(q_force_heads.sum().item()),
+                q_force_keep_all=bool(q_force_heads.any().item()),
+            )
         return selected_blocks
 
     # ---------------------------------------------------------------------
@@ -776,9 +1243,14 @@ class PostRoPEPolicy(SparsePolicy):
         if not ctx.is_prefill or not available_blocks:
             selected = available_blocks
         else:
-            selected = self._select_historical_blocks_gpu(ctx.layer_id, available_blocks, q)
+            selected = self._select_historical_blocks_gpu(
+                ctx.layer_id,
+                available_blocks,
+                q,
+                record_info=(ctx.layer_id == 0),
+            )
 
-        if ctx.layer_id == 0:
+        if ctx.layer_id == 0 and os.environ.get("POSTROPE_LOG_SELECTION", "0") == "1":
             info = self._last_selection_info or {
                 "selected_blocks": len(selected),
                 "persistent_blocks": 0,
@@ -885,30 +1357,35 @@ class PostRoPEPolicy(SparsePolicy):
 
         if layer_id == 0:
             self._stats_stage2_num_chunks += 1
-            logger.info(
-                "[PostRoPE Sparge][Stage2] Chunk %s: seq_len=%s, lambda=%.6f, ln(lambda)=%.4f",
-                current_chunk_idx,
-                total_seq_len,
-                lambda_val,
-                ln_lambda,
-            )
+            if os.environ.get("POSTROPE_LOG_STAGE2_CHUNKS", "0") == "1":
+                logger.info(
+                    "[PostRoPE Sparge][Stage2] Chunk %s: seq_len=%s, lambda=%.6f, ln(lambda)=%.4f",
+                    current_chunk_idx,
+                    total_seq_len,
+                    lambda_val,
+                    ln_lambda,
+                )
 
         q_len = q.shape[0]
         num_heads = q.shape[1]
         compute_stream = offload_engine.compute_stream
-        q_input = q.unsqueeze(0).transpose(1, 2).contiguous()
-
+        q_input = q.unsqueeze(0)
         historical_o = None
         historical_lse = None
         historical_m_global = None
 
-        collect_density = layer_id == self.STAGE2_DENSITY_LOG_LAYER
+        collect_density = (
+            os.environ.get("POSTROPE_LOG_STAGE2_DENSITY", "0") == "1"
+            and layer_id == self.STAGE2_DENSITY_LOG_LAYER
+        )
+        collect_stage2_stats = os.environ.get("POSTROPE_COLLECT_STAGE2_STATS", "0") == "1"
         compute_density_sum = 0.0
         per_head_kv_density_list = []
         per_head_compute_density_list = []
         num_density_measurements = 0
 
-        TRITON_BLOCK_M, TRITON_BLOCK_N = 128, 64
+        TRITON_BLOCK_M = int(os.environ.get("POSTROPE_STAGE2_BLOCK_M", "128"))
+        TRITON_BLOCK_N = int(os.environ.get("POSTROPE_STAGE2_BLOCK_N", "64"))
         grid_0 = (q_len + TRITON_BLOCK_M - 1) // TRITON_BLOCK_M
         grid_1 = num_heads
         num_kv_subblocks = kvcache_manager.block_size // TRITON_BLOCK_N
@@ -924,12 +1401,15 @@ class PostRoPEPolicy(SparsePolicy):
             )
 
             if is_causal:
-                for q_idx in range(grid_0):
-                    q_end_pos = (q_idx + 1) * TRITON_BLOCK_M
-                    for kv_idx in range(num_sub):
-                        kv_start_pos = kv_idx * TRITON_BLOCK_N
-                        if kv_start_pos >= q_end_pos:
-                            mask[q_idx, :, kv_idx] = 0
+                q_end = (
+                    (torch.arange(grid_0, device=q.device, dtype=torch.int32) + 1)
+                    * TRITON_BLOCK_M
+                )
+                kv_start = (
+                    torch.arange(num_sub, device=q.device, dtype=torch.int32)
+                    * TRITON_BLOCK_N
+                )
+                mask &= (kv_start.unsqueeze(0) < q_end.unsqueeze(1)).unsqueeze(1)
             return mask
 
         def collect_per_head_kv_density(mask_buf: torch.Tensor) -> torch.Tensor:
@@ -944,28 +1424,66 @@ class PostRoPEPolicy(SparsePolicy):
             load_slots = list(range(offload_engine.num_ring_slots))
             num_slots = len(load_slots)
             num_blocks = len(cpu_block_table)
+            group_size = min(
+                num_slots,
+                max(1, int(os.environ.get("POSTROPE_STAGE2_GROUP_BLOCKS", str(num_slots)))),
+            )
 
             if num_slots > 0:
-                num_preload = min(num_slots, num_blocks)
-                for i in range(num_preload):
-                    offload_engine.load_to_slot_layer(
-                        load_slots[i],
-                        layer_id,
-                        cpu_block_table[i],
-                        chunk_idx=cpu_block_table[i],
-                    )
+                for group_start in range(0, num_blocks, group_size):
+                    group_blocks = cpu_block_table[group_start : group_start + group_size]
+                    group_slots = load_slots[: len(group_blocks)]
 
-                for block_idx in range(num_blocks):
-                    current_slot = load_slots[block_idx % num_slots]
-                    cpu_block_id = cpu_block_table[block_idx]
-                    offload_engine.wait_slot_layer(current_slot)
+                    for slot_idx, cpu_block_id in zip(group_slots, group_blocks):
+                        offload_engine.load_to_slot_layer(
+                            slot_idx,
+                            layer_id,
+                            cpu_block_id,
+                            chunk_idx=cpu_block_id,
+                        )
+
+                    for slot_idx in group_slots:
+                        offload_engine.wait_slot_layer(slot_idx)
 
                     with torch.cuda.stream(compute_stream):
-                        prev_k, prev_v = offload_engine.get_kv_for_slot(current_slot)
-                        k_input = prev_k.transpose(1, 2).contiguous()
-                        v_input = prev_v.transpose(1, 2).contiguous()
+                        if getattr(offload_engine, "is_head_first", False):
+                            k_group = []
+                            v_group = []
+                            for slot_idx in group_slots:
+                                prev_k, prev_v = offload_engine.get_kv_for_slot(slot_idx)
+                                k_group.append(prev_k)
+                                v_group.append(prev_v)
+                            k_input = (
+                                k_group[0]
+                                if len(k_group) == 1
+                                else torch.cat(k_group, dim=1)
+                            )
+                            v_input = (
+                                v_group[0]
+                                if len(v_group) == 1
+                                else torch.cat(v_group, dim=1)
+                            )
+                        else:
+                            k_input = offload_engine.k_cache_gpu[: len(group_slots)].reshape(
+                                1,
+                                len(group_slots) * kvcache_manager.block_size,
+                                offload_engine.num_kv_heads,
+                                offload_engine.head_dim,
+                            )
+                            v_input = offload_engine.v_cache_gpu[: len(group_slots)].reshape(
+                                1,
+                                len(group_slots) * kvcache_manager.block_size,
+                                offload_engine.num_kv_heads,
+                                offload_engine.head_dim,
+                            )
 
-                        mask_buffer = get_mask_buffer(is_causal=False)
+                        mask_buffer = (
+                            get_mask_buffer(
+                                is_causal=False, kv_len_override=k_input.shape[1]
+                            )
+                            if (collect_stage2_stats or collect_density)
+                            else None
+                        )
                         out, lse, m_global_out = _postrope_stage2_chunked_prefill(
                             q=q_input,
                             k=k_input,
@@ -974,17 +1492,13 @@ class PostRoPEPolicy(SparsePolicy):
                             m_global_in=historical_m_global,
                             mask_buffer=mask_buffer,
                         )
-                        self._record_stage2_mask(mask_buffer)
+                        if collect_stage2_stats:
+                            self._record_stage2_mask(mask_buffer)
 
-                        if historical_m_global is None:
-                            historical_m_global = m_global_out
-                        else:
-                            historical_m_global = torch.maximum(
-                                historical_m_global, m_global_out
-                            )
+                        historical_m_global = m_global_out
 
-                        compute_stream.synchronize()
                         if collect_density:
+                            compute_stream.synchronize()
                             compute_density_sum += mask_buffer.float().mean().item()
                             per_head_kv_density_list.append(
                                 collect_per_head_kv_density(mask_buffer).cpu()
@@ -994,7 +1508,10 @@ class PostRoPEPolicy(SparsePolicy):
                             )
                             num_density_measurements += 1
 
-                        block_o = out.transpose(1, 2).contiguous()
+                        for slot_idx in group_slots:
+                            offload_engine.record_slot_compute_done(slot_idx)
+
+                        block_o = out
                         block_lse = lse
                         if historical_o is None:
                             historical_o, historical_lse = block_o, block_lse
@@ -1003,24 +1520,17 @@ class PostRoPEPolicy(SparsePolicy):
                                 historical_o, historical_lse, block_o, block_lse
                             )
 
-                    offload_engine.record_slot_compute_done(current_slot)
-
-                    next_block_idx = block_idx + num_slots
-                    if next_block_idx < num_blocks:
-                        offload_engine.load_to_slot_layer(
-                            load_slots[next_block_idx % num_slots],
-                            layer_id,
-                            cpu_block_table[next_block_idx],
-                            chunk_idx=cpu_block_table[next_block_idx],
-                        )
-
         with torch.cuda.stream(compute_stream):
             k_curr, v_curr = offload_engine.get_prefill_buffer_slice(layer_id, num_tokens)
-            k_curr_input = k_curr.transpose(1, 2).contiguous()
-            v_curr_input = v_curr.transpose(1, 2).contiguous()
+            k_curr_input = k_curr
+            v_curr_input = v_curr
 
             kv_offset = len(selected_blocks) * kvcache_manager.block_size
-            curr_mask_buffer = get_mask_buffer(is_causal=False, kv_len_override=num_tokens)
+            curr_mask_buffer = (
+                get_mask_buffer(is_causal=False, kv_len_override=num_tokens)
+                if (collect_stage2_stats or collect_density)
+                else None
+            )
             out_curr, lse_curr, _ = _postrope_stage2_chunked_prefill(
                 q=q_input,
                 k=k_curr_input,
@@ -1031,10 +1541,11 @@ class PostRoPEPolicy(SparsePolicy):
                 is_causal=True,
                 kv_offset=kv_offset,
             )
-            self._record_stage2_mask(curr_mask_buffer)
+            if collect_stage2_stats:
+                self._record_stage2_mask(curr_mask_buffer)
 
-            compute_stream.synchronize()
             if collect_density:
+                compute_stream.synchronize()
                 compute_density_sum += curr_mask_buffer.float().mean().item()
                 per_head_kv_density_list.append(
                     collect_per_head_kv_density(curr_mask_buffer).cpu()
@@ -1044,7 +1555,7 @@ class PostRoPEPolicy(SparsePolicy):
                 )
                 num_density_measurements += 1
 
-            block_o = out_curr.transpose(1, 2).contiguous()
+            block_o = out_curr
             block_lse = lse_curr
             if historical_o is None:
                 final_o = block_o
@@ -1283,10 +1794,12 @@ class PostRoPEPolicy(SparsePolicy):
             k_block = k_cache[:num_valid_tokens].contiguous()
 
         pooled_k = self._mean_pool(k_block, self.ESTIMATE_CHUNK_SIZE).to(torch.float16)
+        pooled_k_chunk = pooled_k.float().mean(dim=0)
         self_cos_k = self._compute_self_cosine(k_block, self.ESTIMATE_CHUNK_SIZE).to(torch.float32)
+        self_cos_k_chunk = self_cos_k.mean(dim=0)
         self._k_summary_cache.setdefault(layer_id, {})[cpu_block_id] = (
-            pooled_k.detach().clone(),
-            self_cos_k.detach().clone(),
+            pooled_k_chunk.detach(),
+            self_cos_k_chunk.detach(),
         )
 
     def __repr__(self) -> str:

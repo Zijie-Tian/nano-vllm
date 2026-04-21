@@ -49,6 +49,7 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 | [`docs/xattn_density_alignment_verification.md`](docs/xattn_density_alignment_verification.md) | ✅ VERIFIED: GPU-only vs Offload density 对齐验证 (32K 差异 0.37%, 64K 差异 0.09%) |
 | [`docs/xattn_768k_density_benchmark.md`](docs/xattn_768k_density_benchmark.md) | 📊 BENCH: 768K context density 测试，compute=56.95%, comm=100%，聚合效应分析 |
 | [`docs/test_ruler_usage_guide.md`](docs/test_ruler_usage_guide.md) | 📖 GUIDE: test_ruler.py 使用指南，RULER benchmark 测试命令，已验证的命令示例 |
+| [`docs/chunked_prefill_timing_sync_default_off.md`](docs/chunked_prefill_timing_sync_default_off.md) | Notes the default-off `NANOVLLM_CHUNKED_TIMING_SYNC` change, the timer-semantics tradeoff, and the GPU1 5-sample RULER pass validation. |
 | [`docs/ruler_rope_policy_alignment.md`](docs/ruler_rope_policy_alignment.md) | ✅ TEST: FULL / POSTROPE / PREROPE exact-output alignment under offload + chunked prefill on GPU0/GPU1. |
 | [`docs/xattn_offload_profiling_32k.md`](docs/xattn_offload_profiling_32k.md) | 📊 PROFILE: XAttn vs Full 32K nsys 分析，estimate 占 41%，find_blocks 占 37%，compute 仅 21% |
 | [`docs/select_blocks_ring_buffer_pipeline.md`](docs/select_blocks_ring_buffer_pipeline.md) | ⚡ PERF: select_blocks ring buffer pipeline 优化，128K prefill -9.5%，find_blocks -44.8% |

@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 import torch
 import torch.cuda.nvtx
@@ -12,6 +13,7 @@ from nanovllm.utils.context import get_context
 from nanovllm.kvcache.sparse.policy import PolicyContext
 
 logger = logging.getLogger(__name__)
+TIMING_SYNC_ENABLED = os.environ.get("NANOVLLM_CHUNKED_TIMING_SYNC", "0") == "1"
 
 
 class ChunkedPrefillTimer:
@@ -366,9 +368,10 @@ class Attention(nn.Module):
         cpu_block_table = kvcache_manager.get_prefilled_cpu_blocks(seq)
 
         # ---- Phase 1: select_blocks ----
-        torch.cuda.nvtx.range_push("compass_global_sync")
-        torch.cuda.current_stream().synchronize()
-        torch.cuda.nvtx.range_pop()
+        if TIMING_SYNC_ENABLED:
+            torch.cuda.nvtx.range_push("compass_global_sync")
+            torch.cuda.current_stream().synchronize()
+            torch.cuda.nvtx.range_pop()
         t0 = time.time()
 
         num_chunks = current_chunk_idx + 1
@@ -387,7 +390,8 @@ class Attention(nn.Module):
             cpu_block_table, offload_engine, policy_ctx, q, k
         )
 
-        torch.cuda.current_stream().synchronize()
+        if TIMING_SYNC_ENABLED:
+            torch.cuda.current_stream().synchronize()
         t1 = time.time()
 
         # ---- Phase 2: compute_chunked_prefill ----
@@ -405,7 +409,8 @@ class Attention(nn.Module):
             selected_blocks,
         )
 
-        torch.cuda.current_stream().synchronize()
+        if TIMING_SYNC_ENABLED:
+            torch.cuda.current_stream().synchronize()
         t2 = time.time()
 
         # (NVTX pop moved to Attention.forward after offload_prefill_chunk)
