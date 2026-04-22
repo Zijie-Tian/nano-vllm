@@ -107,6 +107,21 @@ When running multiple agent instances on different worktrees, do NOT use `pip in
 PYTHONPATH=/home/tzj/Code/nano-vllm:$PYTHONPATH python <script.py>
 ```
 
+### 4. Image Generation Output Path
+For this repository, any image generated for project work **must** be persisted under the project-local `.codex/generated_images/` directory (current worktree path shown below):
+
+```bash
+/mnt/data/tzj/Code/nano-vllm/.codex/generated_images/
+```
+
+Rules:
+1. Treat global tool output paths (for example `~/.codex/generated_images/...`) as temporary staging only.
+2. Before finishing any image-generation task for this repo, copy or move the selected final image into the repo-local `.codex/generated_images/` directory.
+3. Do not leave project-referenced images only in the global Codex directory.
+4. Do not overwrite an existing image unless the user explicitly asks for replacement; otherwise create a versioned sibling filename.
+5. Always report the final project-local image path in the completion message.
+
+
 ## Configuration & Constraints
 
 | Parameter | Default | Notes |

@@ -242,3 +242,7 @@ notes.md
 Snipaste*
 .ralph-tui/session-meta.json
 .omx/
+# Project-local generated image artifacts
+.codex/generated_images/*
+!.codex/generated_images/.gitkeep
+

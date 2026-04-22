@@ -133,6 +133,7 @@ The architecture consists of 4 core modules:
 
 ### 2.4 Assistant Interaction Rules
 *   **Image Generation**: 在我们的对话中，当提示词涉及到具体的物体、场景概念（例如“反重力”、“科幻设备”等），或者要求“展示”某个画面时，请务必直接调用图像生成工具生成实际的图像。在这些情况下，绝对不要使用 Mermaid.js 或代码块来绘制图表，除非明确在提示词中使用了“流程图”、“架构图”或“Mermaid”等词汇。
+*   **Image Output Path**: 对于本项目内的图片生成任务，最终选定的图片必须落盘到项目本地 `.codex/generated_images/` 目录（当前 worktree 路径：`/mnt/data/tzj/Code/nano-vllm/.codex/generated_images/`）。`~/.codex/generated_images/...` 只可作为临时中转；结束任务前必须复制或移动最终图片到项目目录，并在回复中报告最终项目内路径。除非用户明确要求覆盖，否则必须使用新的版本化文件名。
 *   **Default Rule Scope**: 除非我明确指定，否则以后要求添加的新规则，请默认添加到当前项目的 `GEMINI.md` 中，而不是全局 `~/.gemini/GEMINI.md`。
 *   **Rule File Consolidation**: 所有项目规则 **必须** 直接写在 `GEMINI.md` 中。**禁止** 在 `.agents/rules/` 目录下创建单独的规则文件。`GEMINI.md` 是本项目所有 AI 助手规则的唯一权威来源（Single Source of Truth）。
 

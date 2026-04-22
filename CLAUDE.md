@@ -125,6 +125,22 @@ PYTHONPATH=/home/zijie/Code/nano-vllm:$PYTHONPATH python tests/test_needle.py
 - Code changes take effect immediately (no reinstall needed)
 - Each worktree is completely isolated
 
+## Project Image Output Rule
+
+For this repository, any image generated for project work must be persisted under the project-local `.codex/generated_images/` directory (current worktree path shown below):
+
+```bash
+/mnt/data/tzj/Code/nano-vllm/.codex/generated_images/
+```
+
+Rules:
+1. Treat `~/.codex/generated_images/...` as temporary staging only.
+2. Before finishing an image-generation task, copy or move the selected final image into the repo-local `.codex/generated_images/` directory.
+3. Do not leave project-referenced images only in the global Codex directory.
+4. Do not overwrite an existing image unless the user explicitly asks for replacement; otherwise create a versioned filename.
+5. Always report the final project-local image path.
+
+
 ## Configuration
 
 | Parameter | Default | Notes |
