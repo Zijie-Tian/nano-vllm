@@ -29,6 +29,7 @@ from nanovllm.kvcache.sparse.quest import QuestPolicy, QuestConfig, BlockMetadat
 from nanovllm.kvcache.sparse.xattn_bsa import XAttentionBSAPolicy
 from nanovllm.kvcache.sparse.compass import COMPASSPolicy
 from nanovllm.kvcache.sparse.blasst import BLASSTPolicy
+from nanovllm.kvcache.sparse.qpool import QPoolPolicy
 
 
 def create_sparse_policy(policy_type: SparsePolicyType, **kwargs) -> SparsePolicy:
@@ -94,6 +95,9 @@ def create_sparse_policy(policy_type: SparsePolicyType, **kwargs) -> SparsePolic
             granularity=kwargs.get("granularity", 128),
         )
 
+    elif policy_type == SparsePolicyType.QPOOL:
+        return QPoolPolicy()
+
     else:
         raise ValueError(f"Unknown policy type: {policy_type}")
 
@@ -112,5 +116,6 @@ __all__ = [
     "XAttentionBSAPolicy",
     "COMPASSPolicy",
     "BLASSTPolicy",
+    "QPoolPolicy",
     "create_sparse_policy",
 ]

@@ -17,6 +17,7 @@ class SparsePolicyType(Enum):
     XATTN_BSA = auto()    # XAttention Block Sparse Attention (prefill only, chunked)
     COMPASS = auto()      # COMPASS sparse attention (prefill only, chunked)
     BLASST = auto()       # BLASST sparse attention (prefill only, chunked)
+    QPOOL = auto()        # Query-pooled multi-subblock DMAS sparse attention
     # fmt: on
 
 

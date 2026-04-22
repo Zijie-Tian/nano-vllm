@@ -145,6 +145,7 @@ The architecture consists of 4 core modules:
 | [`docs/architecture_guide.md`](docs/architecture_guide.md) | Core components, CPU offload design, ring buffer. |
 | [`docs/sparse_policy_architecture.md`](docs/sparse_policy_architecture.md) | SparsePolicy abstraction and pipeline modes. |
 | [`docs/rope_policy_design.md`](docs/rope_policy_design.md) | PREROPE / POSTROPE semantic design: RoPE placement, KV-cache persistence, and stream-sync rules. |
+| [`docs/prerope_policy_design.md`](docs/prerope_policy_design.md) | PreRoPE lazy-RoPE policy: pre-RoPE KV cache semantics, amplitude/phase invariants, data flow, and sparse strategy enablement. |
 | [`docs/postrope_sparge_chunked_prefill_design.md`](docs/postrope_sparge_chunked_prefill_design.md) | Current Sparge-style POSTROPE design: independent policy structure, Q/K fix-block adaptation, dense decode, and validated RULER commands/results. |
 | [`docs/sparse_attention_guide.md`](docs/sparse_attention_guide.md) | Block sparse attention methods (XAttention, MInference, etc.). |
 | [`docs/sparse_attention_blasst.md`](docs/sparse_attention_blasst.md) | BLASST sparse attention: dynamic pruning, online softmax thresholding. |
@@ -179,6 +180,8 @@ The architecture consists of 4 core modules:
 | [`docs/compass_tensorized_selection_and_gather.md`](docs/compass_tensorized_selection_and_gather.md) | COMPASS CPU 侧两阶段优化：TensorSelection 替代 PerHeadSubBlockSelection（O(1) tensor reshape，254× 加速）、fancy+boolean indexing 向量化 gather（copy_() 从 320-640 降至 32/chunk）。 |
 | [`docs/compass_l1_spargeattn_alignment.md`](docs/compass_l1_spargeattn_alignment.md) | COMPASS L1 SpargeAttn 对齐：per-Q-block softmax、self-cos masking before softmax、attention sink、per-Q top_p + union。top_p × theta 参数扫描结果（11 组全部 100% NIAH 通过，最高 L1 pruning 20.8%）。 |
 | [`docs/cpu_ops_design.md`](docs/cpu_ops_design.md) | CPU Attention Operators (cpu_ops) 设计文档：VNNI INT8 micro-kernel 架构、qk_rowmax 和 qk_blockmask API 参考、BLASST block-mask 算法映射、模板参数说明、OMP 并行策略、性能数据。 |
+| [`docs/triattention_prefill_extension_design.md`](docs/triattention_prefill_extension_design.md) | TriAttention prefill extension: four independent design schemes (TriHead, TriBand, TriCausal, TriCache) for extending decode TriAttention mechanisms to chunked prefill. |
+| [`docs/prerope_dmas_design.md`](docs/prerope_dmas_design.md) | PREROPE DMAS: Distance-Modulated Amplitude Scoring for sparse prefill using pre-RoPE amplitude/phase invariants with distance-adaptive resolution. |
 
 ---
 

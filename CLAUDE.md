@@ -13,6 +13,7 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 | [`docs/architecture_guide.md`](docs/architecture_guide.md) | Core components, CPU offload system design, ring buffer architecture, stream configuration |
 | [`docs/sparse_policy_architecture.md`](docs/sparse_policy_architecture.md) | SparsePolicy abstraction: prefill/decode delegation, pipeline modes, policy implementations |
 | [`docs/rope_policy_design.md`](docs/rope_policy_design.md) | PREROPE / POSTROPE semantic design, RoPE placement, KV-cache persistence, and stream-sync invariants. |
+| [`docs/prerope_policy_design.md`](docs/prerope_policy_design.md) | PreRoPE lazy-RoPE policy: pre-RoPE KV cache semantics, amplitude/phase invariants, data flow, and sparse strategy enablement. |
 | [`docs/postrope_sparge_chunked_prefill_design.md`](docs/postrope_sparge_chunked_prefill_design.md) | Current Sparge-style POSTROPE design: independent policy structure, Q/K fix-block adaptation, dense decode, and validated RULER commands/results. |
 | [`docs/sparse_policy_implementation_guide.md`](docs/sparse_policy_implementation_guide.md) | How to implement custom SparsePolicy: required methods, hooks, ring buffer pipeline pattern |
 | [`docs/sparse_attention_guide.md`](docs/sparse_attention_guide.md) | Block sparse attention methods (XAttention, FlexPrefill, MInference, AvgPool, Quest), computation flow, algorithms |
@@ -70,6 +71,8 @@ Nano-vLLM is a lightweight vLLM implementation (~1,200 lines) for fast offline L
 | [`docs/ao_cpu_gemm_benchmark.md`](docs/ao_cpu_gemm_benchmark.md) | ao (torchao) CPU GEMM 算子全面扫描：6 个可用算子对比、`_weight_int4pack_mm_for_cpu` 量化方法详解、int4 vs FP32 性能 benchmark、COMPASS 外推分析。 |
 | [`docs/compass_head_first_layout_and_async_staging.md`](docs/compass_head_first_layout_and_async_staging.md) | COMPASS Head-First KV Cache layout eliminating H2D IO amplification, and fully asynchronous multi-staging buffers avoiding CPU blocking overhead. |
 | [`docs/compass_v2_jagged_architecture.md`](docs/compass_v2_jagged_architecture.md) | COMPASS V2 Jagged Memory Architecture: 1D packed buffer mapping, top-p slice gathering, bulk DMA, and custom Triton kernel integration. |
+| [`docs/triattention_prefill_extension_design.md`](docs/triattention_prefill_extension_design.md) | TriAttention prefill extension: four independent design schemes (TriHead, TriBand, TriCausal, TriCache) for extending decode TriAttention mechanisms to chunked prefill. |
+| [`docs/prerope_dmas_design.md`](docs/prerope_dmas_design.md) | PREROPE DMAS: Distance-Modulated Amplitude Scoring for sparse prefill using pre-RoPE amplitude/phase invariants with distance-adaptive resolution. |
 
 ## Rules Index
 
