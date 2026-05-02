@@ -226,6 +226,7 @@ def get_llm(tokens_to_generate):
         metric_to_policy = {
             'full': 'FULL',
             'postrope': 'POSTROPE',    # Explicit post-RoPE baseline policy
+            'qpool': 'QPOOL',          # Query-pooled DMAS sparse attention
             'xattn': 'XATTN_BSA',      # XAttention Block Sparse Attention
             'compass': 'COMPASS',      # COMPASS sparse attention
             'blasst': 'BLASST',        # BLASST sparse attention
