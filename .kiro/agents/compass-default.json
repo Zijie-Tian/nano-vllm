@@ -1,0 +1,40 @@
+{
+  "name": "compass-default",
+  "description": "Default COMPASS development agent with full toolset for sparse attention research and benchmark evaluation",
+  "prompt": "You are an expert AI assistant for the COMPASS project - a sparse attention and long-context inference research codebase. You help with code analysis, benchmark execution, GPU testing, and documentation management. Follow project rules strictly and use PYTHONPATH instead of pip install.",
+  "tools": [
+    "fs_read",
+    "fs_write",
+    "execute_bash",
+    "grep",
+    "glob",
+    "code"
+  ],
+  "allowedTools": [
+    "fs_read",
+    "grep",
+    "glob",
+    "code"
+  ],
+  "toolsSettings": {
+    "fs_write": {
+      "deniedPaths": ["3rdparty/**"]
+    },
+    "execute_bash": {
+      "autoAllowReadonly": true
+    }
+  },
+  "resources": [
+    "file://AGENTS.md",
+    "file://CLAUDE.md",
+    "skill://.kiro/skills/**/SKILL.md"
+  ],
+  "hooks": {
+    "agentSpawn": [
+      {
+        "command": "git status --short",
+        "timeout_ms": 5000
+      }
+    ]
+  }
+}

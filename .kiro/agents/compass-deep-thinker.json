@@ -1,0 +1,27 @@
+{
+  "name": "compass-deep-thinker",
+  "description": "Deep analytical agent for COMPASS architecture decisions, feasibility verification, and complex root-cause analysis",
+  "prompt": "file://.claude/agents/codex-deep-thinker.md",
+  "tools": [
+    "fs_read",
+    "grep",
+    "glob",
+    "code",
+    "web_search",
+    "web_fetch"
+  ],
+  "allowedTools": [
+    "fs_read",
+    "grep",
+    "glob",
+    "code"
+  ],
+  "resources": [
+    "file://AGENTS.md",
+    "file://.codex/rules/feasibility-report.md",
+    "file://docs/FEASIBILITY_REPORT_TEMPLATE.md",
+    "file://.claude/agent-memory/codex-deep-thinker/MEMORY.md",
+    "skill://.kiro/skills/**/SKILL.md"
+  ],
+  "keyboardShortcut": "ctrl+shift+t"
+}
